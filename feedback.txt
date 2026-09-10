@@ -1,0 +1,69 @@
+1. Fondasi Teknis (TypeScript)
+TUI**: Gunakan Ink (React untuk terminal) untuk layar chat utama, dan @clack/prompts untuk wizard onboarding — keduanya ringan dan terasa modern.
+Validasi config**: Pakai zod untuk skema config dan respons provider, supaya error-nya jelas sejak awal, bukan crash di tengah sesi.
+Bundling**: Pakai tsup atau esbuild menjadi satu file, dan lazy-import modul provider/TUI agar startup di bawah 300ms. Pertimbangkan Bun untuk binary tunggal jika ingin distribusi tanpa Node.
+Struktur folder**: Pisahkan core/ (agent loop, konteks), providers/, tools/, commands/, ui/. Setiap slash command adalah satu file yang mendaftarkan name, description, args, dan run() — ini yang nanti dipakai autocomplete secara otomatis.
+
+2. Koneksi Provider yang Tidak Bikin Pemula Nyerah
+Wizard /login atau saat pertama jalan**: Pilih provider dari daftar (Anthropic, OpenAI, Gemini, DeepSeek, Qwen, OpenRouter, Ollama, Custom), tempel API key, CLI langsung tes koneksi dan tampilkan "✓ Terhubung ke qwen3-flash" atau alasan gagalnya.
+Custom provider = OpenAI-compatible**: Cukup minta tiga hal — baseUrl, apiKey, model. Hampir semua provider (Groq, Together, vLLM, LM Studio, Ollama) memakai format ini, jadi satu adapter mencakup 90% kasus.
+Auto-fetch daftar model**: Setelah key valid, panggil /v1/models dan tampilkan pilihan, jangan paksa pengguna mengetik nama model dari ingatan.
+Pesan error yang menerjemahkan**: 401 → "API key salah atau kedaluwarsa", 404 → "Model tidak ditemukan, cek nama atau baseUrl", ECONNREFUSED → "Server lokal belum jalan (misalnya ollama serve)". Sertakan perintah perbaikannya langsung.
+Multi-profil**: Simpan beberapa provider dengan alias (hemat, kuat, lokal) di ~/.namacli/config.json, ganti cepat lewat /model. Profesional bisa menambah via file atau flag --provider, pemula lewat wizard.
+Keamanan key**: Simpan dengan izin file 600, dukung juga env var (NAMACLI_API_KEY) untuk pengguna CI/pro, dan jangan pernah tampilkan key penuh di layar.
+
+3. Slash Command & Autocomplete
+Ketik / langsung muncul popup**: Daftar command + deskripsi singkat, difilter saat mengetik, navigasi panah, Tab/Enter untuk memilih, Esc untuk tutup. Pemula tidak perlu tahu /help dulu.
+Registry tunggal**: Karena setiap command punya metadata, /help, autocomplete, dan dokumentasi README dibangkitkan dari sumber yang sama — tidak pernah tidak sinkron.
+Command inti**: /help, /login, /model, /plan, /compact, /clear, /undo, /cost, /resume, /role, /mode. Cukup ini dulu; tambah lain hanya jika benar-benar dibutuhkan.
+Argumen dengan hint**: Misal mengetik /model  menampilkan daftar profil yang tersedia; /role  menampilkan daftar role. Konsisten di semua command yang punya argumen.
+Petunjuk kontekstual di footer**: Baris kecil seperti / perintah · ↑ riwayat · Ctrl+C batal · ctx 41% — informasi cukup tanpa mengganggu.
+
+4. Role AI yang Konsisten
+System prompt berlapis*: Susun dari (a) *core role CLI — kepribadian, gaya jawaban, aturan keamanan; (b) tool rules — kapan grep sebelum read, edit via search-replace, batas output; (c) AGENT.md proyek — framework, gaya kode, perintah test; (d) mode aktif — plan atau act. Urutan ini tetap agar prompt caching efektif.
+Role bawaan siap pakai**: default (asisten coding umum), reviewer (hanya baca dan beri feedback), teacher (jelaskan tiap langkah, cocok untuk pemula), minimal (jawaban sangat ringkas, hemat token untuk profesional). Ganti lewat /role.
+Role kustom**: Pengguna bisa membuat file di ~/.namacli/roles/nama.md atau .namacli/roles/ di proyek. Frontmatter untuk name dan description, sisanya isi instruksi.
+Jangan bergantung pada model untuk disiplin**: Aturan penting (konfirmasi sebelum rm, batas baris read) ditegakkan di kode CLI, bukan hanya diminta di prompt. Prompt bisa diabaikan model, kode tidak.
+Konsistensi format output**: Sertakan di core role bahwa model wajib menjelaskan singkat sebelum memanggil tool, dan merangkum perubahan di akhir. Ini membuat pengalaman seragam apa pun providernya.
+
+5. Hemat Token (Inti dari Plan Sebelumnya)
+Prompt caching**: System prompt + definisi tool identik di setiap panggilan, ditempatkan di awal; aktifkan cache_control (Anthropic) atau manfaatkan cache otomatis provider lain.
+Batasi output tool**: Maksimal ~200 baris / 8k karakter per hasil, sisanya ke file temp. glob/grep otomatis melewati node_modules, dist, .git, dan file biner.
+Auto-compact di ~65% konteks**: Rangkum riwayat lama menjadi satu blok "state": file yang diubah, keputusan, tugas tersisa. Tampilkan notifikasi satu baris saat terjadi.
+Pruning tool result lama**: Setelah 10–15 giliran, ganti isi hasil tool dengan ringkasan satu baris.
+Edit search-replace, bukan tulis ulang file**: Menghemat output token sekaligus mengurangi risiko merusak kode.
+Deteksi loop**: Tool yang sama dengan argumen sama dipanggil >2 kali → hentikan dan tanya pengguna.
+
+6. Alur Kerja & Pengaman
+Plan mode (/plan)**: Model hanya boleh membaca dan mengusulkan langkah; eksekusi setelah disetujui. Memotong siklus coba-gagal yang mahal.
+/undo berbasis git**: Snapshot otomatis (stash/commit di ref tersembunyi) sebelum tiap perubahan file, sehingga pemula bisa membatalkan tanpa paham git.
+Konfirmasi aksi berisiko**: rm, git push, perintah yang menyentuh di luar direktori proyek, dan write ke file baru — tampilkan ringkasan/diff dulu. Profesional bisa mematikan lewat --yes atau setting autoApprove.
+Sub-task konteks bersih**: Tugas eksplorasi luas dijalankan di sesi anak dan hanya ringkasannya kembali ke sesi utama.
+
+7. Dua Mode Pengguna Tanpa Dua Aplikasi
+Mode beginner (default saat pertama install)**: Role teacher, konfirmasi aktif untuk semua aksi, tips kontekstual muncul, /cost dalam rupiah/dolar, preset model bernama (hemat/seimbang/kuat).
+Mode pro**: Role minimal, konfirmasi hanya untuk aksi destruktif, tips dimatikan, output usage ringkas, dukungan flag CLI (--provider, --role, --plain, --yes) dan mode non-interaktif untuk CI atau pipe.
+Ganti kapan saja lewat /mode**: Sama-sama memakai engine yang sama; yang berbeda hanya default dan seberapa banyak "pegangan tangan".
+Transparansi token di kedua mode**: Baris usage setelah tiap respons (↑ 3.2k ↓ 0.8k · cache 92% · ctx 41%) dan peringatan proaktif saat konteks lewat 50%.
+
+8. Urutan Eksekusi
+Minggu 1**: Registry command + autocomplete /, wizard /login dengan custom provider OpenAI-compatible dan tes koneksi, prompt caching, truncate output tool.
+Minggu 2**: System prompt berlapis + role bawaan + /role, .gitignore awareness, panel usage per giliran, /undo berbasis git.
+Minggu 3**: Auto-compact, pruning, deteksi loop, plan mode, AGENT.md, /mode beginner/pro.
+Minggu 4**: Sub-task terisolasi, /resume, --plain dan mode non-interaktif, optimasi startup, README yang dibangkitkan dari registry command.
+
+Contoh bentuk config yang mencakup provider kustom, profil, dan role — supaya kamu punya gambaran targetnya:
+
+{
+  "mode": "beginner",
+  "defaultProfile": "hemat",
+  "profiles": {
+    "hemat": { "provider": "openai-compatible", "baseUrl": "https://api.example.com/v1", "model": "qwen3-flash", "apiKeyEnv": "QWEN_API_KEY" },
+    "kuat":  { "provider": "anthropic", "model": "claude-fable-5.1" },
+    "lokal": { "provider": "openai-compatible", "baseUrl": "http://localhost:11434/v1", "model": "qwen2.5-coder" }
+  },
+  "role": "teacher",
+  "autoCompactAt": 0.65,
+  "toolOutputLimit": { "lines": 200, "chars": 8000 }
+}
+

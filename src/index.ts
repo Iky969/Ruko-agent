@@ -2,27 +2,31 @@
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { Agent } from './agent/agent.js';
-import { createProvider } from './agent/llm.js';
+import { createProvider, OpenAiCompatibleProvider } from './agent/llm.js';
 import { Confirmer, guardedExecute } from './core/approval.js';
-import { defaultConfigPath, loadConfig } from './core/config.js';
+import { defaultConfigPath, loadResolvedConfig, saveConfig } from './core/config.js';
 import { Context } from './core/context.js';
 import { SystemLoop } from './core/loop.js';
 import { summarizeLog } from './core/summarizer.js';
+import { needsSetup, runSetupWizard } from './core/wizard.js';
 
 const USAGE = `Ruko — AI Coding Agent CLI
 
 Usage:
-  ruko                      Mulai system loop interaktif
+  ruko                      Mulai system loop interaktif (wizard setup jika belum ada API key)
   ruko --exec "<cmd>"       Jalankan satu perintah shell (output di-summarize)
   ruko --exec "<cmd>" --yes Jalankan tanpa konfirmasi approval
   ruko --summarize "<txt>"  Demo Log Summarizer pada teks arbitrer
   ruko --help               Bantuan ini
   ruko --version            Versi
 
-Environment:
-  OPENAI_API_KEY   Aktifkan LLM mode (backend OpenAI-compatible)
+Konfigurasi (disimpan ke .ruko/config.json — tanpa export manual):
+  /config setup             Jalankan wizard API Key / Base URL / Model dari REPL
+
+Environment (opsional, config file lebih prioritas):
+  OPENAI_API_KEY   API key backend OpenAI-compatible
   OPENAI_BASE_URL  Ganti base URL (mis. http://localhost:11434/v1 untuk Ollama)
-  AGENT_MODEL      Model default (default gpt-4o-mini)
+  AGENT_MODEL      Model default
   RUKO_CONFIG      Path config (default .ruko/config.json)
   RUKO_YOLO_MODE=1 Bypass persetujuan perintah berisiko`;
 
@@ -52,7 +56,7 @@ function makeTtyConfirmer(): Confirmer {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const config = loadConfig();
+  const config = loadResolvedConfig();
 
   if (args.includes('-h') || args.includes('--help')) {
     console.log(USAGE);
@@ -98,10 +102,26 @@ async function main(): Promise<void> {
   }
 
   // Interactive mode.
+  const configPath = defaultConfigPath();
+
+  // First-time setup: wizard when no API key is available yet (TTY only),
+  // with a live connection test before saving (§2).
+  if (process.stdin.isTTY && needsSetup(config.apiKey)) {
+    const setup = await runSetupWizard(async (r) =>
+      new OpenAiCompatibleProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model })
+        .testConnection(),
+    );
+    if (setup) {
+      Object.assign(config, setup);
+      saveConfig(config, configPath);
+      console.log('✔ Konfigurasi disimpan ke .ruko/config.json — LLM mode aktif.');
+    }
+  }
+
   const ctx = new Context(config);
-  const llm = createProvider(config.model);
+  const llm = createProvider(config);
   const agent = new Agent(ctx, llm, config);
-  const loop = new SystemLoop(ctx, agent, config, defaultConfigPath());
+  const loop = new SystemLoop(ctx, agent, config, configPath);
   loop.start();
 }
 

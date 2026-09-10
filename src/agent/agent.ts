@@ -1,30 +1,22 @@
 import { Confirmer, guardedExecute } from '../core/approval.js';
 import { Context } from '../core/context.js';
+import { createSpinner, RevealFilter } from '../core/ui.js';
 import { AgentConfig, ContextMessage } from '../types.js';
 import { LLMProvider } from './llm.js';
-import { parseToolCalls, runToolCall, stripToolBlocks } from './tools.js';
+import { allRoles, buildSystemPrompt, getBuiltInRole, readProjectAgentDoc, RoleDef } from './roles.js';
+import { parseToolCalls, runToolCall, stripToolBlocks, ToolCall } from './tools.js';
 
 /** Safety cap on how many tool iterations one instruction may trigger. */
 const MAX_TOOL_ITERATIONS = 6;
 
-/**
- * System prompt for the AI backend. The backtick blocks instruct the model
- * how to request shell execution through the tool protocol.
- */
-const SYSTEM_PROMPT =
-  'You are an AI coding agent CLI running on the user\'s machine. ' +
-  'You help with software engineering tasks by reading files and executing terminal commands.\n\n' +
-  'Rules:\n' +
-  '- To run a shell command, reply with a single fenced block:\n' +
-  '```tool\n{"tool": "exec", "command": "<command>", "cwd": null, "timeoutMs": 30000}\n```\n' +
-  '- To read a text file (numbered lines, paginated), reply with:\n' +
-  '```tool\n{"tool": "read_file", "path": "<file>", "offset": 1, "limit": 200}\n```\n' +
-  '  Use offset/limit to page through large files; the result reports the total line count.\n' +
-  '- Prefer read_file over cat/head/tail; use exec for everything else.\n' +
-  '- After receiving the tool result, either run another tool or answer in plain text.\n' +
-  '- Large command output is summarized with [... TRUNCATED ...] markers; work with what remains and re-run a narrower command if needed.\n' +
-  '- Prefer safe, non-destructive commands. Never run git push unless the user asks.\n' +
-  '- Keep replies concise: quote key log lines (errors, exit codes) and explain what they mean.\n';
+/** §5.35 — same tool+args invoked more than this many times = likely loop. */
+const LOOP_REPEAT_LIMIT = 2;
+
+/** Per-instruction token-ish usage snapshot (chars, provider-agnostic). */
+export interface TurnUsage {
+  promptChars: number;
+  completionChars: number;
+}
 
 /**
  * Orchestrates user instructions.
@@ -34,9 +26,19 @@ const SYSTEM_PROMPT =
  *    everything else is acknowledged and stored in context.
  *  - LLM mode: sends the instruction plus context history to the backend and
  *    runs the tool loop (exec → observe → decide) until the model answers.
+ *
+ * Cross-cutting guarantees enforced in CODE (not prompt): plan-mode tool
+ * blocking (§6), repeat-call loop detection (§5), tool-output char cap (§5).
  */
 export class Agent {
   private confirm: Confirmer | null = null;
+  /** True when the last LLM reply was already printed live to stdout. */
+  lastResponseStreamed = false;
+  /** Usage of the most recent handled instruction (for the per-turn line). */
+  lastUsage: TurnUsage | null = null;
+  /** Plan mode toggle — enforced at the tool layer, not just in the prompt. */
+  planMode = false;
+  private callCounts = new Map<string, number>();
 
   constructor(
     private readonly ctx: Context,
@@ -49,7 +51,7 @@ export class Agent {
 
   /** Replaces the approval prompt hook (wired by the loop once stdin is open). */
   setConfirm(confirm: Confirmer | null): void {
-    this.confirm = confirm;
+    this.confirm = confirm ?? null;
   }
 
   /** The LLM backend in use (exposed so the loop can report status). */
@@ -62,8 +64,30 @@ export class Agent {
     return this.llmProvider.isConfigured;
   }
 
+  /** Active role (built-in or custom file), resolved from config (§4). */
+  activeRole(): RoleDef {
+    const name = this.config.role ?? 'default';
+    return (
+      allRoles().find((r) => r.name === name) ??
+      getBuiltInRole('default') ??
+      { name: 'default', description: '', prompt: '' }
+    );
+  }
+
+  /** Layered system prompt: identity + tools + role + AGENT.md + mode (§4). */
+  systemPrompt(): string {
+    return buildSystemPrompt({
+      role: this.activeRole(),
+      planMode: this.planMode,
+      mode: this.config.mode ?? 'beginner',
+      agentDoc: readAgentDocSafe(),
+    });
+  }
+
   /** Returns the assistant's textual response ('' when nothing to say). */
   async handleInstruction(instruction: string): Promise<string> {
+    this.callCounts.clear();
+    this.lastUsage = null;
     return this.llmProvider.isConfigured
       ? this.runWithLlm(instruction)
       : this.runManual(instruction);
@@ -92,30 +116,65 @@ export class Agent {
     ].join('\n');
   }
 
-  /** LLM mode: agent loop with tool calls. */
+  /** LLM mode: agent loop with tool calls, streaming the visible reply. */
   private async runWithLlm(instruction: string): Promise<string> {
     const history = this.ctx.window(this.config.maxContextChars);
     const messages: ContextMessage[] = [
-      { role: 'system', content: SYSTEM_PROMPT, timestamp: '' },
+      { role: 'system', content: this.systemPrompt(), timestamp: '' },
       ...history,
       { role: 'user', content: instruction, timestamp: '' },
     ];
+    const usage: TurnUsage = { promptChars: 0, completionChars: 0 };
+    this.lastUsage = usage;
 
+    this.lastResponseStreamed = false;
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i += 1) {
-      const raw = await this.llmProvider.chat(messages);
+      usage.promptChars += messages.reduce((s, m) => s + m.content.length, 0);
+      let iterStreamed = false;
+      const spinner = createSpinner('Thinking');
+      const reveal = new RevealFilter((text) => {
+        spinner.stop();
+        iterStreamed = true;
+        process.stdout.write(text);
+      });
+      let raw: string;
+      try {
+        raw = await this.llmProvider.chat(messages, {
+          onToken: (token) => reveal.feed(token),
+        });
+      } finally {
+        reveal.end();
+        spinner.stop();
+      }
+      usage.completionChars += raw.length;
       const calls = parseToolCalls(raw);
       if (calls.length === 0) {
-        return stripToolBlocks(raw) || '(no response)';
+        const text = stripToolBlocks(raw) || '(no response)';
+        if (iterStreamed) process.stdout.write('\n');
+        this.lastResponseStreamed = iterStreamed;
+        return text;
       }
 
+      // Text streamed before a tool call needs a line break before the logs.
+      if (iterStreamed) process.stdout.write('\n');
       const text = stripToolBlocks(raw);
       if (text) {
         messages.push({ role: 'assistant', content: text, timestamp: '' });
       }
       for (const call of calls) {
+        // §5: loop breaker — identical tool call repeated is a stuck model.
+        if (this.seenRepeat(call)) {
+          return (
+            `[deteksi loop] tool "${call.tool}" dengan argumen sama sudah dipanggil ` +
+            `> ${LOOP_REPEAT_LIMIT}× — eksekusi dihentikan. Ulangi dengan instruksi lain, ` +
+            `atau jalankan manual lewat /exec.`
+          );
+        }
         const result = await runToolCall(call, {
           confirm: this.confirm,
           config: this.config,
+          onLog: (line) => console.log(line),
+          planMode: this.planMode,
         });
         messages.push({
           role: 'tool',
@@ -126,5 +185,23 @@ export class Agent {
     }
 
     return '[agent] reached max tool iterations without a final answer; stopping.';
+  }
+
+  /** Counts tool+args signatures; true when this call crossed the repeat cap. */
+  private seenRepeat(call: ToolCall): boolean {
+    const { tool, ...rest } = call;
+    const sig = `${tool}:${JSON.stringify(rest)}`;
+    const n = (this.callCounts.get(sig) ?? 0) + 1;
+    this.callCounts.set(sig, n);
+    return n > LOOP_REPEAT_LIMIT;
+  }
+}
+
+/** AGENT.md discovery, isolated for error-safety in the hot loop. */
+function readAgentDocSafe(): string | null {
+  try {
+    return readProjectAgentDoc();
+  } catch {
+    return null;
   }
 }

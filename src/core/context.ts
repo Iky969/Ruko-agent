@@ -57,9 +57,18 @@ export class Context {
    * history already fits or cannot be compressed further).
    */
   compress(keepLast = 6): number {
+    return this.compressTo(this.config.maxContextChars, keepLast);
+  }
+
+  /** Forced compaction (`/compact`): folds toward 65% of the budget (§5). */
+  compressNow(keepLast = 4): number {
+    return this.compressTo(Math.floor(this.config.maxContextChars * 0.65), keepLast);
+  }
+
+  private compressTo(targetChars: number, keepLast: number): number {
     const before = this.totalChars;
     const result = compressHistory(this.messages, {
-      targetChars: this.config.maxContextChars,
+      targetChars,
       keepLast,
       maxPerMessageChars: 200,
     });
