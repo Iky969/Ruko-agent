@@ -1,0 +1,31 @@
+{
+  "name": "ruko",
+  "version": "0.2.0",
+  "description": "Ruko — AI Coding Agent CLI: system loop, log summarizer, approval gate, context compression, and session persistence in Node.js/TypeScript.",
+  "type": "module",
+  "bin": {
+    "ruko": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test \"dist/tests/*.test.js\""
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "cli",
+    "agent",
+    "ai",
+    "terminal",
+    "coding-agent"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}
