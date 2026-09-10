@@ -15,7 +15,7 @@ Mulai cepat: lihat **Instalasi & Menjalankan** di bawah — detail cara kerja ad
 ### Dari repository ini
 
 ```bash
-git clone <url-repo-ini>.git && cd cli-agent
+git clone https://github.com/Iky969/Ruko-agent.git && cd Ruko-agent
 npm install          # devDependencies saja (TypeScript)
 npm run build        # compile src/ → dist/
 npm start            # = node dist/index.js — mulai REPL Ruko
