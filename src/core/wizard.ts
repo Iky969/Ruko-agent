@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline/promises';
 import { dim, whiteBright, bgBlue, green, red, yellow, bold } from './ui.js';
-import { DEFAULT_BASE_URL, DEFAULT_MODEL } from '../agent/llm.js';
+import { missingConfigFields } from '../agent/llm.js';
+import { createLineEditor } from './tui.js';
 
 /**
  * Interactive first-time setup wizard.
@@ -26,18 +27,34 @@ export function setupBanner(): string {
 }
 
 /**
- * True when no usable API key exists yet in the config file or environment
- * (Base URL and model always have sane defaults, so they never trigger it).
+ * True when any of apiKey/baseUrl/model is still missing after config-file and
+ * env resolution. Ruko has no built-in provider default, so a first launch
+ * without all three opens the wizard (§1).
  */
-export function needsSetup(apiKey?: string): boolean {
-  return !((apiKey ?? '').trim() || (process.env.OPENAI_API_KEY ?? '').trim());
+export function needsSetup(cfg: { apiKey?: string; baseUrl?: string; model?: string }): boolean {
+  return missingConfigFields(cfg).length > 0;
 }
 
 /**
- * Runs the wizard against a fresh readline pair (used at first launch).
- * Ctrl+C / EOF aborts setup (returns null) without writing anything.
+ * Runs the wizard at first launch. On a TTY the raw-mode editor is used so the
+ * API key can be masked (§5) and a cancelled line resolves to null. Piped input
+ * falls back to node:readline (no masking possible there).
  */
 export async function runSetupWizard(probe?: ConnectionProbe): Promise<SetupResult | null> {
+  if (process.stdin.isTTY) {
+    const editor = createLineEditor();
+    try {
+      return await promptSetup(
+        {
+          question: async (q) => (await editor.readLine({ prompt: q })) ?? '',
+          readSecret: async (q) => (await editor.readLine({ prompt: q, mask: true })) ?? '',
+        },
+        probe ? { probe } : {},
+      );
+    } finally {
+      editor.close();
+    }
+  }
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     return await promptSetup(rl, probe ? { probe } : {});
@@ -50,11 +67,22 @@ export interface SetupOptions {
   probe?: ConnectionProbe;
 }
 
+/**
+ * Input surface the wizard needs. `readSecret` masks typed characters (§5);
+ * when the host has no masking support it falls back to `question`.
+ */
+export interface SetupIo {
+  question: (q: string) => Promise<string>;
+  readSecret?: (q: string) => Promise<string>;
+}
+
 /** The prompts themselves; shared by first-launch, `/login` and `/config setup`. */
 export async function promptSetup(
-  rl: { question: (q: string) => Promise<string> },
+  io: SetupIo,
   options: SetupOptions = {},
 ): Promise<SetupResult | null> {
+  const rl = io;
+  const readSecret = io.readSecret ?? io.question;
   console.log('');
   console.log(setupBanner());
   console.log(dim('  Konfigurasi disimpan ke .ruko/config.json (izin 600) — tanpa export manual.'));
@@ -62,7 +90,8 @@ export async function promptSetup(
 
   let apiKey: string;
   try {
-    apiKey = (await rl.question(`${green('  API Key: ')}`)).trim();
+    // Masked input: the key never appears in plain text on screen (§5).
+    apiKey = (await readSecret(`${green('  API Key: ')}`)).trim();
   } catch {
     return null; // Ctrl+C / EOF
   }
@@ -74,18 +103,21 @@ export async function promptSetup(
   let baseUrl = '';
   let model = '';
   try {
-    baseUrl = (await rl.question(
-      `${green(`  Base URL (Default: ${DEFAULT_BASE_URL}): `)}`,
-    )).trim();
-    model = (await rl.question(
-      `${green(`  Model Name (Default: ${DEFAULT_MODEL}): `)}`,
-    )).trim();
+    // Neutral prompts: no example provider is suggested unless the user asks.
+    baseUrl = (await rl.question(`${green('  Base URL: ')}`)).trim();
+    if (!baseUrl) {
+      console.log(dim('  (Base URL wajib diisi — setup dibatalkan.)'));
+      return null;
+    }
+    model = (await rl.question(`${green('  Model Name: ')}`)).trim();
+    if (!model) {
+      console.log(dim('  (Model wajib diisi — setup dibatalkan.)'));
+      return null;
+    }
   } catch {
     return null;
   }
 
-  baseUrl = baseUrl || DEFAULT_BASE_URL;
-  model = model || DEFAULT_MODEL;
   const result: SetupResult = { apiKey, baseUrl, model };
 
   if (options.probe) {
@@ -108,11 +140,11 @@ export async function promptSetup(
       }
       if (/^(c|cob|retry|ulang)$/.test(answer)) {
         try {
-          const newKey = (await rl.question(`${green('  API Key baru: ')}`)).trim();
+          const newKey = (await readSecret(`${green('  API Key baru: ')}`)).trim();
           if (newKey) result.apiKey = newKey;
-          const newUrl = (await rl.question(`${green(`  Base URL (Default: ${result.baseUrl}): `)}`)).trim();
+          const newUrl = (await rl.question(`${green(`  Base URL (sekarang: ${result.baseUrl}): `)}`)).trim();
           if (newUrl) result.baseUrl = newUrl;
-          const newModel = (await rl.question(`${green(`  Model (Default: ${result.model}): `)}`)).trim();
+          const newModel = (await rl.question(`${green(`  Model (sekarang: ${result.model}): `)}`)).trim();
           if (newModel) result.model = newModel;
         } catch {
           return null;

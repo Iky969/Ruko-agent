@@ -7,9 +7,11 @@ import { saveConfig } from './config.js';
 import { AgentConfig } from '../types.js';
 import { Context } from './context.js';
 import { saveSession } from './session.js';
-import { buildStatusBar, buildUsageLine, colorsEnabled, cyan, dim, promptGlyph, renderBox, stripAnsi, yellow } from './ui.js';
+import { createLineEditor, LineEditor, MenuItem } from './tui.js';
+import { buildStatusBar, cyan, dim, promptGlyph, renderBox, stripAnsi, yellow } from './ui.js';
+import { playSplash, SplashInfo } from './splash.js';
 
-/** Prompt line shown under the status bar. */
+/** Prompt line shown under the status bar (placeholder until the user types). */
 const PROMPT_HINT = 'Ask anything, or type / for commands';
 
 function packageVersion(): string {
@@ -24,21 +26,21 @@ function packageVersion(): string {
 /**
  * System Loop — the interactive REPL that receives instructions from the user.
  *
- * Every line of input is either:
- *  - a slash command (e.g. /exec, /help) — dispatched to the command registry
- *    (typing just `/` pops up the command menu);
- *  - a plain instruction — recorded in the conversation context, handed to the
- *    Agent (replies stream to the terminal token-by-token), then the context
- *    is compressed when over budget and the session auto-saved.
+ * On a TTY it drives a raw-mode `LineEditor` (see tui.ts) so the `/` command
+ * menu appears live as an overlay and the prompt placeholder disappears on the
+ * first keystroke. Piped/non-TTY input keeps using node:readline so scripts and
+ * smoke tests stay deterministic.
  *
- * The loop also provides the approval prompt hook (Confirmer) used before any
- * risky shell command runs.
+ * Every line of input is either:
+ *  - a slash command — dispatched to the command registry (`/` opens the menu);
+ *  - a plain instruction — recorded in the conversation context and handed to
+ *    the Agent (replies stream token-by-token), then compressed and saved.
  */
 export class SystemLoop {
   private rl: readline.Interface | null = null;
+  private editor: LineEditor | null = null;
   private running = true;
   private sessionId: string | null = null;
-  private slashMenuShown = false;
 
   constructor(
     private readonly ctx: Context,
@@ -47,27 +49,72 @@ export class SystemLoop {
     private readonly configPath: string,
   ) {}
 
-  /** Starts the loop. Blocks until the user exits (Ctrl+C, /exit, or EOF). */
+  /** Starts the loop. Blocks (TTY: until exit) or wires piped line events. */
   start(): void {
-    const mode = this.agent.isLlmMode ? 'LLM mode' : 'manual mode';
-    console.log(
-      renderBox(`Ruko ${packageVersion()} — AI Coding Agent CLI`, [
-        `mode: ${mode}`,
-        `model: ${this.agent.llm.model}`,
-        dim('Ketik / untuk daftar perintah, Ctrl+C untuk keluar.'),
-      ]),
-    );
+    void this.startAsync();
+  }
 
+  private async startAsync(): Promise<void> {
+    const model = this.agent.llm.model || '(belum diatur — /login)';
+    const provider = this.agent.llm.name;
+    const info: SplashInfo = {
+      title: `Ruko-agent ${packageVersion()}`,
+      version: `version ${packageVersion()} `,
+      tagline: '"Masuk Ruko..."',
+      modelLine: `model: ${model} ──── provider: ${provider}`,
+      hint: 'Ketik / untuk daftar perintah, Ctrl+C untuk keluar.',
+    };
+    await playSplash(info);
+
+    // Wire the approval prompt into the agent now that stdin is available.
+    this.agent.setConfirm(this.makeConfirmer());
+
+    if (process.stdin.isTTY) {
+      this.editor = createLineEditor();
+      // Raw mode swallows Ctrl+C while reading; when it fires while the agent
+      // is working, save the session and leave cleanly instead of hard-killing.
+      process.once('SIGINT', () => {
+        process.stdout.write('\n^C\n');
+        this.stop();
+        process.exit(0);
+      });
+      void this.runInteractive();
+      return;
+    }
+    this.startPipeLoop();
+  }
+
+  /** TTY path: status bar, then a raw-mode line read, repeatedly. */
+  private async runInteractive(): Promise<void> {
+    while (this.running) {
+      process.stdout.write(`${this.statusBarLine()}\n`);
+      const line = await this.editor!.readLine({
+        prompt: promptGlyph(),
+        placeholder: PROMPT_HINT,
+        getMenu: (buffer) => this.slashMenuItems(buffer),
+        // Enter on a lone "/" just closes the overlay — nothing is echoed
+        // (feedback v0.6 #2: help listings must not settle in scrollback).
+        menuOnlyClose: (buffer) => stripAnsi(buffer).trim() === '/',
+      });
+      if (line === null) {
+        this.stop();
+        return;
+      }
+      await this.handleLine(line);
+    }
+  }
+
+  /** Non-TTY path: classic readline over piped stdin (smoke tests, CI). */
+  private startPipeLoop(): void {
     this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     this.rl.setPrompt(this.composePrompt());
     this.rl.prompt();
-    this.wireSlashMenu();
-
-    // Serialize input processing: each line is fully handled (including any
-    // shell execution or LLM round-trip) before the next line is processed.
     let queue: Promise<void> = Promise.resolve();
     this.rl.on('line', (line) => {
-      queue = queue.then(() => this.handleLine(line));
+      queue = queue.then(async () => {
+        await this.handleLine(line);
+        if (this.running) this.refreshPrompt();
+      });
     });
     this.rl.on('SIGINT', () => {
       console.log('\n^C');
@@ -76,63 +123,44 @@ export class SystemLoop {
     this.rl.on('close', () => {
       this.running = false;
     });
-
-    // Wire the approval prompt into the agent now that stdin is open.
-    this.agent.setConfirm(this.makeConfirmer());
   }
 
-  /** Status bar (dark green) + `›` prompt, refreshed before each input. */
-  private composePrompt(): string {
-    const bar = buildStatusBar({
+  /** Dark-green status bar, refreshed before every input (§3/§8). */
+  private statusBarLine(): string {
+    return buildStatusBar({
       model: this.agent.llm.model,
       usedChars: this.ctx.totalChars,
       budgetChars: this.config.maxContextChars,
       role: this.config.role ?? 'default',
       planMode: this.agent.planMode,
-    });
-    return `${bar}\n${promptGlyph()}${dim(PROMPT_HINT)} `;
-  }
-
-  /**
-   * Interactive slash-command recommendations: the moment the user types `/`
-   * as the whole line, print the command list under the prompt. Resets when
-   * the line moves past `/` so a re-typed `/` shows the menu again.
-   */
-  private wireSlashMenu(): void {
-    if (!this.rl || !colorsEnabled()) return;
-    const rl = this.rl;
-    rl.on('keypress', () => {
-      // line reflects the buffer *before* this keypress; recompute after tick.
-      setImmediate(() => {
-        if (!this.rl) return;
-        if (this.rl.line === '/') {
-          if (!this.slashMenuShown) {
-            this.slashMenuShown = true;
-            this.printSlashMenu();
-          }
-        } else if (this.slashMenuShown && !this.rl.line.startsWith('/')) {
-          this.slashMenuShown = false;
-        }
-      });
+      // §8: last turn's token-ish stats ride in the bar, not a separate line.
+      turn: this.agent.lastUsage ?? undefined,
     });
   }
 
-  private printSlashMenu(): void {
-    const items = listCommands().map((c) =>
-      colorsEnabled()
-        ? `${cyan('/' + c.name + (c.hint ? ` ${c.hint}` : ''))}  ${c.help}`
-        : `/${c.name}  ${c.help}`,
-    );
-    // Print the menu below the prompt; the caller re-establishes the prompt
-    // afterwards (handleLine refreshes it; the keypress path lets readline
-    // redraw the in-progress line on the next keystroke).
-    process.stdout.write(`\n${renderBox('Slash commands', items)}\n`);
+  /** Status bar (dark green) + `›` prompt, refreshed before each piped input. */
+  private composePrompt(): string {
+    return `${this.statusBarLine()}\n${promptGlyph()}${dim(PROMPT_HINT)} `;
   }
 
-  /** Stops the loop, saves the session and closes stdin. */
+  /** Live, filtered command overlay for the `/` menu (§4). */
+  private slashMenuItems(buffer: string): MenuItem[] {
+    if (!buffer.startsWith('/') || buffer.includes(' ')) return [];
+    const query = buffer.slice(1).toLowerCase();
+    return listCommands()
+      .filter((c) => c.name.startsWith(query))
+      .map((c) => ({
+        label: `/${c.name}${c.hint ? ` ${c.hint}` : ''}`,
+        detail: c.help,
+        insert: `/${c.name} `,
+      }));
+  }
+
+  /** Stops the loop, saves the session and closes input. */
   private stop(): void {
     this.running = false;
     this.saveSession();
+    this.editor?.close();
     this.rl?.close();
   }
 
@@ -145,46 +173,56 @@ export class SystemLoop {
     ).id;
   }
 
-  /** Approval prompt hook backed by readline (auto-denies when not a TTY). */
+  /** Approval prompt hook (auto-denies when not a TTY). */
   private makeConfirmer(): Confirmer {
-    return (command, reason) => {
-      if (!process.stdin.isTTY || !this.rl) return Promise.resolve(false);
+    return async (command, reason) => {
+      const heading = `⚠ Perintah berisiko (${reason})`;
+      const detail = `  ${command}`;
+      if (this.editor) {
+        for (const line of [heading, detail]) process.stdout.write(`${line}\n`);
+        const answer = await this.editor.readLine({ prompt: `${yellow('  Jalankan? [y/N] ')}` });
+        return answer !== null && /^(y|yes|ya)$/i.test(answer.trim());
+      }
+      if (!process.stdin.isTTY || !this.rl) return false;
       return new Promise((resolve) => {
-        this.rl?.question(
-          `⚠ Perintah berisiko (${reason})\n  ${command}\n  Jalankan? [y/N] `,
-          (answer) => {
-            resolve(/^(y|yes|ya)$/i.test(answer.trim()));
-          },
-        );
+        this.rl?.question(`${heading}\n${detail}\n  Jalankan? [y/N] `, (answer) => {
+          resolve(/^(y|yes|ya)$/i.test(answer.trim()));
+        });
       });
     };
   }
 
   /** Free-text question hook for commands (`/config setup`). */
   private makeAsk(): (question: string) => Promise<string> {
-    return (question) =>
-      new Promise((resolve, reject) => {
+    return async (question) => {
+      if (this.editor) return (await this.editor.readLine({ prompt: question })) ?? '';
+      return new Promise((resolve, reject) => {
         if (!this.rl) {
           reject(new Error('readline tidak aktif'));
           return;
         }
         this.rl.question(question, (answer) => resolve(answer));
       });
+    };
+  }
+
+  /** Masked question hook — used for the API key in `/login` (§5). */
+  private makeAskSecret(): (question: string) => Promise<string> {
+    return async (question) => {
+      if (this.editor) return (await this.editor.readLine({ prompt: question, mask: true })) ?? '';
+      return this.makeAsk()(question);
+    };
   }
 
   private async handleLine(line: string): Promise<void> {
     const input = line.trim();
-    if (!input) {
-      this.slashMenuShown = false;
-      this.refreshPrompt();
-      return;
-    }
+    if (!input) return;
 
     try {
       if (input.startsWith('/')) {
-        this.slashMenuShown = false;
         if (stripAnsi(input) === '/') {
-          this.printSlashMenu();
+          // Non-TTY has no overlay, so keep the one-shot static list there.
+          if (!this.editor) this.printSlashMenu();
         } else {
           await handleCommand(input, {
             ctx: this.ctx,
@@ -193,6 +231,7 @@ export class SystemLoop {
             agent: this.agent,
             confirm: this.makeConfirmer(),
             ask: this.makeAsk(),
+            askSecret: this.makeAskSecret(),
             updateConfig: (patch) => {
               Object.assign(this.config, patch);
               saveConfig(this.config, this.configPath);
@@ -214,23 +253,15 @@ export class SystemLoop {
           // With streaming the text was already revealed live by the agent.
           if (!this.agent.lastResponseStreamed) console.log(response);
         }
-        // §7.47: per-turn transparency line + proactive ctx warning at 50%.
-        const usage = this.agent.lastUsage;
-        if (usage) {
-          console.log(
-            dim(
-              buildUsageLine({
-                promptChars: usage.promptChars,
-                completionChars: usage.completionChars,
-                usedChars: this.ctx.totalChars,
-                budgetChars: this.config.maxContextChars,
-              }),
-            ),
-          );
-          if (this.ctx.totalChars / this.config.maxContextChars > 0.5 && (this.ctx.size & 1) === 0) {
-            // warn at most every other turn to stay quiet (§5 token discipline)
-            console.log(yellow('⚠ konteks > 50% — pertimbangkan /compact-equivalent: riwayat lama otomatis dikompres.'));
-          }
+        // §7.47/§8: per-turn stats moved into the status bar (statusBarLine),
+        // so only the proactive >50% warning stays as an output line.
+        if (
+          this.agent.lastUsage &&
+          this.ctx.totalChars / this.config.maxContextChars > 0.5 &&
+          (this.ctx.size & 1) === 0
+        ) {
+          // warn at most every other turn to stay quiet (§5 token discipline)
+          console.log(yellow('⚠ konteks > 50% — pertimbangkan /compact-equivalent: riwayat lama otomatis dikompres.'));
         }
         const removed = this.ctx.compress();
         if (removed > 0) {
@@ -241,10 +272,12 @@ export class SystemLoop {
     } catch (err) {
       console.error(`[error] ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
 
-    if (this.running) {
-      this.refreshPrompt();
-    }
+  /** Static command list (piped/non-TTY fallback); the TTY path uses an overlay. */
+  private printSlashMenu(): void {
+    const items = listCommands().map((c) => `${cyan('/' + c.name + (c.hint ? ` ${c.hint}` : ''))}  ${c.help}`);
+    process.stdout.write(`${renderBox('Slash commands', items)}\n`);
   }
 
   private refreshPrompt(): void {

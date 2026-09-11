@@ -14,6 +14,21 @@ test('error translator: 401/404/ECONNREFUSED become actionable Indonesian text (
   assert.match(explainProviderError(new Error('semua baik')), /Koneksi gagal: semua baik/);
 });
 
+test('error translator distinguishes 400 / 403 / 429 / 5xx (§6)', () => {
+  assert.match(explainProviderError(new Error('LLM API error 400: bad request')), /400|parameter internal/);
+  assert.match(explainProviderError(new Error('LLM API error 403: forbidden')), /403|izin/);
+  assert.match(
+    explainProviderError(new Error('LLM API error 429: Concurrency limit exceeded')),
+    /429|Rate limit/,
+  );
+  assert.match(explainProviderError(new Error('LLM API error 503: unavailable')), /503|bermasalah/);
+  assert.doesNotMatch(
+    explainProviderError(new Error('LLM API error 400: bad request')),
+    /Koneksi gagal/,
+    '400 must not be generalized as a connect failure',
+  );
+});
+
 function withProfile(p: Record<string, ProviderProfile>, extra: object = {}) {
   return { ...DEFAULT_CONFIG, profiles: p, ...extra } as typeof DEFAULT_CONFIG & Record<string, unknown>;
 }

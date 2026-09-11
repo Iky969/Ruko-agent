@@ -106,7 +106,7 @@ async function main(): Promise<void> {
 
   // First-time setup: wizard when no API key is available yet (TTY only),
   // with a live connection test before saving (§2).
-  if (process.stdin.isTTY && needsSetup(config.apiKey)) {
+  if (process.stdin.isTTY && needsSetup(config)) {
     const setup = await runSetupWizard(async (r) =>
       new OpenAiCompatibleProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model })
         .testConnection(),

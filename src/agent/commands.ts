@@ -30,6 +30,8 @@ export interface CommandEnv {
   confirm: Confirmer;
   /** Asks a free-text question through the loop's readline (for `/config setup`). */
   ask?: (question: string) => Promise<string>;
+  /** Masked free-text question (API key) — falls back to `ask` when absent (§5). */
+  askSecret?: (question: string) => Promise<string>;
   /** Persists a config patch back to .ruko/config.json. */
   updateConfig: (patch: Partial<AgentConfig>) => void;
   handle: LoopHandle;
@@ -225,11 +227,21 @@ const COMMANDS: CommandDef[] = [
       if (wanted === 'beginner' && (current === 'default' || current === 'minimal')) patch.role = 'teacher';
       if (wanted === 'pro' && (current === 'default' || current === 'teacher')) patch.role = 'minimal';
       env.updateConfig(patch);
-      console.log(
-        wanted === 'beginner'
-          ? 'Mode BEGINNER: role teacher, konfirmasi penuh, tips aktif. (pro: /mode pro)'
-          : 'Mode PRO: role minimal, hanya aksi destruktif yang dikonfirmasi. (pemula: /mode beginner)',
-      );
+      if (wanted === 'beginner') {
+        // The beginner guide is rendered by the CLI through the SHARED box
+        // helper (feedback v0.6.1 audit) — never left to the model to draw.
+        console.log(
+          renderBox('Mode BEGINNER aktif', [
+            'Role: teacher — setiap langkah dijelaskan dengan bahasa sederhana.',
+            'Konfirmasi penuh: perintah berisiko selalu ditanya dulu (y/N).',
+            'Tips slash command aktif di setiap jawaban AI.',
+            '',
+            'Mulai cepat: /help daftar perintah · /undo batal edit terakhir · /mode pro untuk ringkas.',
+          ]),
+        );
+      } else {
+        console.log('Mode PRO: role minimal, hanya aksi destruktif yang dikonfirmasi. (pemula: /mode beginner)');
+      }
     },
   },
   {
@@ -415,7 +427,7 @@ const COMMANDS: CommandDef[] = [
 function maskBaseUrl(c: AgentConfig): string {
   if (c.baseUrl && c.baseUrl.trim()) return c.baseUrl;
   const fromEnv = process.env.OPENAI_BASE_URL;
-  return fromEnv ? `${fromEnv} (env)` : '(default: https://api.b.ai/v1)';
+  return fromEnv ? `${fromEnv} (env)` : '(belum diatur — jalankan /login)';
 }
 
 function exampleSessionIds(): string {
@@ -462,7 +474,7 @@ async function runSetupFlow(env: CommandEnv): Promise<void> {
     return new OpenAiCompatibleProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model })
       .testConnection();
   };
-  const result = await promptSetup({ question: env.ask }, { probe });
+  const result = await promptSetup({ question: env.ask, readSecret: env.askSecret }, { probe });
   if (!result) return;
   env.llm.setCredentials?.(result.apiKey, result.baseUrl);
   env.llm.setModel(result.model);

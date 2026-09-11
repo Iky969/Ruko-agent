@@ -88,7 +88,9 @@ export const DEFAULT_CONFIG: AgentConfig = {
   execTimeoutMs: 30_000,
   approvalEnabled: true,
   approvalAllowlist: [],
-  model: 'qwen3.8-flash',
+  // No provider-specific default: the setup wizard requires the user to fill
+  // this in, so Ruko never nudges anyone toward a particular provider (§1).
+  model: '',
   mode: 'beginner',
   role: 'default',
 };

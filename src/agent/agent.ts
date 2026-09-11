@@ -1,6 +1,6 @@
 import { Confirmer, guardedExecute } from '../core/approval.js';
 import { Context } from '../core/context.js';
-import { createSpinner, RevealFilter } from '../core/ui.js';
+import { createSpinner, LineGate, RevealFilter } from '../core/ui.js';
 import { AgentConfig, ContextMessage } from '../types.js';
 import { LLMProvider } from './llm.js';
 import { allRoles, buildSystemPrompt, getBuiltInRole, readProjectAgentDoc, RoleDef } from './roles.js';
@@ -130,13 +130,12 @@ export class Agent {
     this.lastResponseStreamed = false;
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i += 1) {
       usage.promptChars += messages.reduce((s, m) => s + m.content.length, 0);
-      let iterStreamed = false;
       const spinner = createSpinner('Thinking');
-      const reveal = new RevealFilter((text) => {
+      const gate = new LineGate((text) => {
         spinner.stop();
-        iterStreamed = true;
         process.stdout.write(text);
       });
+      const reveal = new RevealFilter((text) => gate.push(text));
       let raw: string;
       try {
         raw = await this.llmProvider.chat(messages, {
@@ -148,6 +147,9 @@ export class Agent {
       }
       usage.completionChars += raw.length;
       const calls = parseToolCalls(raw);
+      // Final answers keep their trailing line; tool iterations drop the dangling
+      // preamble that sat right before the hidden ```tool block (§2).
+      const iterStreamed = gate.finish(calls.length === 0);
       if (calls.length === 0) {
         const text = stripToolBlocks(raw) || '(no response)';
         if (iterStreamed) process.stdout.write('\n');
