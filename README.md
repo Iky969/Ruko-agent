@@ -12,7 +12,7 @@
 ### Cara Cepat (One-liner Installer)
 
 ```bash
-curl -fsSL [https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh](https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh) | bash
+curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh | bash
 ```
 
 ---
