@@ -22,3 +22,8 @@ test('matchCommands filters by prefix for autocomplete (§3.16)', () => {
   assert.deepEqual(m.sort(), ['mode', 'model']);
   assert.equal(matchCommands('/zzz').length, 0);
 });
+
+test('/anim command exists in registry', () => {
+  const names = new Set(listCommands().map((c) => c.name));
+  assert.ok(names.has('anim'), 'missing /anim');
+});

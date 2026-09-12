@@ -4,6 +4,7 @@ import {
   buildStatusBar,
   buildUsageLine,
   colorsEnabled,
+  createSpinner,
   formatK,
   LineGate,
   renderBox,
@@ -174,4 +175,87 @@ test('status bar with busy+queue badge measures within its clamp', () => {
   // The editor clamps to width-1 with truncateVisible; measuring must agree
   // with what terminals actually render (the v0.7 stacking root cause).
   assert.ok(visibleLength(truncateVisible(bar, 40)) <= 40);
+});
+
+// --- v0.8: Pac-Man thinking animation (feedback.txt / pac.cjs) ---
+
+test('createSpinner stops cleanly in non-TTY without throwing', () => {
+  const spinner = createSpinner('Thinking');
+  assert.doesNotThrow(() => spinner.stop());
+});
+
+test('createSpinner pacman renders left-aligned Thinking and cleans up cleanly', () => {
+  const origIsTTY = process.stdout.isTTY;
+  const origColumns = process.stdout.columns;
+  const origWrite = process.stdout.write;
+  const origNoColor = process.env.NO_COLOR;
+  const writes: string[] = [];
+  let spinner: { stop(): void } | undefined;
+
+  try {
+    process.stdout.isTTY = true;
+    process.stdout.columns = 80;
+    delete process.env.NO_COLOR;
+    process.stdout.write = ((chunk: any) => {
+      writes.push(String(chunk));
+      return true;
+    }) as any;
+
+    spinner = createSpinner('Thinking', { pacman: true });
+    assert.ok(writes.length >= 1, 'first frame rendered immediately');
+    const firstFrame = writes[0];
+    assert.ok(firstFrame.startsWith('\r'), 'in-place redraw must start with carriage return');
+    const plain = stripAnsi(firstFrame).replace(/^\r/, '');
+    assert.ok(plain.startsWith('Thinking...'), 'Thinking... must be left-aligned (starts at col 0)');
+    assert.ok(plain.includes('>') || plain.includes('O'), 'Pac-Man character present');
+
+    spinner.stop();
+    const lastWrite = writes[writes.length - 1];
+    assert.ok(lastWrite.startsWith('\r'), 'stop must start with carriage return');
+    assert.ok(lastWrite.endsWith('\r'), 'stop must end with carriage return to clear tail');
+    assert.equal(stripAnsi(lastWrite).trim(), '', 'stop must completely wipe the spinner characters');
+  } finally {
+    spinner?.stop();
+    process.stdout.isTTY = origIsTTY;
+    process.stdout.columns = origColumns;
+    process.stdout.write = origWrite;
+    if (origNoColor !== undefined) process.env.NO_COLOR = origNoColor;
+    else delete process.env.NO_COLOR;
+  }
+});
+
+test('createSpinner plain mode (pacman: false) renders dot spinner', () => {
+  const origIsTTY = process.stdout.isTTY;
+  const origColumns = process.stdout.columns;
+  const origWrite = process.stdout.write;
+  const origNoColor = process.env.NO_COLOR;
+  const writes: string[] = [];
+  let spinner: { stop(): void } | undefined;
+
+  try {
+    process.stdout.isTTY = true;
+    process.stdout.columns = 80;
+    delete process.env.NO_COLOR;
+    process.stdout.write = ((chunk: any) => {
+      writes.push(String(chunk));
+      return true;
+    }) as any;
+
+    spinner = createSpinner('Thinking', { pacman: false });
+    assert.ok(writes.length >= 1);
+    const plain = stripAnsi(writes[0]);
+    assert.ok(plain.includes('▸ Thinking'), 'plain spinner uses dot spinner');
+    assert.ok(!plain.includes('(oo)') && !plain.includes('(OO)'), 'no ghosts in plain spinner');
+
+    spinner.stop();
+    const lastWrite = writes[writes.length - 1];
+    assert.ok(lastWrite.startsWith('\r') && lastWrite.endsWith('\r'));
+  } finally {
+    spinner?.stop();
+    process.stdout.isTTY = origIsTTY;
+    process.stdout.columns = origColumns;
+    process.stdout.write = origWrite;
+    if (origNoColor !== undefined) process.env.NO_COLOR = origNoColor;
+    else delete process.env.NO_COLOR;
+  }
 });

@@ -226,6 +226,7 @@ const COMMANDS: CommandDef[] = [
       const current = env.config.role ?? 'default';
       if (wanted === 'beginner' && (current === 'default' || current === 'minimal')) patch.role = 'teacher';
       if (wanted === 'pro' && (current === 'default' || current === 'teacher')) patch.role = 'minimal';
+      patch.funAnimations = wanted !== 'pro';
       env.updateConfig(patch);
       if (wanted === 'beginner') {
         // The beginner guide is rendered by the CLI through the SHARED box
@@ -235,13 +236,36 @@ const COMMANDS: CommandDef[] = [
             'Role: teacher — setiap langkah dijelaskan dengan bahasa sederhana.',
             'Konfirmasi penuh: perintah berisiko selalu ditanya dulu (y/N).',
             'Tips slash command aktif di setiap jawaban AI.',
+            'Animasi Pac-Man thinking: aktif.',
             '',
             'Mulai cepat: /help daftar perintah · /undo batal edit terakhir · /mode pro untuk ringkas.',
           ]),
         );
       } else {
-        console.log('Mode PRO: role minimal, hanya aksi destruktif yang dikonfirmasi. (pemula: /mode beginner)');
+        console.log('Mode PRO: role minimal, spinner polos cepat, hanya aksi destruktif yang dikonfirmasi. (pemula: /mode beginner)');
       }
+    },
+  },
+  {
+    name: 'anim',
+    help: 'Toggle animasi Pac-Man saat AI berpikir (on/off).',
+    hint: '[on|off]',
+    run: (args, env) => {
+      const arg = args.trim().toLowerCase();
+      let next: boolean;
+      if (arg === 'on' || arg === 'true' || arg === '1') {
+        next = true;
+      } else if (arg === 'off' || arg === 'false' || arg === '0') {
+        next = false;
+      } else if (!arg) {
+        const current = env.config.funAnimations ?? (env.config.mode !== 'pro');
+        next = !current;
+      } else {
+        console.log('Usage: /anim  |  /anim on  |  /anim off');
+        return;
+      }
+      env.updateConfig({ funAnimations: next });
+      console.log(`Animasi Pac-Man ${next ? 'DIAKTIFKAN' : 'DIMATIKAN'}.`);
     },
   },
   {
@@ -368,6 +392,7 @@ const COMMANDS: CommandDef[] = [
             `approvalEnabled: ${c.approvalEnabled}`,
             `approvalAllowlist: ${c.approvalAllowlist.length > 0 ? c.approvalAllowlist.join(', ') : '(kosong)'}`,
             `model: ${c.model}`,
+            `funAnimations: ${c.funAnimations ?? (c.mode !== 'pro')}`,
             `mode: ${c.mode ?? 'beginner'}  |  role: ${c.role ?? 'default'}  |  profile: ${c.activeProfile ?? c.defaultProfile ?? '(none)'}`,
             dim('Ubah: /login (wizard) atau /config set <key> <value>'),
           ]),
@@ -503,6 +528,13 @@ function applyConfigPatch(env: CommandEnv, key: string, value: string): void {
       }
       patch.approvalEnabled = /^(true|1)$/i.test(value);
       break;
+    case 'funAnimations':
+      if (!/^(true|false|1|0)$/i.test(value)) {
+        console.log('Nilai harus true/false');
+        return;
+      }
+      patch.funAnimations = /^(true|1)$/i.test(value);
+      break;
     case 'apiKey':
       patch.apiKey = value;
       env.llm.setCredentials?.(value, env.config.baseUrl ?? '');
@@ -516,7 +548,7 @@ function applyConfigPatch(env: CommandEnv, key: string, value: string): void {
       if (patch.model !== env.llm.model) env.llm.setModel(patch.model);
       break;
     default:
-      console.log(`Key tidak dikenal: ${key} (maxLogChars, maxContextChars, execTimeoutMs, approvalEnabled, apiKey, baseUrl, model)`);
+      console.log(`Key tidak dikenal: ${key} (maxLogChars, maxContextChars, execTimeoutMs, approvalEnabled, funAnimations, apiKey, baseUrl, model)`);
       return;
   }
   env.updateConfig(patch);

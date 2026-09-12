@@ -192,6 +192,7 @@ Registry tunggal di `src/agent/commands.ts` — setiap command mendeklarasikan `
 | `/undo` | Batalkan perubahan file terakhir (snapshot .ruko/undo). |
 | `/role [nama role]` | Lihat/ganti role AI (default, reviewer, teacher, minimal, kustom). |
 | `/mode beginner \| pro` | Mode pengguna: beginner (guide penuh) atau pro (ringkas). |
+| `/anim [on\|off]` | Toggle animasi Pac-Man saat AI berpikir (on/off). |
 | `/profile [alias]` | Provider multi-profil: ganti cepat alias (hemat, kuat, lokal). |
 | `/exec <command>` | Jalankan perintah shell (output di-summarize otomatis). |
 | `/history [n]` | Tampilkan n pesan konteks terakhir (default 5). |

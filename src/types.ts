@@ -74,6 +74,8 @@ export interface AgentConfig {
   mode?: UiMode;
   /** Active role name: default|reviewer|teacher|minimal or a custom file. */
   role?: string;
+  /** Fun animations (Pac-Man thinking spinner) — default true, disabled in pro mode. */
+  funAnimations?: boolean;
   /** Named provider profiles keyed by alias. */
   profiles?: Record<string, ProviderProfile>;
   /** Alias used when no explicit activeProfile is set. */
@@ -93,6 +95,7 @@ export const DEFAULT_CONFIG: AgentConfig = {
   model: '',
   mode: 'beginner',
   role: 'default',
+  funAnimations: true,
 };
 
 /**

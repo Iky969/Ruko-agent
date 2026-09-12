@@ -21,6 +21,27 @@
 - [x] Rebrand lengkap ke **Ruko** (nama paket, bin, prompt, banner, dokumentasi).
 - [x] **Tool `read_file`** (`src/agent/filetools.ts`) — baca berkas teks bernomor baris + paginasi offset/limit (default 200, cap 2.000 baris, clip baris 2.000 char), tolak direktori/file non-reguler/biner (deteksi NUL + rasio control-char), header hasil lapor total baris + rentang + `nextOffset`. Terdaftar di `runToolCall()` (`src/agent/tools.ts`) + `SYSTEM_PROMPT` (`src/agent/agent.ts`) + 9 unit test.
 
+### v0.8.0 — Eksekusi feedback.txt (FITUR BARU: Animasi Pac-Man "Thinking...")
+
+- [x] **#1 Animasi Pac-Man makan teks "Thinking..."** (`src/core/ui.ts`) — menggantikan spinner polos `▸ Thinking...` dengan animasi teks Pac-Man:
+  - Teks `"Thinking..."` (cyan, ANSI 36) dimakan oleh Pac-Man kuning (`>` / `O`, ANSI 93) yang bergerak ke kiri.
+  - Dua hantu mengejar di belakang Pac-Man dengan jarak tetap: hantu 1 cyan (`(oo)` / `(OO)`, ANSI 96) dan hantu 2 magenta (ANSI 95).
+  - **Rata KIRI** (`textX = 0`, mulai dari kolom 0) sejajar dengan margin kiri terminal dan prompt Ruko (memperbaiki masalah scratch script demo sebelumnya yang center-aligned).
+  - Begitu token pertama LLM tiba di `LineGate`, animasi langsung BERHENTI dan dihapus bersih dari layar (`\r` + spasi + `\r`), sehingga output jawaban AI dicetak bersih di baris tersebut tanpa meninggalkan sisa baris mati (0 baris di scrollback).
+- [x] **#2 Bebas bug numpuk & pakai mesin redraw bersama** — animasi tidak menulis escape sequence sembarangan (`cursorTo`/`clearLine`), melainkan menggunakan mekanisme single-line in-place carriage return (`\r`) yang diintersep oleh `LineEditor.patchStdout` (`src/core/tui.ts`). Saat `stop()` dipanggil, trailing `\r` mengosongkan `tailOut`, mereset `tailRendered`, dan membersihkan layar sehingga streaming output jawaban AI mulai tanpa ada baris bertumpuk.
+- [x] **#3 Opsional & Mode-Aware (tidak dipaksa untuk semua)**:
+  - Field konfigurasi baru `funAnimations` (boolean, default: `true`, disimpan ke `.ruko/config.json`).
+  - Terhubung ke `/mode`: mode `beginner` mengaktifkan animasi Pac-Man, sedangkan `/mode pro` mematikan animasi dan menggunakan spinner polos cepat `▸ Thinking...`.
+  - Slash command baru `/anim [on|off]` untuk toggle manual cepat kapan saja.
+  - Perintah `/config set funAnimations true|false` didukung penuh.
+- [x] **#4 Verifikasi PTY & Test**:
+  - Script uji harness PTY otomatis (`scripts/pty-pacman.py`):
+    - Terverifikasi animasi Pac-Man aktif dan rata kiri di kolom 0.
+    - Terverifikasi 0 baris mati/numpuk di scrollback setelah beberapa pesan berturut-turut.
+    - Terverifikasi toggle `/anim off` beralih kembali ke dot spinner polos.
+  - Unit test baru di `src/tests/ui.test.ts`, `src/tests/config.test.ts`, dan `src/tests/commands.test.ts`. Total: **188 test hijau**.
+  - Versi dinaikkan ke **0.8.0** (`package.json`, `PROGRESS.md`, `README.md`).
+
 ### v0.3.0 — Refactoring UI/UX + Setup Wizard + Streaming + Diff Visual
 
 - [x] **Interactive Setup Wizard** (`src/core/wizard.ts`) — first-run tanpa API key → banner welcome bgBlue, prompt berurutan `API Key:` (ter-mask, lihat v0.5.0 #5) / `Base URL:` / `Model Name:` **tanpa default provider** (v0.5.0 #1); hasil tersimpan permanen ke `.ruko/config.json` (field `apiKey`/`baseUrl`, config file > env var). Slash `/config setup` mengulang wizard dari dalam REPL; API key ditampilkan ter-mask di `/config`.
@@ -124,7 +145,7 @@
   | Splash akuarium (animasi) | `splash.ts::playSplash` | ✅ `createInPlaceBlock` (helper redraw bersama untuk animasi non-interaktif) | ✅ v0.6.1 PTY 40×24 |
   | Panel guide `/mode beginner` | `commands.ts:234` `renderBox` | ✅ statis sekali-cetak, clamp `renderBox` | ✅ v0.6.1 |
   | Panel `/sessions /role /profile /context /usage /config /model`, menu non-TTY | `commands.ts` + `loop.ts::printSlashMenu` `renderBox` | ✅ statis sekali-cetak, clamp `renderBox` | ✅ v0.6.1 |
-  | Spinner `▸ Thinking...` | `ui.ts::createSpinner` | ✅ baris tunggal `\\r` overwrite (bukan multi-baris) | ✅ smoke v0.5.x |
+  | Spinner `▸ Thinking...` / Pac-Man (v0.8) | `ui.ts::createSpinner` | ✅ baris tunggal `\\r` overwrite (bukan multi-baris), diintersep `LineEditor.patchStdout` | ✅ `pty-pacman.py` PTY 80×24 |
   | Banner wizard `setupBanner` | `wizard.ts:87` | n/a — statis sekali-cetak, TIDAK berubah | ✅ smoke v0.4.0 |
   | Status bar jalur PIPE (non-TTY) | `loop.ts::composePrompt` | ❌ sengaja TIDAK: readline non-TTY tidak bisa redraw; jalur ini khusus CI/smoke test yang menuntut output deterministik (bar dicetak sekali per prompt, tidak ada manusia yang melihat scrollback) | ✅ `printf … \\| node dist/index.js` |
   | **Region input ambient (AI sibuk) — v0.7** | `tui.ts::startAmbient/render` | ✅ MESIN SAMA (`LineEditor.render`, intersep stdout `patchStdout`) | ✅ `pty-liveinput.py` mode typing/queue/interrupt |

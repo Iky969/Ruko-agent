@@ -1,24 +1,23 @@
-Fitur baru: input tetap bisa diketik saat AI sedang bekerja (thinking atau menjalankan tool), bukan hilang seperti sekarang.
+Ganti spinner "▸ Thinking..." yang ada sekarang dengan animasi Pac-Man makan tulisan "Thinking...", terinspirasi demo scratch script yang sudah pernah dicoba (k.cjs — sudah dihapus, implementasikan ulang langsung di Ruko).
 
-MASALAH SAAT INI
-Saat AI sedang thinking/eksekusi tool, kotak input hilang — user tidak punya tempat mengetik sama sekali. Padahal user mungkin ingin menambahkan info (misal: "tambahkan variabel X juga") sambil AI masih kerja.
+MASALAH PADA DEMO SEBELUMNYA
+Posisi animasi di scratch script ketengahan layar (center-aligned) — ini tidak konsisten dengan gaya UI Ruko yang lain (status bar, prompt, output semua rata kiri). Perbaiki jadi rata kiri, sejajar dengan margin kiri terminal seperti elemen UI lainnya (bukan di-center).
 
 PERILAKU YANG DIMINTA
-1. Kotak input HARUS tetap tampil dan bisa diketik kapan pun, termasuk saat status AI = thinking/executing tool.
-2. Saat user menekan Enter untuk submit SELAMA AI masih sibuk, JANGAN langsung kirim atau langsung eksekusi. Tampilkan pilihan singkat ke user, contoh:
-   "Pesan disiapkan. [1] Kirim sekarang (hentikan pekerjaan AI saat ini) [2] Antre, kirim setelah tugas ini selesai — pilih:"
-   User tekan 1 atau 2 (atau Enter untuk default ke opsi 2/antre, karena itu lebih aman default-nya).
-3. Kalau pilih "kirim sekarang": interrupt pekerjaan AI yang sedang berjalan (mirip Ctrl+C tapi tidak membatalkan sesi, cuma menghentikan turn saat ini), lalu proses pesan baru sebagai giliran baru.
-4. Kalau pilih "antre": pesan disimpan di queue, ditampilkan sebagai indikator kecil (misal badge "1 pesan menunggu" di status bar), lalu begitu AI selesai dengan tugas saat ini (tool selesai + jawaban final diberikan), pesan yang diantre otomatis dikirim sebagai giliran berikutnya TANPA user perlu mengetik ulang.
-5. User bisa antre lebih dari satu pesan berurutan (FIFO), masing-masing dikirim satu per satu setelah AI selesai dengan yang sebelumnya.
-6. Kalau AI sedang menunggu approval untuk tool berbahaya (dialog approval sedang aktif), input biasa dan approval prompt jangan tabrakan — approval tetap prioritas menerima input y/n, pesan baru yang diketik tetap masuk antrean seperti biasa.
+1. Saat AI sedang menunggu respons LLM (state yang sekarang dipakai spinner "▸ Thinking..."), tampilkan animasi: teks "Thinking..." dengan karakter Pac-Man (">" atau "0" kuning) yang bergerak dari kiri ke kanan seolah "memakan" huruf demi huruf tulisan itu, diikuti 1-2 hantu "(oo)" berwarna (cyan/magenta) yang mengejar di belakangnya dengan jarak tetap — mirip animasi kejar-kejaran yang sudah ada sebelumnya, tapi versi teks bukan canvas.
+2. Loop terus selama masih menunggu (belum ada token pertama datang), lalu begitu token pertama tiba, animasi BERHENTI dan dihapus bersih dari layar (bukan ditumpuk/dibiarkan jadi scrollback), baru jawaban AI mulai dicetak normal di tempatnya.
+3. Rata KIRI, bukan center — posisi mulai dari kolom yang sama dengan prompt/output normal Ruko.
 
-CATATAN TEKNIS
-- Fitur ini menambah state baru di editor (bukan cuma status "idle vs busy" seperti sekarang, tapi juga "ada pesan diantre atau tidak").
-- Pakai mesin redraw bersama yang SUDAH ADA dari fix sebelumnya (LineEditor/createInPlaceBlock) — jangan bikin jalur render terpisah lagi untuk fitur ini, supaya tidak mengulang bug numpuk yang baru saja dibereskan.
-- Tambahkan ke PROGRESS.md tabel audit yang sudah ada sebagai titik render baru, konfirmasi dia pakai mesin yang sama.
+WAJIB — HINDARI BUG NUMPUK YANG SUDAH 3X TERJADI SEBELUMNYA
+Animasi ini WAJIB pakai mesin redraw bersama yang sudah ada (LineEditor / createInPlaceBlock di src/core/tui.ts) — JANGAN menulis langsung ke stdout dalam loop/interval sendiri. Sebelum mulai implementasi, konfirmasi dulu: apakah spinner "Thinking..." yang sekarang sudah pakai mesin redraw itu, atau masih jalur render terpisah? Kalau masih terpisah, ini kesempatan sekaligus migrasi ke mesin yang sama.
+
+BUAT OPSIONAL, JANGAN PAKSA SEMUA MODE
+- Tambahkan opsi config (mis. .ruko/config.json field "funAnimations": true/false, default true) atau kaitkan ke /mode: aktif di /mode beginner, tapi di /mode pro pakai spinner polos cepat seperti sekarang (animasi ini muncul di SETIAP giliran nunggu AI, jadi user yang kerja cepat/serius sebaiknya bisa matikan).
+- Tambahkan slash command atau field /config untuk toggle manual kalau user mau matikan/nyalakan sendiri di luar mode beginner/pro.
 
 VERIFIKASI
-- Tes manual: kirim pesan, SEBELUM AI selesai jawab ketik pesan kedua + Enter, pilih "antre" — pastikan pesan kedua otomatis terkirim persis setelah AI selesai, tanpa duplikasi atau hilang.
-- Tes manual kedua: ulangi tapi pilih "kirim sekarang" — pastikan pekerjaan AI yang sedang berjalan berhenti bersih (tidak corrupt state), lalu pesan baru diproses.
-- Update unit test seperti biasa, jangan sampai regresi ke suite yang sudah 133 hijau.
+- Tes manual: kirim beberapa pesan berturut-turut, screenshot — pastikan animasi rata kiri, tidak numpuk saat animasi berhenti dan jawaban muncul (0 baris sisa animasi tertinggal di scrollback).
+- Tes toggle: matikan opsi, pastikan balik ke spinner polos seperti semula.
+- Update unit test + PROGRESS.md seperti biasa (versi naik, dicatat sebagai fitur baru bukan bug fix).
+
+Ini kerjaan UI ringan (bukan security), model flash cukup — tidak perlu effort tinggi.

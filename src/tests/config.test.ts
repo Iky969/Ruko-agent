@@ -30,8 +30,9 @@ test('loadConfig merges a config file over the defaults', () => {
 test('saveConfig round-trips', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ruko-'));
   const path = join(dir, 'config.json');
-  saveConfig({ ...DEFAULT_CONFIG, execTimeoutMs: 5000 }, path);
+  saveConfig({ ...DEFAULT_CONFIG, execTimeoutMs: 5000, funAnimations: false }, path);
   const config = loadConfig(path);
   assert.equal(config.execTimeoutMs, 5000);
+  assert.equal(config.funAnimations, false);
   rmSync(dir, { recursive: true, force: true });
 });

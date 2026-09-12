@@ -133,7 +133,8 @@ export class Agent {
       // the interrupted turn ends cleanly instead of starting new work.
       if (signal?.aborted) return '';
       usage.promptChars += messages.reduce((s, m) => s + m.content.length, 0);
-      const spinner = createSpinner('Thinking');
+      const usePacman = this.config.funAnimations ?? (this.config.mode !== 'pro');
+      const spinner = createSpinner('Thinking', { pacman: usePacman });
       const gate = new LineGate((text) => {
         spinner.stop();
         process.stdout.write(text);

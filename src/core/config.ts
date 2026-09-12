@@ -25,6 +25,7 @@ export interface RukoConfigFile {
   baseUrl?: string;
   mode?: UiMode;
   role?: string;
+  funAnimations?: boolean;
   profiles?: Record<string, ProviderProfile>;
   defaultProfile?: string;
   activeProfile?: string;

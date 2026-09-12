@@ -267,26 +267,104 @@ export interface Spinner {
   stop(): void;
 }
 
+export interface SpinnerOptions {
+  /**
+   * When true, renders the left-aligned Pac-Man eating "Thinking..." animation,
+   * followed by 2 ghosts chasing it (feedback v0.8 / pac.cjs).
+   * When false (or terminal too narrow < 24 cols), uses the plain `▸ Thinking...` dot spinner.
+   * Default: true.
+   */
+  pacman?: boolean;
+}
+
 /**
- * `▸ Thinking...` spinner. Rotates a trailing-dot animation in place; a
- * no-op when stdout is not a TTY. Always call stop() when the LLM answers.
+ * `▸ Thinking...` spinner or Pac-Man eating "Thinking..." animation.
+ * Redrawn in place on a single line via carriage return (`\r`) so it integrates
+ * with LineEditor's shared redraw engine without stacking lines in scrollback.
+ * Auto-disabled when stdout is not a TTY or colors are disabled.
+ * Always call `stop()` when the LLM answers.
  */
-export function createSpinner(label = 'Thinking'): Spinner {
+export function createSpinner(label = 'Thinking', options: SpinnerOptions = {}): Spinner {
   if (!colorsEnabled()) return { stop() {} };
-  let dots = 0;
-  const render = () => {
-    const text = `▸ ${label}${'.'.repeat(dots)}`;
-    process.stdout.write(`\r${dim(text)}`.padEnd(24, ' '));
-  };
-  render();
-  const timer = setInterval(() => {
-    dots = (dots + 1) % 4;
+
+  const usePacman = options.pacman ?? true;
+  const width = Math.min(38, terminalWidth() - 1);
+
+  // If width is too small or pacman is false, fall back to plain dot spinner
+  if (!usePacman || width < 24) {
+    let dots = 0;
+    const render = () => {
+      const text = `▸ ${label}${'.'.repeat(dots)}`;
+      process.stdout.write(`\r${dim(text)}`.padEnd(24, ' '));
+    };
     render();
-  }, 200);
+    const timer = setInterval(() => {
+      dots = (dots + 1) % 4;
+      render();
+    }, 200);
+    return {
+      stop() {
+        clearInterval(timer);
+        process.stdout.write(`\r${' '.repeat(24)}\r`);
+      },
+    };
+  }
+
+  // Pac-Man eating "Thinking..." animation (left-aligned per feedback.txt & pac.cjs)
+  const text = label.length <= 11 ? (label.endsWith('...') ? label : `${label}...`) : label;
+  let x = width - 1;
+  let frame = 0;
+  let maxCleared = width;
+
+  const render = () => {
+    const currentWidth = Math.min(38, terminalWidth() - 1);
+    if (currentWidth > maxCleared) maxCleared = currentWidth;
+    const cells: string[] = Array(currentWidth).fill(' ');
+
+    const draw = (str: string, position: number, colorCode: string) => {
+      for (let i = 0; i < str.length; i++) {
+        const col = position + i;
+        if (col >= 0 && col < currentWidth) {
+          cells[col] = wrap(colorCode, str[i]);
+        }
+      }
+    };
+
+    // Characters behind Pac-Man are eaten; characters before Pac-Man are visible (cyan, code 36)
+    for (let i = 0; i < text.length; i++) {
+      if (i < x) {
+        draw(text[i], i, '36');
+      }
+    }
+
+    // Two ghosts chasing Pac-Man from the right with fixed distance:
+    // Ghost 1: bright cyan (96)
+    // Ghost 2: bright magenta (95)
+    const ghost = Math.floor(frame / 2) % 2 ? '(oo)' : '(OO)';
+    draw(ghost, x + 4, '96');
+    draw(ghost, x + 10, '95');
+
+    // Pac-Man: bright yellow (93), mouth alternates '>' and 'O'
+    const mouth = frame % 2 ? '>' : 'O';
+    draw(mouth, x, '93');
+
+    process.stdout.write(`\r${cells.join('')}`);
+
+    x--;
+    frame++;
+
+    // Loop when Pac-Man and both ghosts exit on the left
+    if (x < -14) {
+      x = currentWidth - 1;
+    }
+  };
+
+  render();
+  const timer = setInterval(render, 100);
   return {
     stop() {
       clearInterval(timer);
-      process.stdout.write(`\r${' '.repeat(24)}\r`);
+      process.stdout.write(`\r${' '.repeat(maxCleared)}\r`);
     },
   };
 }
