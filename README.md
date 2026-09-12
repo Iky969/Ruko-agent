@@ -9,6 +9,12 @@
 
 **Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
 
+### Cara Cepat (One-liner Installer)
+
+```bash
+curl -fsSL [https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh](https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh) | bash
+```
+
 ---
 
 ## 📑 Daftar Isi
