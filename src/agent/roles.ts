@@ -37,6 +37,12 @@ export const TOOL_RULES =
   'Tool protocol:\n' +
   '- To run a shell command, reply with a single fenced block:\n' +
   '```tool\n{"tool": "exec", "command": "<command>", "cwd": null, "timeoutMs": 30000}\n```\n' +
+  '- To search for files matching a glob pattern or discover directory trees, reply with:\n' +
+  '```tool\n{"tool": "glob", "pattern": "**/*.ts", "path": "."}\n```\n' +
+  '  Returns matching relative file paths (ignores node_modules, .git, dist, .ruko, coverage, and binaries; capped at 200 files).\n' +
+  '- To search for text or regex across code files with context lines, reply with:\n' +
+  '```tool\n{"tool": "code_search", "query": "<string or regex>", "path": ".", "extension": "ts"}\n```\n' +
+  '  Returns matching lines with line numbers and 1-2 surrounding context lines (capped at 50 matches).\n' +
   '- To read a text file (numbered lines, paginated), reply with:\n' +
   '```tool\n{"tool": "read_file", "path": "<file>", "offset": 1, "limit": 200}\n```\n' +
   '  Use offset/limit to page through large files; the result reports the total line count.\n' +
@@ -48,7 +54,7 @@ export const TOOL_RULES =
   '- Only when rewriting most of a file, use:\n' +
   '```tool\n{"tool": "edit_file", "path": "<file>", "content": "<full updated content>"}\n```\n' +
   '  The CLI shows a colored diff of your change to the user.\n' +
-  '- Prefer read_file over cat/head/tail; prefer patch_file/edit_file/write_file over shell redirection; use exec for everything else.\n' +
+  '- Prefer glob and code_search to discover files and locate code before reading full files; prefer read_file over cat/head/tail; prefer patch_file/edit_file/write_file over shell redirection; use exec for everything else.\n' +
   '- After receiving the tool result, either run another tool or answer in plain text.\n' +
   '- Large command output is summarized with [... TRUNCATED ...] markers; work with what remains and re-run a narrower command if needed.\n';
 
@@ -64,7 +70,7 @@ export const BUILT_IN_ROLES: RoleDef[] = [
     name: 'reviewer',
     description: 'Hanya baca + memberi masukan (tidak mengubah file).',
     prompt:
-      'Role: code reviewer. You are READ-ONLY: never call exec/write_file/edit_file/patch_file — only read_file is allowed. Give structured feedback: bugs and risks first (with file:line), then improvements, then positives. Suggest concrete fixes as snippets, do not apply them.',
+      'Role: code reviewer. You are READ-ONLY: never call exec/write_file/edit_file/patch_file — only read_file, glob, and code_search are allowed. Give structured feedback: bugs and risks first (with file:line), then improvements, then positives. Suggest concrete fixes as snippets, do not apply them.',
   },
   {
     name: 'teacher',

@@ -29,6 +29,8 @@ export interface RukoConfigFile {
   profiles?: Record<string, ProviderProfile>;
   defaultProfile?: string;
   activeProfile?: string;
+  guardianEnabled?: boolean;
+  guardianTimeoutMs?: number;
 }
 
 export function defaultConfigPath(): string {

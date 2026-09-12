@@ -1,23 +1,27 @@
-Ganti spinner "▸ Thinking..." yang ada sekarang dengan animasi Pac-Man makan tulisan "Thinking...", terinspirasi demo scratch script yang sudah pernah dicoba (k.cjs — sudah dihapus, implementasikan ulang langsung di Ruko).
+Implementasikan Roadmap #5 — "Approval pintar (guardian LLM)" — untuk menutup 6 known limitation yang tercatat di PROGRESS.md dari audit keamanan sebelumnya (v0.7.1-v0.7.2): semantic analysis payload interpreter, variable indirection, eval/subshell obfuscation, quote-aware chain splitting.
 
-MASALAH PADA DEMO SEBELUMNYA
-Posisi animasi di scratch script ketengahan layar (center-aligned) — ini tidak konsisten dengan gaya UI Ruko yang lain (status bar, prompt, output semua rata kiri). Perbaiki jadi rata kiri, sejajar dengan margin kiri terminal seperti elemen UI lainnya (bukan di-center).
+KONTEKS
+Approval gate saat ini (src/core/approval.ts) berbasis regex/pattern matching terhadap command mentah. Ini sudah diaudit 2x dan menutup celah pattern-level (path sistem, chaining, redirect disk, base64|sh, interpreter inline flag). Tapi regex punya batas fundamental: dia tidak bisa memahami MAKNA command, cuma cocokin string. Contoh yang masih lolos:
+- python3 -c "shutil.rmtree('/etc')" — sudah DANGEROUS (dari fix sebelumnya, karena ada flag -c), tapi levelnya sama untuk semua isi python -c, termasuk yang aman ("print('hello')")
+- Variable indirection: X=/etc; rm -rf $X — regex tidak bisa resolve nilai variabel
+- Command dalam base64/hex/rot13 yang di-decode runtime
 
-PERILAKU YANG DIMINTA
-1. Saat AI sedang menunggu respons LLM (state yang sekarang dipakai spinner "▸ Thinking..."), tampilkan animasi: teks "Thinking..." dengan karakter Pac-Man (">" atau "0" kuning) yang bergerak dari kiri ke kanan seolah "memakan" huruf demi huruf tulisan itu, diikuti 1-2 hantu "(oo)" berwarna (cyan/magenta) yang mengejar di belakangnya dengan jarak tetap — mirip animasi kejar-kejaran yang sudah ada sebelumnya, tapi versi teks bukan canvas.
-2. Loop terus selama masih menunggu (belum ada token pertama datang), lalu begitu token pertama tiba, animasi BERHENTI dan dihapus bersih dari layar (bukan ditumpuk/dibiarkan jadi scrollback), baru jawaban AI mulai dicetak normal di tempatnya.
-3. Rata KIRI, bukan center — posisi mulai dari kolom yang sama dengan prompt/output normal Ruko.
+TUJUAN: GUARDIAN LLM SEBAGAI LAPISAN KEDUA
+Bukan mengganti regex yang sudah ada — regex tetap jalan sebagai filter cepat pertama (murah, deterministik). Guardian LLM jadi lapisan KEDUA yang dipanggil khusus untuk kasus yang regex sendiri sudah ragu (level DANGEROUS atau ada pola interpreter-inline/encoding terdeteksi), bukan untuk setiap command.
 
-WAJIB — HINDARI BUG NUMPUK YANG SUDAH 3X TERJADI SEBELUMNYA
-Animasi ini WAJIB pakai mesin redraw bersama yang sudah ada (LineEditor / createInPlaceBlock di src/core/tui.ts) — JANGAN menulis langsung ke stdout dalam loop/interval sendiri. Sebelum mulai implementasi, konfirmasi dulu: apakah spinner "Thinking..." yang sekarang sudah pakai mesin redraw itu, atau masih jalur render terpisah? Kalau masih terpisah, ini kesempatan sekaligus migrasi ke mesin yang sama.
+DESAIN YANG DIMINTA
+1. Tambah fungsi baru assessWithGuardian(command: string): Promise<{verdict: 'safe'|'dangerous'|'blocked', reasoning: string}> di approval.ts.
+2. Guardian dipanggil HANYA ketika regex level saat ini sudah DANGEROUS (bukan untuk command yang sudah pasti BLOCKED oleh regex — itu tidak perlu ditanya lagi, dan bukan untuk yang sudah pasti NONE aman berdasarkan regex, supaya tidak boros memanggil LLM untuk command remeh seperti "ls" atau "git status").
+3. Prompt untuk guardian harus singkat, fokus: minta LLM menilai APAKAH command ini, kalau dieksekusi, akan menghasilkan efek destruktif setara file-system wipe/system damage — bukan minta dia menjelaskan command secara umum. Sertakan instruksi eksplisit: kalau ragu, pilih 'blocked' (fail-safe), jangan 'safe'.
+4. PENTING — LOOP PREVENTION: guardian LLM ini boleh memanggil provider LLM yang SAMA dengan yang dipakai user untuk chat utama, TAPI harus pakai call terpisah dengan max_tokens kecil (cukup untuk verdict singkat + alasan 1 kalimat) dan TIDAK boleh masuk ke context/history percakapan utama. Pastikan ini tidak menciptakan rekursi kalau user sedang menyuruh Ruko sendiri mengedit approval.ts atau menjalankan command yang memicu guardian terhadap dirinya sendiri.
+5. Kalau pemanggilan guardian gagal (network error, rate limit, dll): DEFAULT ke perilaku fail-safe — anggap sebagai 'blocked' atau minimal tetap 'dangerous' (minta approval manual), JANGAN auto-allow hanya karena guardian tidak bisa dihubungi.
+6. Tambahkan opsi config: guardianEnabled?: boolean (default true), guardianTimeoutMs (default wajar, misal 5000) — kalau timeout, fallback ke fail-safe seperti poin 5.
+7. UI: saat guardian sedang dipanggil, tampilkan indikator singkat ("Memeriksa keamanan command...") memakai mesin redraw bersama yang sudah ada (LineEditor) — JANGAN buat jalur render baru.
 
-BUAT OPSIONAL, JANGAN PAKSA SEMUA MODE
-- Tambahkan opsi config (mis. .ruko/config.json field "funAnimations": true/false, default true) atau kaitkan ke /mode: aktif di /mode beginner, tapi di /mode pro pakai spinner polos cepat seperti sekarang (animasi ini muncul di SETIAP giliran nunggu AI, jadi user yang kerja cepat/serius sebaiknya bisa matikan).
-- Tambahkan slash command atau field /config untuk toggle manual kalau user mau matikan/nyalakan sendiri di luar mode beginner/pro.
+VERIFIKASI WAJIB
+8. Test dengan skenario dari 6 known limitation di atas — pastikan guardian menangkap SEMUA contoh yang sebelumnya lolos (python -c dengan payload destruktif, variable indirection, eval obfuscation).
+9. Test negatif: pastikan command aman yang REGEX-nya sudah DANGEROUS tapi sebenarnya tidak berbahaya (contoh: python3 -c "print(1+1)") tetap bisa lolos guardian sebagai 'safe' — supaya tool tidak jadi terlalu paranoid dan minta approval untuk semua pemakaian interpreter.
+10. Test fallback: simulasikan guardian call gagal/timeout, pastikan behaviour fail-safe berjalan (bukan auto-allow).
+11. Update PROGRESS.md: tutup 6 known limitation ini, tapi TETAP catat batasan baru guardian LLM itu sendiri kalau ada (misal: guardian bisa salah nilai kalau LLM-nya sendiri di-prompt-inject lewat command yang aneh — laporkan kalau ini kamu nilai sebagai risiko nyata atau bukan).
 
-VERIFIKASI
-- Tes manual: kirim beberapa pesan berturut-turut, screenshot — pastikan animasi rata kiri, tidak numpuk saat animasi berhenti dan jawaban muncul (0 baris sisa animasi tertinggal di scrollback).
-- Tes toggle: matikan opsi, pastikan balik ke spinner polos seperti semula.
-- Update unit test + PROGRESS.md seperti biasa (versi naik, dicatat sebagai fitur baru bukan bug fix).
-
-Ini kerjaan UI ringan (bukan security), model flash cukup — tidak perlu effort tinggi.
+JANGAN mulai coding sebelum konfirmasi dulu ke saya: apakah desain "regex dulu, guardian LLM cuma untuk kasus DANGEROUS" ini masuk akal, atau ada trade-off yang menurutmu perlu didiskusikan dulu (biaya API call tambahan tiap command mencurigakan, latency, dll).

@@ -4,7 +4,7 @@ Ruko adalah CLI agent untuk pekerjaan coding berbasis **Node.js / TypeScript** (
 
 Mulai cepat: lihat **Instalasi & Menjalankan** di bawah — detail cara kerja ada di bagian *Cara Kerja*.
 
-**v0.6.0**: Menu slash **live** di terminal (editor raw-mode sendiri: filter per keystroke, ↑/↓, Tab, Esc) dengan overlay yang **terhapus bersih saat ditutup** — tidak ada lagi blok menu duplikat nyangkut di scrollback; daftar bantuan hanya-Enter tidak pernah ikut menetap. (v0.4.0: wizard `/login` dengan tes koneksi live + penerjemah error, multi-profil provider + auto-fetch model, role AI berlapis, plan mode & deteksi loop di kode, `patch_file`, `/undo`, `/compact`, baris usage. v0.3.0: setup wizard, streaming SSE, status bar, diff visual, distribusi global.)
+**v0.9.0**: Tool pencarian kode terintegrasi (`glob` dan `code_search`) dengan pencegahan otomatis folder besar (`node_modules`, `.git`, `dist`, `.ruko`, `coverage`) dan file biner, plus cap batas hasil hemat token. (v0.8.0: animasi Pac-Man "Thinking...", v0.7.0: live ambient input saat AI bekerja, v0.6.0: menu slash live).
 
 ---
 
@@ -53,7 +53,7 @@ node dist/index.js --help
 ### Verifikasi build
 
 ```bash
-npm test             # 93 unit test (node:test) harus hijau
+npm test             # 210 unit test (node:test) harus hijau
 npm run typecheck    # tsc --noEmit bersih
 ```
 
@@ -102,7 +102,7 @@ System prompt disusun berlapis dengan urutan tetap (ramah prompt-caching): (a) i
 Permintaan ke backend memakai `stream: true` (SSE); token teks di-pipe ke terminal secara real-time. Blok tool internal (` ```tool `) tidak ditampilkan ke user (difilter sambil jalan), dan spinner `▸ Thinking...` muncul saat LLM berpikir.
 
 ### Visual Action Logs & File Diff
-Setiap pemanggilan tool dicetak dengan indikator visual: `🟢 Bash(<cmd>)`, `🟢 Read(<file>)`, `🟢 Edit(<file>)`. Perubahan file lewat `edit_file`/`write_file`/`patch_file` langsung ditampilkan bergaya `git diff` — baris dihapus **merah** (`-`), baris ditambahkan **hijau** (`+`), region tak berubah dilipat.
+Setiap pemanggilan tool dicetak dengan indikator visual: `🟢 Bash(<cmd>)`, `🟢 Glob(<pattern>)`, `🟢 Search(<query>)`, `🟢 Read(<file>)`, `🟢 Edit(<file>)`. Perubahan file lewat `edit_file`/`write_file`/`patch_file` langsung ditampilkan bergaya `git diff` — baris dihapus **merah** (`-`), baris ditambahkan **hijau** (`+`), region tak berubah dilipat.
 
 ### Log Summarizer
 Output perintah yang panjang otomatis dipotong saat melebihi ambang (default **1000 karakter**):
@@ -113,6 +113,30 @@ Output perintah yang panjang otomatis dipotong saat melebihi ambang (default **1
 
 ### Eksekusi Shell Bawaan
 Menjalankan perintah apa pun lewat shell dengan timeout default 30 detik, capture stdout/stderr, exit code, dan durasi. Semua output lewat Log Summarizer secara default.
+
+### Tool `glob` (Eksplorasi Berkas Cepat & Aman)
+Agen dapat mencari berkas menggunakan pola glob atau mendaftar isi direktori:
+
+```tool
+{"tool": "glob", "pattern": "**/*.ts", "path": "."}
+```
+
+- Otomatis mengabaikan folder raksasa: `node_modules`, `.git`, `dist`, `.ruko`, dan `coverage`.
+- Mengabaikan berkas biner (gambar, arsip zip, compiled artifacts, file biner tak dikenal).
+- Batas maksimal default 200 file per panggilan (cap hemat token) dengan indikator jika terpotong.
+- Proteksi terhadap symlink loop dan permission error tanpa membuat agen crash.
+
+### Tool `code_search` (Pencarian Kode Lintas Berkas)
+Agen dapat mencari keyword atau ekspresi reguler (regex) di seluruh berkas proyek:
+
+```tool
+{"tool": "code_search", "query": "runToolCall", "extension": "ts", "contextLines": 1}
+```
+
+- Menampilkan baris yang cocok bertanda `> `, nomor baris, serta 1–2 baris konteks sebelum dan sesudah.
+- Penggabungan blok konteks yang berdekatan/bertumpukan secara rapi.
+- Batas maksimal default 50 kecocokan (cap hemat token) dengan peringatan jika terpotong.
+- Skip otomatis direktori yang diabaikan dan file biner.
 
 ### Tool `read_file`
 Agen bisa membaca berkas teks langsung (tanpa `cat`/`head`), dengan hasil bernomor baris dan berhalaman:
@@ -257,7 +281,7 @@ detectRisk(command, config)   ← regex dangerous/blocked + allowlist + yolo
 ### 3. LLM tool loop (mode LLM)
 
 1. Instruksi + riwayat konteks dikirim ke model dengan `stream: true`; **system prompt dirakit berlapis** oleh `roles.ts` (identitas inti → aturan tool → role aktif → AGENT.md proyek → tambahan mode/plan) dengan urutan tetap agar ramah prompt-caching. Token jawaban di-stream ke terminal, blok ` ```tool ` disaring keluar.
-2. Jika ingin memakai tool, model membalas blok (pilihan: `exec`, `read_file`, `write_file`, `edit_file`, `patch_file`):
+2. Jika ingin memakai tool, model membalas blok (pilihan: `exec`, `glob`, `code_search`, `read_file`, `write_file`, `edit_file`, `patch_file`):
 
    ````text
    ```tool
@@ -317,12 +341,12 @@ Hitung proyeksi: digest + sisa verbatim + tail ≤ budget?
 | `src/agent/agent.ts` | Orkestrasi manual/LLM, streaming + spinner + action log, prompt berlapis, usage, deteksi loop |
 | `src/agent/llm.ts` | Provider OpenAI-compatible (SSE stream, testConnection, listModels, penerjemah error) |
 | `src/agent/roles.ts` | Registry role + parser frontmatter + assembler prompt berlapis |
-| `src/agent/tools.ts` | Protocol tool-call (`exec`, `read_file`, `edit_file`, `write_file`, `patch_file`) + cap 8k + blokir plan mode + log 🟢 |
-| `src/agent/filetools.ts` | Tool `read_file` (bernomor, berhalaman, deteksi biner) |
+| `src/agent/tools.ts` | Protocol tool-call (`exec`, `glob`, `code_search`, `read_file`, `edit_file`, `write_file`, `patch_file`) + cap 8k + blokir plan mode + log 🟢 |
+| `src/agent/filetools.ts` | Tool `glob`, `code_search`, `read_file` (bernomor, berhalaman, deteksi biner, skip ignored dirs) |
 | `src/agent/commands.ts` | Registry slash commands (sumber tunggal /help + menu / + docs) |
 | `src/index.ts` | Entry point (wizard first-run + tes koneksi, --exec, --summarize, --help, --version) |
 | `scripts/gen-commands-doc.mjs` | Pembangkit tabel command README dari registry |
-| `src/tests/` | Unit test (`node:test`, 93 test) |
+| `src/tests/` | Unit test (`node:test`, 210 test) |
 
 ---
 

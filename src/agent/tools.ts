@@ -3,7 +3,7 @@ import { AgentConfig } from '../types.js';
 import { renderFileDiff, splitLines } from '../core/diff.js';
 import { takeSnapshot } from '../core/undo.js';
 import { dim, green, red, yellow } from '../core/ui.js';
-import { readFileTool } from './filetools.js';
+import { codeSearchTool, globTool, readFileTool } from './filetools.js';
 import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -199,6 +199,48 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       const result = await readFileTool(file, {
         offset: typeof call.offset === 'number' ? call.offset : undefined,
         limit: typeof call.limit === 'number' ? call.limit : undefined,
+      });
+      return result.ok
+        ? result.text
+        : JSON.stringify({ error: result.text });
+    }
+    case 'glob': {
+      const pattern = typeof call.pattern === 'string'
+        ? call.pattern
+        : (typeof call.query === 'string' ? call.query : '');
+      const searchPath = typeof call.path === 'string'
+        ? call.path
+        : (typeof call.dir === 'string' ? call.dir : '.');
+      deps.onLog?.(green(`🟢 Glob(${pattern || searchPath})`));
+      const result = await globTool(pattern, {
+        path: searchPath,
+        limit: typeof call.limit === 'number' ? call.limit : undefined,
+      });
+      return result.ok
+        ? result.text
+        : JSON.stringify({ error: result.text });
+    }
+    case 'code_search': {
+      const query = String(call.query ?? call.keyword ?? call.pattern ?? '');
+      if (!query) {
+        return JSON.stringify({ error: 'code_search: missing "query" field' });
+      }
+      const searchPath = typeof call.path === 'string'
+        ? call.path
+        : (typeof call.dir === 'string' ? call.dir : '.');
+      const ext = typeof call.extension === 'string'
+        ? call.extension
+        : (typeof call.ext === 'string' ? call.ext : undefined);
+      deps.onLog?.(green(`🟢 Search(${query})`));
+      const result = await codeSearchTool(query, {
+        path: searchPath,
+        extension: ext,
+        isRegex: call.isRegex === true,
+        caseSensitive: call.caseSensitive === true,
+        limit: typeof call.limit === 'number'
+          ? call.limit
+          : (typeof call.maxMatches === 'number' ? call.maxMatches : undefined),
+        contextLines: typeof call.contextLines === 'number' ? call.contextLines : undefined,
       });
       return result.ok
         ? result.text

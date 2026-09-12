@@ -82,6 +82,14 @@ export interface AgentConfig {
   defaultProfile?: string;
   /** Alias currently in effect (set by `/profile`). */
   activeProfile?: string;
+  /**
+   * Guardian LLM (Roadmap #5): second approval layer that semantically analyses
+   * commands the regex layer marks as DANGEROUS.  When enabled, a lightweight
+   * LLM call decides safe / dangerous / blocked before prompting the user.
+   */
+  guardianEnabled?: boolean;
+  /** Timeout in ms for the guardian LLM call (default 5000). */
+  guardianTimeoutMs?: number;
 }
 
 export const DEFAULT_CONFIG: AgentConfig = {
@@ -96,6 +104,8 @@ export const DEFAULT_CONFIG: AgentConfig = {
   mode: 'beginner',
   role: 'default',
   funAnimations: true,
+  guardianEnabled: true,
+  guardianTimeoutMs: 5_000,
 };
 
 /**

@@ -21,6 +21,30 @@
 - [x] Rebrand lengkap ke **Ruko** (nama paket, bin, prompt, banner, dokumentasi).
 - [x] **Tool `read_file`** (`src/agent/filetools.ts`) — baca berkas teks bernomor baris + paginasi offset/limit (default 200, cap 2.000 baris, clip baris 2.000 char), tolak direktori/file non-reguler/biner (deteksi NUL + rasio control-char), header hasil lapor total baris + rentang + `nextOffset`. Terdaftar di `runToolCall()` (`src/agent/tools.ts`) + `SYSTEM_PROMPT` (`src/agent/agent.ts`) + 9 unit test.
 
+### v0.9.0 — Eksekusi feedback.txt (Roadmap #1: Tool glob dan code_search)
+
+- [x] **#1 Tool `glob`** (`src/agent/filetools.ts`):
+  - Pencarian berkas berbasis pola glob atau mendaftar direktori relatif dari `process.cwd()`.
+  - Mengabaikan hardcoded direktori raksasa: `node_modules`, `.git`, `dist`, `.ruko`, `coverage`.
+  - Mengabaikan berkas biner secara cerdas (fast-path ekstensi teks, skip ekstensi biner umum, serta deteksi NUL/control-char untuk file tanpa ekstensi / tak dikenal).
+  - Cap default 200 file (`MAX_GLOB_LIMIT = 1000`) dengan indikator terpotong untuk efisiensi token LLM.
+  - Safe error handling: direktori tidak ditemukan, izin akses, symlink loop (`visitedDirs` tracking) tidak membuat agen crash.
+- [x] **#2 Tool `code_search`** (`src/agent/filetools.ts`):
+  - Pencarian teks di berkas proyek berbasis keyword string atau regex (`isRegex: true`).
+  - Opsi filter ekstensi (`extension: "ts"` atau `"ts,js"`), case sensitivity (`caseSensitive: boolean`), dan target path/file tertentu.
+  - Mengembalikan nomor baris (1-indexed), baris cocok ditandai `> `, dan konteks 1–2 baris sekitar (`contextLines`), dengan penggabungan blok konteks yang bertumpukan secara rapi.
+  - Cap default 50 kecocokan (`MAX_SEARCH_LIMIT = 200`) dengan indikator keterpotongan jika batas terlampaui.
+  - Otomatis mengabaikan folder yang diabaikan dan berkas biner.
+- [x] **#3 Integrasi Agent & Protokol Tool**:
+  - `runToolCall()` (`src/agent/tools.ts`) mendukung case `glob` dan `code_search` dengan action log visual `🟢 Glob(...)` dan `🟢 Search(...)`.
+  - Tersedia dalam plan mode (kedua tool adalah read-only inspection, tidak diblokir).
+  - Prompt deklarasi tool di `TOOL_RULES` dan peran `reviewer` (`src/agent/roles.ts`) diperbarui.
+- [x] **#4 Unit Test Lengkap**:
+  - 22 unit test baru di `src/tests/glob_search.test.ts` menggunakan `node:test` dan `node:assert/strict`.
+  - Menguji fungsionalitas pencocokan pola, boundary limit, symlink loop, binary skip, regex search, filter ekstensi, integrasi tool protocol, dan izin dalam plan mode.
+  - Total test: **210 test hijau**.
+  - Versi dinaikkan ke **0.9.0** (`package.json`, `PROGRESS.md`, `README.md`).
+
 ### v0.8.0 — Eksekusi feedback.txt (FITUR BARU: Animasi Pac-Man "Thinking...")
 
 - [x] **#1 Animasi Pac-Man makan teks "Thinking..."** (`src/core/ui.ts`) — menggantikan spinner polos `▸ Thinking...` dengan animasi teks Pac-Man:
@@ -219,7 +243,7 @@
 Berikut gap yang masih tersisa dibanding proyek referensi, diurutkan berdasarkan dampak vs usaha:
 
 ### Prioritas tinggi
-1. **Tool tambahan** — `read_file`, `edit_file`, `write_file`, `patch_file` selesai (v0.3.0/v0.4.0). Lanjutkan pola yang sama untuk `code_search`/`glob` (dengan penghindaran node_modules/dist/.git/biner per §5.31): (1) fungsi murni di `src/agent/filetools.ts`, (2) case baru di `runToolCall()` `src/agent/tools.ts`, (3) contoh blok di `TOOL_RULES` `src/agent/roles.ts`, (4) unit test.
+1. ~~**Tool tambahan** — `read_file`, `edit_file`, `write_file`, `patch_file`, `glob`, `code_search` selesai (v0.3.0/v0.4.0/v0.9.0).~~ **SELESAI (v0.9.0)**.
 2. **Provider LLM lain** — interface `LLMProvider` + streaming SSE + testConnection/listModels selesai (v0.4.0, OpenAI-compatible saja). Tambah: Anthropic (`ANTHROPIC_API_KEY` + cache_control), Google Gemini, OpenRouter.
 3. **Subagent / delegation** — spawn subagent terisolasi untuk pekerjaan paralel, hasilnya dikembalikan sebagai satu turn (hemat konteks, §6.41). Pola: `Agent` baru dengan Context sendiri + channel komunikasi.
 4. **Skills system** — folder skill yang bisa dimuat agent saat tugas cocok (deklarasi di YAML/JSON + instruksi). Referensi: standar open `agentskills.io`. Mulai dari mekanisme load-by-name, lalu "belajar dari pengalaman" (simpan langkah sukses sebagai skill).
@@ -245,7 +269,7 @@ Browser automation, computer-use, voice/TTS, plugin system, sandbox backend (Doc
 
 ## ⏳ Fitur yang Belum / Tertunda (belum dikerjakan)
 
-- [ ] Tool lanjutan (`patch`/`apply_diff`, `code_search`/`glob`) — lihat Roadmap #1; `read_file`/`edit_file`/`write_file` sudah selesai (v0.3.0).
+- [x] Tool lanjutan (`patch`/`apply_diff`, `code_search`/`glob`) — SELESAI di v0.4.0 & v0.9.0.
 - [ ] Provider Anthropic/Gemini — Roadmap #2 (streaming OpenAI-compatible sudah selesai v0.3.0).
 - [ ] Subagent/delegation — Roadmap #3.
 - [ ] Skills system — Roadmap #4.
@@ -286,7 +310,7 @@ Browser automation, computer-use, voice/TTS, plugin system, sandbox backend (Doc
 
 ## 🤖 Context Handoff untuk AI Berikutnya
 
-1. **Verifikasi baseline dulu:** `npm install && npm run build && npm test` → 184 test harus hijau. Harness PTY (butuh `pip install pyte` + fake server: `node scripts/fake-llm-server.mjs` — mode fitur live-input: `FAKE_LLM_SLOW=1`; config test `.ruko/config-pty-test.json` dipakai otomatis oleh harness): `scripts/pty-liveinput.py` (v0.7: mode typing/queue/interrupt — jalankan semua via `scripts/run-liveinput-checks.sh`), `scripts/pty-statusbar.py` (status bar — kirim 4 pesan, harus ≤1 baris hidup), `scripts/pty-cycle.py`, `scripts/pty-repro.py`. Smoke test: `printf 'run echo hi\n/context\n/exit\n' | node dist/index.js`. Penting: spawn ruko via child pipe TIDAK mengaktifkan jalur TTY — driver harus benar-benar PTY.
+1. **Verifikasi baseline dulu:** `npm install && npm run build && npm test` → 210 test harus hijau. Harness PTY (butuh `pip install pyte` + fake server: `node scripts/fake-llm-server.mjs` — mode fitur live-input: `FAKE_LLM_SLOW=1`; config test `.ruko/config-pty-test.json` dipakai otomatis oleh harness): `scripts/pty-liveinput.py` (v0.7: mode typing/queue/interrupt — jalankan semua via `scripts/run-liveinput-checks.sh`), `scripts/pty-statusbar.py` (status bar — kirim 4 pesan, harus ≤1 baris hidup), `scripts/pty-cycle.py`, `scripts/pty-repro.py`. Smoke test: `printf 'run echo hi\n/context\n/exit\n' | node dist/index.js`. Penting: spawn ruko via child pipe TIDAK mengaktifkan jalur TTY — driver harus benar-benar PTY.
 2. **Mulai dari Roadmap #1** (tool read/write/patch/search) — dampak terbesar dengan usaha terkecil. Pola menambah tool: (1) case baru di `runToolCall()` `src/agent/tools.ts`, (2) sebut di `SYSTEM_PROMPT` `src/agent/agent.ts`, (3) unit test.
 3. **Struktur kode:** `src/core/` = infrastruktur (loop, executor, summarizer, approval, compressor, context, session, config); `src/agent/` = logika agen (agent, llm, tools, commands). Entry point `src/index.ts`. Semua ESM, import pakai ekstensi `.js`, TypeScript strict, JSDoc singkat.
 4. **Fitur wajib dari spesifikasi awal (jangan dihapus):** Log Summarizer >1000 char terpasang di `executor.ts` (param `summarize`, default `true`); System Loop menerima instruksi; eksekusi shell bawaan.
