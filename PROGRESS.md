@@ -45,6 +45,35 @@
   - Total test: **210 test hijau**.
   - Versi dinaikkan ke **0.9.0** (`package.json`, `PROGRESS.md`, `README.md`).
 
+### v0.10.1 — Hardening Keamanan Pre-Publish (5 HIGH + 4 MEDIUM Selesai)
+
+- [x] **#1 (H1) Workspace Sandbox & Proteksi Path Traversal** (`src/agent/tools.ts`, `src/agent/filetools.ts`):
+  - `assertInsideWorkspace(abs, workspaceRoot)` diterapkan ke semua 6 file tools: `read_file`, `glob`, `code_search`, `write_file`, `edit_file`, `patch_file`.
+  - Mengunci seluruh operasi filesystem ke dalam root direktori kerja (default: `process.cwd()`), menolak path traversal seperti `../../etc/passwd`, `/etc/hosts`, `~/.bashrc`, atau `~/.ssh/`.
+  - Mendukung konfigurasi workspace root eksplisit via `setWorkspaceRoot()` dan `ToolDeps.workspaceRoot` untuk fleksibilitas context test tanpa melonggarkan keamanan di production.
+  - Penanganan error aman: error path traversal ditangkap dan dilaporkan sebagai tool error JSON, tanpa menyebabkan proses/agent crash.
+- [x] **#2 (H2) Perbaikan Allowlist Token/Prefix Boundary Match** (`src/core/approval.ts`):
+  - Mengganti pencocokan substring `command.includes(allow)` dengan token/prefix boundary match: `trimmed === allow || trimmed.startsWith(allow + ' ')`.
+  - Mencegah bypass universal dari string kosong `""` atau karakter spasi `" "` di `approvalAllowlist`.
+  - Evaluasi allowlist diposisikan secara ketat SETELAH pemeriksaan `BLOCKED_PATTERNS` — perintah berbahaya kategori BLOCKED tidak dapat dibypass oleh allowlist.
+- [x] **#3 (H3) Proteksi Eksfiltrasi Kredensial via BaseUrl** (`src/core/config.ts`):
+  - Validasi ketat protokol dan target host pada `baseUrl` yang dimuat dari file konfigurasi.
+  - Menolak URL HTTP remote tidak terenkripsi (hanya mengizinkan HTTP untuk `localhost` dan `127.0.0.1`, selainnya wajib HTTPS) agar API key tidak terkirim tanpa enkripsi ke server penyerang.
+- [x] **#4 (H4) Enforce BLOCKED Patterns saat Approval Dinonaktifkan** (`src/core/approval.ts`):
+  - Saat `approvalEnabled: false` atau `RUKO_YOLO_MODE` aktif, perintah level DANGEROUS dilewati tanpa konfirmasi, TETAPI perintah destruktif level BLOCKED (`rm -rf /`, `mkfs`, fork bomb, dsb.) tetap diblokir mutlak via `checkBlockedOnly()`.
+  - Test suite diupdate untuk memastikan proteksi BLOCKED tetap aktif meski approval dimatikan.
+- [x] **#5 (H5) Fallback Config Tool Aman** (`src/agent/tools.ts`):
+  - Mengganti fallback tidak aman `{ approvalEnabled: false }` menjadi `DEFAULT_CONFIG` di `runToolCallRaw`, memastikan approval gate tidak mati diam-diam jika caller lupa meneruskan konfigurasi.
+- [x] **#6 (M1) Validasi Skema Konfigurasi** (`src/core/config.ts`):
+  - Fungsi `sanitizeConfigFile()` memvalidasi tipe data, membatasi rentang nilai angka (timeout, maxLogChars, maxContextChars), dan membersihkan entri kosong/invalid pada `approvalAllowlist`.
+- [x] **#7 (M2 & M4) Enforce File Permissions 0600 (Owner Only)** (`src/core/config.ts`, `src/core/session.ts`):
+  - `saveConfig()` dan `saveSession()` kini memanggil `chmodSync(path, 0o600)` eksplisit untuk menjamin izin file tetap 0600 meskipun file sudah ada sebelumnya dengan mode longgar.
+- [x] **#8 (M3) Masking API Key Sadar Panjang Token** (`src/agent/commands.ts`):
+  - Implementasi `maskApiKey()` mencegah bocornya token pendek pada tampilan `/config`: token ≤ 8 karakter dimask 100%, token 9–14 karakter menampilkan 2 karakter awal/akhir, token > 14 karakter menampilkan 3 awal dan 4 akhir.
+- [x] **#9 Anti-Regression Tests**:
+  - 10 unit test baru ditambahkan di `src/tests/` (`config.test.ts`, `session.test.ts`, `commands.test.ts`, `filetools.test.ts`, `glob_search.test.ts`, `fileedit.test.ts`, `patchfile.test.ts`).
+  - Total: **251 test hijau** (sebelumnya 241), 0 failures, `npm run typecheck` bersih.
+
 ### v0.10.0 — Eksekusi feedback.txt (Roadmap #5: Approval pintar — Guardian LLM)
 
 - [x] **#1 Arsitektur dua lapis (regex → guardian LLM)** (`src/core/approval.ts`):
@@ -352,7 +381,7 @@ Browser automation, computer-use, voice/TTS, plugin system, sandbox backend (Doc
 
 ## 🤖 Context Handoff untuk AI Berikutnya
 
-1. **Verifikasi baseline dulu:** `npm install && npm run build && npm test` → 241 test harus hijau. Harness PTY (butuh `pip install pyte` + fake server: `node scripts/fake-llm-server.mjs` — mode fitur live-input: `FAKE_LLM_SLOW=1`; config test `.ruko/config-pty-test.json` dipakai otomatis oleh harness): `scripts/pty-liveinput.py` (v0.7: mode typing/queue/interrupt — jalankan semua via `scripts/run-liveinput-checks.sh`), `scripts/pty-statusbar.py` (status bar — kirim 4 pesan, harus ≤1 baris hidup), `scripts/pty-cycle.py`, `scripts/pty-repro.py`. Smoke test: `printf 'run echo hi\n/context\n/exit\n' | node dist/index.js`. Penting: spawn ruko via child pipe TIDAK mengaktifkan jalur TTY — driver harus benar-benar PTY.
+1. **Verifikasi baseline dulu:** `npm install && npm run build && npm test` → 251 test harus hijau. Harness PTY (butuh `pip install pyte` + fake server: `node scripts/fake-llm-server.mjs` — mode fitur live-input: `FAKE_LLM_SLOW=1`; config test `.ruko/config-pty-test.json` dipakai otomatis oleh harness): `scripts/pty-liveinput.py` (v0.7: mode typing/queue/interrupt — jalankan semua via `scripts/run-liveinput-checks.sh`), `scripts/pty-statusbar.py` (status bar — kirim 4 pesan, harus ≤1 baris hidup), `scripts/pty-cycle.py`, `scripts/pty-repro.py`. Smoke test: `printf 'run echo hi\n/context\n/exit\n' | node dist/index.js`. Penting: spawn ruko via child pipe TIDAK mengaktifkan jalur TTY — driver harus benar-benar PTY.
 2. **Mulai dari Roadmap #1** (tool read/write/patch/search) — dampak terbesar dengan usaha terkecil. Pola menambah tool: (1) case baru di `runToolCall()` `src/agent/tools.ts`, (2) sebut di `SYSTEM_PROMPT` `src/agent/agent.ts`, (3) unit test.
 3. **Struktur kode:** `src/core/` = infrastruktur (loop, executor, summarizer, approval, compressor, context, session, config); `src/agent/` = logika agen (agent, llm, tools, commands). Entry point `src/index.ts`. Semua ESM, import pakai ekstensi `.js`, TypeScript strict, JSDoc singkat.
 4. **Fitur wajib dari spesifikasi awal (jangan dihapus):** Log Summarizer >1000 char terpasang di `executor.ts` (param `summarize`, default `true`); System Loop menerima instruksi; eksekusi shell bawaan.
