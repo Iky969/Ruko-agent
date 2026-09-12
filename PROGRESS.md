@@ -45,7 +45,7 @@
   - Total test: **210 test hijau**.
   - Versi dinaikkan ke **0.9.0** (`package.json`, `PROGRESS.md`, `README.md`).
 
-### v0.10.1 — Hardening Keamanan Pre-Publish (6 HIGH + 4 MEDIUM + GAP-01/03 Selesai)
+### v1.0.0 — Rilis Stabil Pertama (Production Ready & Full Security Hardening)
 
 - [x] **#1 (H1) Workspace Sandbox & Proteksi Path Traversal** (`src/agent/tools.ts`, `src/agent/filetools.ts`):
   - `assertInsideWorkspace(abs, workspaceRoot)` diterapkan ke semua 6 file tools: `read_file`, `glob`, `code_search`, `write_file`, `edit_file`, `patch_file`.
@@ -387,7 +387,7 @@ Browser automation, computer-use, voice/TTS, plugin system, sandbox backend (Doc
 
 ## 🤖 Context Handoff untuk AI Berikutnya
 
-1. **Verifikasi baseline dulu:** `npm install && npm run build && npm test` → 251 test harus hijau. Harness PTY (butuh `pip install pyte` + fake server: `node scripts/fake-llm-server.mjs` — mode fitur live-input: `FAKE_LLM_SLOW=1`; config test `.ruko/config-pty-test.json` dipakai otomatis oleh harness): `scripts/pty-liveinput.py` (v0.7: mode typing/queue/interrupt — jalankan semua via `scripts/run-liveinput-checks.sh`), `scripts/pty-statusbar.py` (status bar — kirim 4 pesan, harus ≤1 baris hidup), `scripts/pty-cycle.py`, `scripts/pty-repro.py`. Smoke test: `printf 'run echo hi\n/context\n/exit\n' | node dist/index.js`. Penting: spawn ruko via child pipe TIDAK mengaktifkan jalur TTY — driver harus benar-benar PTY.
+1. **Verifikasi baseline dulu:** `npm install && npm run build && npm test` → 255 test harus hijau. Harness PTY (butuh `pip install pyte` + fake server: `node scripts/fake-llm-server.mjs` — mode fitur live-input: `FAKE_LLM_SLOW=1`; config test `.ruko/config-pty-test.json` dipakai otomatis oleh harness): `scripts/pty-liveinput.py` (v0.7: mode typing/queue/interrupt — jalankan semua via `scripts/run-liveinput-checks.sh`), `scripts/pty-statusbar.py` (status bar — kirim 4 pesan, harus ≤1 baris hidup), `scripts/pty-cycle.py`, `scripts/pty-repro.py`. Smoke test: `printf 'run echo hi\n/context\n/exit\n' | node dist/index.js`. Penting: spawn ruko via child pipe TIDAK mengaktifkan jalur TTY — driver harus benar-benar PTY.
 2. **Mulai dari Roadmap #1** (tool read/write/patch/search) — dampak terbesar dengan usaha terkecil. Pola menambah tool: (1) case baru di `runToolCall()` `src/agent/tools.ts`, (2) sebut di `SYSTEM_PROMPT` `src/agent/agent.ts`, (3) unit test.
 3. **Struktur kode:** `src/core/` = infrastruktur (loop, executor, summarizer, approval, compressor, context, session, config); `src/agent/` = logika agen (agent, llm, tools, commands). Entry point `src/index.ts`. Semua ESM, import pakai ekstensi `.js`, TypeScript strict, JSDoc singkat.
 4. **Fitur wajib dari spesifikasi awal (jangan dihapus):** Log Summarizer >1000 char terpasang di `executor.ts` (param `summarize`, default `true`); System Loop menerima instruksi; eksekusi shell bawaan.
