@@ -99,6 +99,10 @@ const DANGEROUS_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // Interpreter dengan flag eksekusi inline — konten tidak dapat diverifikasi
   // oleh regex, jadi minimal minta konfirmasi manusia.
   [/\b(?:python[23]?\s+-c|(?:node|perl|ruby|lua)\s+-e|php\s+-r)\b/i, 'interpreter inline execution (konten tidak dapat diverifikasi)'],
+  // eval / subshell obfuscation — konten eval/subshell tidak bisa dievaluasi
+  // secara statis oleh regex. Minimal minta konfirmasi (guardian LLM bisa
+  // menganalisis lebih dalam).
+  [/\beval\s/i, 'eval (eksekusi kode dinamis tidak dapat diverifikasi)'],
 ];
 
 /**
