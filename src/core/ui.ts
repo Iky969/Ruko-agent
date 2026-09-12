@@ -38,10 +38,59 @@ export function stripAnsi(text: string): string {
   return text.replace(ANSI_RE, '');
 }
 
-/** Visible width of a string (ANSI codes do not count). */
+/**
+ * Terminal cell width of one code point (wcwidth subset): 2 for East-Asian
+ * Wide/Fullwidth and the emoji-presentation blocks, 1 otherwise. Terminals
+ * (and pyte) render ⚡ ⏳ 🟢 and CJK as TWO columns — counting them as one is
+ * what let the status bar overflow its clamp and wrap (feedback v0.7 audit;
+ * closes Known Bugs #7's double-width caveat).
+ */
+export function charWidth(cp: number): number {
+  if (cp < 0x1100) return 1;
+  if (
+    (cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
+    (cp >= 0x231a && cp <= 0x231b) ||
+    (cp >= 0x23e9 && cp <= 0x23ec) ||
+    cp === 0x23f0 || cp === 0x23f3 || // ⏳
+    (cp >= 0x25fd && cp <= 0x25fe) ||
+    (cp >= 0x2614 && cp <= 0x2615) ||
+    (cp >= 0x2648 && cp <= 0x2653) ||
+    cp === 0x267f || cp === 0x2693 || cp === 0x26a1 || // ⚡
+    (cp >= 0x26aa && cp <= 0x26ab) ||
+    (cp >= 0x26bd && cp <= 0x26bf) ||
+    (cp >= 0x26c4 && cp <= 0x26c5) ||
+    cp === 0x26ce || cp === 0x26d4 || cp === 0x26ea ||
+    (cp >= 0x26f2 && cp <= 0x26f3) || cp === 0x26f5 ||
+    cp === 0x26fa || cp === 0x26fd || cp === 0x2705 ||
+    (cp >= 0x270a && cp <= 0x270b) || cp === 0x2728 ||
+    cp === 0x274c || cp === 0x274e ||
+    (cp >= 0x2753 && cp <= 0x2755) || cp === 0x2757 ||
+    (cp >= 0x2795 && cp <= 0x2797) || cp === 0x27b0 || cp === 0x27bf ||
+    (cp >= 0x2b1b && cp <= 0x2b1c) || cp === 0x2b50 || cp === 0x2b55 ||
+    (cp >= 0x2e80 && cp <= 0x303e) ||
+    (cp >= 0x3041 && cp <= 0x33ff) ||
+    (cp >= 0x3400 && cp <= 0x4dbf) ||
+    (cp >= 0x4e00 && cp <= 0x9fff) ||
+    (cp >= 0xa000 && cp <= 0xa4cf) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe10 && cp <= 0xfe6f) ||
+    (cp >= 0xff00 && cp <= 0xff60) ||
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x1f300 && cp <= 0x1f7ff) || // emoji + colored circles 🟢🟡
+    (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+    (cp >= 0x20000 && cp <= 0x3fffd)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+/** Visible terminal columns of a string (ANSI codes do not count). */
 export function visibleLength(text: string): number {
-  // Strip ANSI, then count code points (emoji/graphemes approximated).
-  return Array.from(stripAnsi(text)).length;
+  let width = 0;
+  for (const ch of stripAnsi(text)) width += charWidth(ch.codePointAt(0)!);
+  return width;
 }
 
 export function padVisible(text: string, width: number): string {
@@ -75,9 +124,13 @@ export function truncateVisible(text: string, width: number): string {
         continue;
       }
     }
-    out += text[i];
-    count += 1;
-    i += 1;
+    const cp = text.codePointAt(i)!;
+    const ch = String.fromCodePoint(cp);
+    const w = charWidth(cp);
+    if (count + w > width) break; // don't split a double-width cell
+    out += ch;
+    count += w;
+    i += ch.length;
   }
   if (colored) out += '\u001b[0m';
   return out;
@@ -163,11 +216,15 @@ export interface StatusBarInput {
   role?: string;
   /** Plan mode flag shows `⏸ PLAN` in the bar so the block state is visible. */
   planMode?: boolean;
+  /** True while the AI is thinking/executing tools (v0.7 live input). */
+  busy?: boolean;
   /**
    * Char counts of the most recent turn (§8). Merged into the bar instead of
    * printed as its own output line, so usage stats never look like noise.
    */
   turn?: { promptChars: number; completionChars: number };
+  /** Queued messages waiting for the AI to finish (v0.7 badge, feedback #4). */
+  pending?: number;
 }
 
 /** `⚡ [model] | ctx 41% (12.3k/30k) · ↑3.2k ↓800 | / perintah` dark-green bar. */
@@ -176,12 +233,14 @@ export function buildStatusBar(input: StatusBarInput): string {
     ? Math.min(100, Math.round((input.usedChars / input.budgetChars) * 100))
     : 0;
   const plan = input.planMode ? '⏸ PLAN · ' : '';
+  const busy = input.busy ? '⏳ AI bekerja · ' : '';
   const role = input.role && input.role !== 'default' ? ` · ${input.role}` : '';
   const turn = input.turn
     ? ` · ↑${formatK(input.turn.promptChars)} ↓${formatK(input.turn.completionChars)}`
     : '';
+  const waiting = input.pending && input.pending > 0 ? ` · ⏳ ${input.pending} menunggu ` : '';
   return onDarkGreen(
-    ` ⚡ [${input.model}${role}] | ${plan}ctx ${pct}% (${formatK(input.usedChars)}/${formatK(input.budgetChars)})${turn} | / perintah · Ctrl+C batal `,
+    ` ⚡ [${input.model}${role}] | ${busy}${plan}ctx ${pct}% (${formatK(input.usedChars)}/${formatK(input.budgetChars)})${turn} | / perintah · Ctrl+C batal ${waiting}`,
   );
 }
 

@@ -1,11 +1,24 @@
-Bug yang sama (border/konten numpuk jadi baris terpisah, bukan nge-update di tempat yang sama) muncul lagi — kali ini di panel guide yang ditampilkan saat menjalankan "/mode beginner" (dan kemungkinan tiap kali mode beginner menampilkan guide-nya). Splash screen sudah dibenerin sebelumnya, tapi bug identik muncul di lokasi berbeda.
+Fitur baru: input tetap bisa diketik saat AI sedang bekerja (thinking atau menjalankan tool), bukan hilang seperti sekarang.
 
-Ini indikasi kuat instruksi audit dari sesi sebelumnya BELUM benar-benar dikerjakan (mencari semua titik render-loop dan menyatukannya jadi satu helper reusable). Sebelum menambal titik ini satu-satu lagi:
+MASALAH SAAT INI
+Saat AI sedang thinking/eksekusi tool, kotak input hilang — user tidak punya tempat mengetik sama sekali. Padahal user mungkin ingin menambahkan info (misal: "tambahkan variabel X juga") sambil AI masih kerja.
 
-1. Konfirmasi dulu: apakah panel guide "/mode beginner" ini pakai fungsi render terpisah dari splash screen yang sudah difix? Kalau iya, itu bukti audit sebelumnya tidak menjangkau semua titik.
-2. Jalankan pencarian menyeluruh: grep semua tempat yang mencetak box/border/panel ke stdout di luar satu baris teks biasa (splash, guide beginner, menu slash — dan cek juga apakah ada fitur lain yang belum ketahuan render box, misal /help, /usage, /context kalau tampilannya berbentuk kotak).
-3. Buat SATU helper redraw (kalau belum ada) dan pastikan SEMUA titik di atas — bukan cuma yang barusan dilaporkan — dipindah untuk pakai helper itu. Cantumkan daftar lengkap titik yang ditemukan dan dikonversi di PROGRESS.md, supaya jelas tidak ada yang keskip lagi.
-4. Tes manual: jalankan npm start, lalu langsung ketik "/mode beginner" — screenshot hasilnya, pastikan panel guide tampil sebagai kotak rapi, tidak numpuk.
-5. Jangan tutup task ini sampai kamu bisa menjamin: "semua titik render box di codebase sudah pakai helper yang sama" — bukan "titik yang dilaporkan user sudah dibenerin".
-6. Animasi gak muncul coba buat anim alternatif lain kalau itu gak bisa
-selalu laporkan progress pekerjaan di PROGRESS.md
+PERILAKU YANG DIMINTA
+1. Kotak input HARUS tetap tampil dan bisa diketik kapan pun, termasuk saat status AI = thinking/executing tool.
+2. Saat user menekan Enter untuk submit SELAMA AI masih sibuk, JANGAN langsung kirim atau langsung eksekusi. Tampilkan pilihan singkat ke user, contoh:
+   "Pesan disiapkan. [1] Kirim sekarang (hentikan pekerjaan AI saat ini) [2] Antre, kirim setelah tugas ini selesai — pilih:"
+   User tekan 1 atau 2 (atau Enter untuk default ke opsi 2/antre, karena itu lebih aman default-nya).
+3. Kalau pilih "kirim sekarang": interrupt pekerjaan AI yang sedang berjalan (mirip Ctrl+C tapi tidak membatalkan sesi, cuma menghentikan turn saat ini), lalu proses pesan baru sebagai giliran baru.
+4. Kalau pilih "antre": pesan disimpan di queue, ditampilkan sebagai indikator kecil (misal badge "1 pesan menunggu" di status bar), lalu begitu AI selesai dengan tugas saat ini (tool selesai + jawaban final diberikan), pesan yang diantre otomatis dikirim sebagai giliran berikutnya TANPA user perlu mengetik ulang.
+5. User bisa antre lebih dari satu pesan berurutan (FIFO), masing-masing dikirim satu per satu setelah AI selesai dengan yang sebelumnya.
+6. Kalau AI sedang menunggu approval untuk tool berbahaya (dialog approval sedang aktif), input biasa dan approval prompt jangan tabrakan — approval tetap prioritas menerima input y/n, pesan baru yang diketik tetap masuk antrean seperti biasa.
+
+CATATAN TEKNIS
+- Fitur ini menambah state baru di editor (bukan cuma status "idle vs busy" seperti sekarang, tapi juga "ada pesan diantre atau tidak").
+- Pakai mesin redraw bersama yang SUDAH ADA dari fix sebelumnya (LineEditor/createInPlaceBlock) — jangan bikin jalur render terpisah lagi untuk fitur ini, supaya tidak mengulang bug numpuk yang baru saja dibereskan.
+- Tambahkan ke PROGRESS.md tabel audit yang sudah ada sebagai titik render baru, konfirmasi dia pakai mesin yang sama.
+
+VERIFIKASI
+- Tes manual: kirim pesan, SEBELUM AI selesai jawab ketik pesan kedua + Enter, pilih "antre" — pastikan pesan kedua otomatis terkirim persis setelah AI selesai, tanpa duplikasi atau hilang.
+- Tes manual kedua: ulangi tapi pilih "kirim sekarang" — pastikan pekerjaan AI yang sedang berjalan berhenti bersih (tidak corrupt state), lalu pesan baru diproses.
+- Update unit test seperti biasa, jangan sampai regresi ke suite yang sudah 133 hijau.

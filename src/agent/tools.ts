@@ -102,6 +102,8 @@ export interface ToolDeps {
    * refused outright while the CLI has it active.
    */
   planMode?: boolean;
+  /** v0.7: abort signal — an interrupted turn kills its running exec child. */
+  signal?: AbortSignal;
 }
 
 /** Tools refused while plan mode is active (read_file stays available). */
@@ -173,6 +175,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         {
           timeoutMs: typeof call.timeoutMs === 'number' ? call.timeoutMs : undefined,
           confirm: deps.confirm ?? null,
+          signal: deps.signal,
         },
         config,
       );

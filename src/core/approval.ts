@@ -73,6 +73,8 @@ export interface GuardOptions {
   confirm?: Confirmer | null;
   timeoutMs?: number;
   summarize?: boolean;
+  /** v0.7: abort signal that kills the child when the turn is interrupted. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -96,6 +98,7 @@ export async function guardedExecute(
   return execute(command, {
     timeoutMs: options.timeoutMs,
     summarize: options.summarize,
+    signal: options.signal,
   });
 }
 

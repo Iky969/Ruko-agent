@@ -63,3 +63,46 @@ test('agent does not call a tool for a plain greeting and returns full text', as
   assert.equal(result, 'Halo! Saya Ruko, siap membantu.');
   assert.ok(out.includes('Halo! Saya Ruko, siap membantu.'), 'answer streams through untouched');
 });
+
+// --- v0.7 turn interruption (AbortSignal) -----------------------------------
+
+/** Provider that hangs until its signal aborts, then rejects AbortError. */
+class HangingProvider implements LLMProvider {
+  readonly name = 'hang';
+  readonly isConfigured = true;
+  model = 'hang-model';
+  aborted = false;
+  setModel(): void {}
+  chat(_messages: ContextMessage[], options?: ChatOptions): Promise<string> {
+    return new Promise<string>((_resolve, reject) => {
+      options?.signal?.addEventListener('abort', () => {
+        this.aborted = true;
+        const err = new Error('The operation was aborted');
+        err.name = 'AbortError';
+        reject(err);
+      });
+    });
+  }
+}
+
+test('interrupted turn resolves cleanly with empty response instead of throwing (v0.7 #3)', async () => {
+  const provider = new HangingProvider();
+  const ctx = new Context(config);
+  const agent = new Agent(ctx, provider, config);
+  const ac = new AbortController();
+  const turn = agent.handleInstruction('kerja lama', ac.signal);
+  setTimeout(() => ac.abort(), 10);
+  const { result } = await captureStdout(() => turn);
+  assert.equal(result, '', 'aborted turn returns empty response');
+  assert.ok(provider.aborted, 'provider saw the abort signal');
+});
+
+test('already-aborted signal stops the turn before any request (v0.7)', async () => {
+  const provider = new FakeProvider(['tidak boleh terpanggil']);
+  const ctx = new Context(config);
+  const agent = new Agent(ctx, provider, config);
+  const ac = new AbortController();
+  ac.abort();
+  const { result } = await captureStdout(() => agent.handleInstruction('x', ac.signal));
+  assert.equal(result, '', 'aborted up-front returns empty');
+});

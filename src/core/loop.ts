@@ -41,6 +41,12 @@ export class SystemLoop {
   private editor: LineEditor | null = null;
   private running = true;
   private sessionId: string | null = null;
+  /** True while the agent is thinking/executing (v0.7 live input). */
+  private busy = false;
+  /** FIFO of messages typed while the AI was busy (v0.7 #4/#5). */
+  private queue: string[] = [];
+  /** Abort handle for the in-flight turn (v0.7 #3 "kirim sekarang"). */
+  private turnAbort: AbortController | null = null;
 
   constructor(
     private readonly ctx: Context,
@@ -84,12 +90,16 @@ export class SystemLoop {
     this.startPipeLoop();
   }
 
-  /** TTY path: status bar, then a raw-mode line read, repeatedly. */
+  /** TTY path: one LIVE status bar + raw-mode line read, redrawn in place. */
   private async runInteractive(): Promise<void> {
     while (this.running) {
-      process.stdout.write(`${this.statusBarLine()}\n`);
+      // The bar rides INSIDE the editor's managed region (statusLine): every
+      // frame redraws it in place and submit() erases it, so stale versions
+      // can never pile up in scrollback (feedback v0.6.2 — third site of the
+      // render-loop bug, after splash and the beginner guide).
       const line = await this.editor!.readLine({
         prompt: promptGlyph(),
+        statusLine: () => this.statusBarLine(),
         placeholder: PROMPT_HINT,
         getMenu: (buffer) => this.slashMenuItems(buffer),
         // Enter on a lone "/" just closes the overlay — nothing is echoed
@@ -101,6 +111,13 @@ export class SystemLoop {
         return;
       }
       await this.handleLine(line);
+      // v0.7 #4/#5: drain the queue FIFO — each queued message runs as its
+      // own turn; new ambient submissions may extend the queue mid-drain.
+      while (this.running && this.queue.length > 0) {
+        const next = this.queue.shift()!;
+        console.log(`${promptGlyph()}${next}`);
+        await this.handleLine(next);
+      }
     }
   }
 
@@ -133,6 +150,9 @@ export class SystemLoop {
       budgetChars: this.config.maxContextChars,
       role: this.config.role ?? 'default',
       planMode: this.agent.planMode,
+      // v0.7: busy flag + queue badge live in the bar (same redraw machine).
+      busy: this.busy,
+      pending: this.queue.length,
       // §8: last turn's token-ish stats ride in the bar, not a separate line.
       turn: this.agent.lastUsage ?? undefined,
     });
@@ -246,13 +266,7 @@ export class SystemLoop {
           });
         }
       } else {
-        this.ctx.add('user', input);
-        const response = await this.agent.handleInstruction(input);
-        if (response) {
-          this.ctx.add('assistant', response);
-          // With streaming the text was already revealed live by the agent.
-          if (!this.agent.lastResponseStreamed) console.log(response);
-        }
+        await this.runTurn(input);
         // §7.47/§8: per-turn stats moved into the status bar (statusBarLine),
         // so only the proactive >50% warning stays as an output line.
         if (
@@ -271,6 +285,69 @@ export class SystemLoop {
       }
     } catch (err) {
       console.error(`[error] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * One AI turn with the input kept LIVE (feedback v0.7 #1): the ambient
+   * region (same redraw machine as readLine) stays typable while the agent
+   * thinks/executes; Enter routes to the queue modal, Ctrl+C interrupts the
+   * turn only.
+   */
+  private async runTurn(input: string): Promise<void> {
+    this.ctx.add('user', input);
+    this.busy = true;
+    this.turnAbort = new AbortController();
+    this.editor?.startAmbient({
+      prompt: promptGlyph(),
+      statusLine: () => this.statusBarLine(),
+      placeholder: 'AI sedang bekerja — ketik tetap bisa, Enter untuk antre…',
+      getMenu: (buffer) => this.slashMenuItems(buffer),
+      onSubmit: (line) => {
+        void this.handleAmbientSubmit(line);
+      },
+      onInterrupt: () => {
+        this.turnAbort?.abort();
+      },
+    });
+    try {
+      const response = await this.agent.handleInstruction(input, this.turnAbort.signal);
+      if (response) {
+        this.ctx.add('assistant', response);
+        // With streaming the text was already revealed live by the agent.
+        if (!this.agent.lastResponseStreamed) console.log(response);
+      }
+    } finally {
+      this.busy = false;
+      this.turnAbort = null;
+      this.editor?.stopAmbient();
+    }
+  }
+
+  /**
+   * Enter pressed while the AI is busy (feedback v0.7 #2–#5): never send
+   * directly — ask [1] interrupt-and-send / [2] queue (default, safer).
+   * The modal renders inside the SAME live region (no separate path).
+   */
+  private async handleAmbientSubmit(line: string): Promise<void> {
+    const value = line.trim();
+    // A lone "/" only opened the overlay — never queue it (feedback v0.6 #2).
+    if (!value || stripAnsi(value) === '/') return;
+    const answer = await this.editor!.askModal({
+      prompt: yellow(
+        ' Pesan disiapkan. [1] Kirim sekarang (hentikan AI) · [2] Antre, kirim setelah tugas ini — pilih: ',
+      ),
+      keys: ['1', '2'],
+      defaultKey: '2',
+    });
+    if (answer === '1') {
+      // Interrupt: the message goes to the FRONT of the queue so the drain
+      // loop processes it as the very next turn once the abort unwinds.
+      this.queue.unshift(value);
+      this.turnAbort?.abort();
+    } else {
+      // '2' or Enter (default) or modal dismissed by turn end — queue FIFO.
+      this.queue.push(value);
     }
   }
 

@@ -41,6 +41,7 @@ const server = createServer((req, res) => {
     }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     turn += 1;
+    const slow = process.env.FAKE_LLM_SLOW === '1';
     const text =
       turn === 1
         ? 'Aku cek dulu.\n```tool\n{"tool":"exec","command":"echo halo-dari-tool"}\n```\nSelesai cek.'
@@ -53,7 +54,7 @@ const server = createServer((req, res) => {
         const evt = { choices: [{ delta: { content: chunks[i] } }] };
         res.write(`data: ${JSON.stringify(evt)}\n\n`);
         i += 1;
-        setTimeout(tick, 2);
+        setTimeout(tick, slow ? 300 : 2);
       } else {
         res.write('data: [DONE]\n\n');
         res.end();

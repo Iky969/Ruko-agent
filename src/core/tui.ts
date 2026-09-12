@@ -15,7 +15,7 @@
  */
 
 import type { ReadStream, WriteStream } from 'node:tty';
-import { dim, visibleLength } from './ui.js';
+import { dim, truncateVisible, visibleLength } from './ui.js';
 
 /** One row in the live overlay (slash-command menu). */
 export interface MenuItem {
@@ -28,6 +28,14 @@ export interface MenuItem {
 export interface ReadLineOptions {
   /** Prompt printed before the buffer (may contain ANSI colors). */
   prompt: string;
+  /**
+   * LIVE status line drawn ABOVE the prompt inside the editor's managed
+   * region (feedback v0.6.2 — the green status bar used to be printed fresh
+   * every REPL iteration, so stale versions piled up in scrollback). The
+   * editor redraws it in place on every frame and ERASES it on submit/cancel,
+   * so at most one status bar is ever alive on screen.
+   */
+  statusLine?: () => string;
   /** Dim hint shown only while the buffer is empty (§3). */
   placeholder?: string;
   /** Echo `*` per character instead of the real text (§5). */
@@ -47,10 +55,45 @@ interface Pending {
   resolve: (value: string | null) => void;
 }
 
+/** Options for the always-live ambient input (feedback v0.7 #1). */
+export interface AmbientOptions {
+  prompt: string;
+  placeholder?: string;
+  /** Live status line drawn above the input (same renderer as readLine). */
+  statusLine?: () => string;
+  /** Slash overlay while the AI works — identical filtering rules. */
+  getMenu?: (buffer: string) => MenuItem[];
+  /** Enter pressed while the AI is busy — the loop shows the queue modal. */
+  onSubmit: (line: string) => void;
+  /** Ctrl+C pressed while the AI is busy — interrupt the turn, not the session. */
+  onInterrupt: () => void;
+}
+
+/** Inline modal question inside the live region (feedback v0.7 #2/#6). */
+export interface ModalOptions {
+  prompt: string;
+  /** Single keys that answer the modal (compared case-insensitively). */
+  keys: string[];
+  /** Answer used when the user presses Enter without choosing. */
+  defaultKey?: string;
+}
+
+interface Modal extends ModalOptions {
+  resolve: (key: string | null) => void;
+}
+
 const CSI_RE = /^\u001b\[([0-9;]*)([A-Za-z~])/;
 
 export class LineEditor {
   private pending: Pending | null = null;
+  /** Ambient input while the AI works (feedback v0.7 #1); null when idle. */
+  private ambient: AmbientOptions | null = null;
+  /** True while a blocking readLine (e.g. approval) borrows the terminal. */
+  private ambientSuspended = false;
+  /** Half-typed ambient buffer parked while readLine borrows the terminal. */
+  private ambientSaved: { buffer: string; cursor: number } | null = null;
+  /** Inline modal question inside the live region (queue choice, y/N). */
+  private modal: Modal | null = null;
   private buffer = '';
   private cursor = 0;
   private menu: MenuItem[] = [];
@@ -62,6 +105,19 @@ export class LineEditor {
   private drawnRows = 0;
   /** Row (0-based, from the top of the drawn region) the cursor sat on. */
   private drawnCursorRow = 0;
+  /** Terminal rows occupied by the live status line above the prompt (0 if none). */
+  private statusRows = 0;
+  /**
+   * Partial output line written by the agent since its last newline. While
+   * the live region is up, every stdout write is intercepted: the region is
+   * erased, the tail + fresh output are written, then the region redraws
+   * BELOW the output — so streaming text never corrupts the input (v0.7).
+   */
+  private tail = '';
+  /** True when the current tail row is actually painted above the region. */
+  private tailRendered = false;
+  private patchedWrite: ((chunk: any, ...rest: any[]) => boolean) | null = null;
+  private rawOutputWrite: ((chunk: any, ...rest: any[]) => boolean) | null = null;
 
   constructor(
     private readonly input: ReadStream = process.stdin as ReadStream,
@@ -72,14 +128,39 @@ export class LineEditor {
     return this.pending !== null;
   }
 
+  /** True while an inline modal question (queue choice / approval) is open. */
+  get modalActive(): boolean {
+    return this.modal !== null;
+  }
+
+  /**
+   * Shows a single-key modal question INSIDE the live region (same renderer —
+   * feedback v0.7 #2/#6: no separate render path). Resolves with the pressed
+   * key (lowercased), `defaultKey` on Enter, or `null` on Ctrl+C/Escape.
+   */
+  askModal(options: ModalOptions): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
+      if (this.modal || (!this.pending && !this.ambient)) {
+        resolve(null);
+        return;
+      }
+      this.modal = { ...options, resolve };
+      this.render();
+    });
+  }
+
   /** Reads one line. Resolves `null` on Ctrl+C or Ctrl+D at an empty buffer. */
   readLine(options: ReadLineOptions): Promise<string | null> {
+    // A blocking read (e.g. the approval prompt while the AI works) borrows
+    // the terminal: park the ambient region, restore it in finish().
+    this.suspendAmbient();
     this.buffer = '';
     this.cursor = 0;
     this.menu = [];
     this.selected = 0;
     this.drawnRows = 0;
     this.drawnCursorRow = 0;
+    this.statusRows = 0;
     return new Promise<string | null>((resolve) => {
       this.pending = { options, resolve };
       this.attach();
@@ -95,9 +176,81 @@ export class LineEditor {
     });
   }
 
+  // --- ambient live input (feedback v0.7 #1) --------------------------------
+
+  /**
+   * Starts the always-live input region shown while the AI works. Uses the
+   * SAME redraw machinery as readLine (status line + prompt + overlay), so
+   * the stacking bug cannot return, and intercepts stdout writes so streamed
+   * agent output lands ABOVE the region instead of corrupting it.
+   */
+  startAmbient(options: AmbientOptions): void {
+    if (this.ambient) return;
+    this.ambient = options;
+    this.buffer = '';
+    this.cursor = 0;
+    this.menu = [];
+    this.selected = 0;
+    this.drawnRows = 0;
+    this.drawnCursorRow = 0;
+    this.statusRows = 0;
+    this.ambientSuspended = false;
+    this.attach();
+    this.patchStdout();
+    this.render();
+  }
+
+  /** Removes the ambient region and stops intercepting stdout. */
+  stopAmbient(): void {
+    if (!this.ambient) return;
+    // A modal still open when the turn ends resolves with its default — the
+    // safer choice (queue) — so the loop's submit handler never hangs.
+    if (this.modal) {
+      const modal = this.modal;
+      this.modal = null;
+      modal.resolve(modal.defaultKey ?? null);
+    }
+    this.eraseRegion();
+    this.ambient = null;
+    // The partial output line (if any) already sits ABOVE the erased region
+    // with the cursor below it — it is committed; the region must not redraw.
+    this.unpatchStdout();
+    if (!this.pending) this.detach();
+  }
+
+  /** readLine borrows the terminal: hide the ambient region, keep raw mode. */
+  private suspendAmbient(): void {
+    if (!this.ambient || this.ambientSuspended || this.pending) return;
+    this.ambientSuspended = true;
+    this.eraseRegion();
+    this.ambientSaved = { buffer: this.buffer, cursor: this.cursor };
+    this.buffer = '';
+    this.cursor = 0;
+  }
+
+  /** Ambient region returns after the blocking read committed its line. */
+  private resumeAmbient(): void {
+    if (!this.ambient || !this.ambientSuspended) return;
+    this.ambientSuspended = false;
+    // Restore the half-typed ambient line (approval borrowed the terminal —
+    // feedback v0.7 #6: the user's in-progress message must not be lost).
+    this.buffer = this.ambientSaved?.buffer ?? '';
+    this.cursor = this.ambientSaved?.cursor ?? 0;
+    this.ambientSaved = null;
+    this.menu = [];
+    this.selected = 0;
+    this.drawnRows = 0;
+    this.drawnCursorRow = 0;
+    this.statusRows = 0;
+    this.attach();
+    this.refreshMenu();
+    this.render();
+  }
+
   /** Restores the terminal and drops any in-flight line. */
   close(): void {
     if (this.pending) this.finish(null);
+    this.stopAmbient();
     this.detach();
   }
 
@@ -105,9 +258,11 @@ export class LineEditor {
     this.input.setRawMode(true);
     this.input.resume();
     this.input.setEncoding('utf8');
-    const handler = (chunk: string | Buffer): void => this.handleData(String(chunk));
-    this.dataHandler = handler;
-    this.input.on('data', handler);
+    if (!this.dataHandler) {
+      const handler = (chunk: string | Buffer): void => this.handleData(String(chunk));
+      this.dataHandler = handler;
+      this.input.on('data', handler);
+    }
   }
 
   private detach(): void {
@@ -128,8 +283,10 @@ export class LineEditor {
     this.selected = 0;
     this.drawnRows = 0;
     this.drawnCursorRow = 0;
+    this.statusRows = 0;
     this.detach();
     pending?.resolve(value);
+    this.resumeAmbient();
   }
 
   // --- rendering -----------------------------------------------------------
@@ -140,9 +297,15 @@ export class LineEditor {
   }
 
   private renderedLine(): string {
-    const { prompt, placeholder, mask } = this.pending!.options;
+    const { prompt, placeholder, mask } = this.activeOptions();
     if (this.buffer.length === 0) return prompt + (placeholder ? dim(placeholder) : '');
     return prompt + (mask ? '*'.repeat(this.buffer.length) : this.buffer);
+  }
+
+  /** The options driving the live region right now (readLine wins over ambient). */
+  private activeOptions(): Pick<ReadLineOptions, 'prompt' | 'placeholder' | 'statusLine' | 'getMenu' | 'mask'> {
+    if (this.pending) return this.pending.options;
+    return this.ambient ?? { prompt: '› ' };
   }
 
   /** Terminal height (fallback 24 when stdout is not a TTY). */
@@ -152,13 +315,15 @@ export class LineEditor {
 
   /**
    * Rows the overlay may occupy WITHOUT the terminal scrolling (§ v0.6): the
-   * REPL writes the status bar + prompt right above it, so leave 3 rows of
+   * live region also holds the status line + prompt, so leave 3 rows of
    * margin; anything taller gets pushed into scrollback where ESC[0J can no
    * longer reach it — that scroll is how closed menus used to linger as
    * duplicate blocks.
    */
   private overlayBudget(lineRows: number): number {
-    return Math.max(0, this.termRows() - 3 - lineRows);
+    const hasStatus = !!this.activeOptions().statusLine;
+    const hasModal = this.modal ? 1 : 0;
+    return Math.max(0, this.termRows() - 3 - lineRows - (hasStatus ? 1 : 0) - hasModal);
   }
 
   /**
@@ -211,16 +376,30 @@ export class LineEditor {
   }
 
   private render(): void {
-    if (!this.pending) return;
-    const options = this.pending.options;
-    const { rows, heights } = this.menuRows();
+    if (!this.pending && !this.ambient) return;
+    const options = this.activeOptions();
+    // While a modal question is open it replaces the overlay: the user's
+    // full attention goes to the choice (feedback v0.7 #2/#6).
+    const { rows, heights } = this.modal ? { rows: [], heights: [] } : this.menuRows();
     const width = this.termWidth();
     // Return the cursor to the FIRST row of the previously drawn region
-    // (a bare "\r" only resets within the CURRENT row, which breaks redraw
-    // once the buffer wraps to row 2+), then erase everything below it.
+    // (status line included — a bare "\r" only resets within the CURRENT row,
+    // which breaks redraw once the buffer wraps to row 2+), then erase
+    // everything below it.
     let out = '';
-    if (this.drawnCursorRow > 0) out += `\u001b[${this.drawnCursorRow}A`;
+    const climb = this.drawnCursorRow + this.statusRows;
+    if (climb > 0) out += `\u001b[${climb}A`;
     out += `\r\u001b[0J`;
+    // Live status line (e.g. the green bar): redrawn IN PLACE every frame and
+    // clamped to width-1 so it can never wrap and break the rewind math
+    // (feedback v0.6.2 — the bar used to pile up in scrollback per iteration).
+    if (options.statusLine) {
+      const status = truncateVisible(options.statusLine(), width - 1);
+      out += `${status}\n`;
+      this.statusRows = 1;
+    } else {
+      this.statusRows = 0;
+    }
     const line = this.renderedLine();
     out += line;
     // Rows this draw occupies once the terminal wraps it naturally.
@@ -240,19 +419,147 @@ export class LineEditor {
       menuRows += heights[i];
       out += `\n\u001b[2K${row}`;
     });
+    // Modal question row (drawn under the input line, above nothing else).
+    let modalRows = 0;
+    if (this.modal) {
+      const text = truncateVisible(this.modal.prompt, width - 1);
+      modalRows = 1;
+      out += `\n\u001b[2K${text}`;
+    }
     // From the bottom of the drawn region, walk back up to the cursor row of
     // the input line, then right to the exact column.
-    const upFromBottom = lineRows - 1 + menuRows - cursorRow;
+    const upFromBottom = lineRows - 1 + menuRows + modalRows - cursorRow;
     if (upFromBottom > 0) out += `\u001b[${upFromBottom}A`;
     out += '\r';
     if (cursorCol > 0) out += `\u001b[${cursorCol}C`;
-    this.output.write(out);
+    this.rawWrite(out);
+  }
+
+  /** Write that BYPASSES the stdout interception (used by the renderer itself). */
+  private rawWrite(text: string): void {
+    if (this.rawOutputWrite) this.rawOutputWrite(text);
+    else this.output.write(text);
+  }
+
+  /** Climb to the top of the live region and erase everything below it. */
+  private eraseRegion(): void {
+    const climb = this.drawnCursorRow + this.statusRows;
+    let out = '';
+    if (climb > 0) out += `\u001b[${climb}A`;
+    out += '\r\u001b[0J';
+    this.rawWrite(out);
+    this.drawnRows = 0;
+    this.drawnCursorRow = 0;
+    this.statusRows = 0;
+  }
+
+  /** Erase the uncommitted output row (if rendered) AND the live region. */
+  private eraseForOutput(): void {
+    let tailRows = 0;
+    if (this.tailRendered) {
+      const width = this.termWidth();
+      const tailOut = this.tail.includes('\r') ? this.tail.slice(this.tail.lastIndexOf('\r') + 1) : this.tail;
+      tailRows = tailOut ? Math.max(1, Math.ceil(visibleLength(tailOut) / width)) : 0;
+    }
+    const climb = this.drawnCursorRow + this.statusRows + tailRows;
+    let out = '';
+    if (climb > 0) out += `\u001b[${climb}A`;
+    out += '\r\u001b[0J';
+    this.rawWrite(out);
+    this.drawnRows = 0;
+    this.drawnCursorRow = 0;
+    this.statusRows = 0;
+    this.tailRendered = false;
+  }
+
+  /**
+   * Intercept stdout while the live region is up (v0.7): streamed agent
+   * output lands ABOVE the region — the region is erased, the output replayed
+   * (completed lines commit; the partial tail redraws in place, which is how
+   * the spinner keeps animating), then the region redraws below. A blocking
+   * readLine (approval etc.) borrows the terminal: writes pass through raw.
+   */
+  private patchStdout(): void {
+    if (this.patchedWrite) return;
+    // Capture the ORIGINAL bound write now — resolving `this.output.write`
+    // lazily would recurse once the patch is installed.
+    const orig = ((this.output as unknown as { write: (c: any, ...r: any[]) => boolean }).write).bind(
+      this.output,
+    );
+    const raw = ((chunk: any, ...rest: any[]): boolean => orig(chunk, ...rest)) as (
+      chunk: any,
+      ...rest: any[]
+    ) => boolean;
+    this.rawOutputWrite = raw;
+    const patched = (chunk: any, ...rest: any[]): boolean => {
+      if (this.pending || this.ambientSuspended || !this.ambient) {
+        return raw(chunk, ...rest);
+      }
+      const text =
+        typeof chunk === 'string' ? chunk : Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+      this.eraseForOutput();
+      const merged = this.tail + text;
+      const nl = merged.lastIndexOf('\n');
+      const completed = nl === -1 ? '' : merged.slice(0, nl + 1);
+      const afterNl = nl === -1 ? merged : merged.slice(nl + 1);
+      // tail = the CURRENT uncommitted row's content only: a trailing `\r`
+      // (spinner stop() clears its row) must leave tail EMPTY, otherwise the
+      // dead spinner text would be re-committed by the next newline.
+      const tailOut = afterNl.includes('\r') ? afterNl.slice(afterNl.lastIndexOf('\r') + 1) : afterNl;
+      this.tail = tailOut;
+      raw(completed + tailOut);
+      // The region always sits BELOW the live output row; an in-place row
+      // (spinner: contains \r) stays uncommitted and is erased+replaced by
+      // the next write via tailRendered's climb.
+      if (tailOut) {
+        raw('\n');
+        this.tailRendered = true;
+      }
+      this.render();
+      return true;
+    };
+    this.patchedWrite = patched;
+    (this.output as unknown as { write: typeof patched }).write = patched;
+  }
+
+  private unpatchStdout(): void {
+    if (!this.patchedWrite || !this.rawOutputWrite) return;
+    (this.output as unknown as { write: unknown }).write = this.rawOutputWrite;
+    this.patchedWrite = null;
+    this.rawOutputWrite = null;
+    this.tail = '';
   }
 
   // --- input parsing -------------------------------------------------------
 
   private handleData(data: string): void {
-    if (!this.pending) return;
+    if (!this.pending && !this.ambient) return;
+    // A modal question owns the keyboard: only its keys (or Enter/Ctrl+C)
+    // count — the buffer stays frozen underneath (feedback v0.7 #2/#6).
+    if (this.modal) {
+      const modal = this.modal;
+      for (const ch of data) {
+        if (ch === '\u0003') {
+          this.modal = null;
+          modal.resolve(null);
+          return;
+        }
+        if (ch === '\r' || ch === '\n') {
+          this.modal = null;
+          modal.resolve(modal.defaultKey ?? null);
+          this.render();
+          return;
+        }
+        const key = ch.toLowerCase();
+        if (modal.keys.includes(key)) {
+          this.modal = null;
+          modal.resolve(key);
+          this.render();
+          return;
+        }
+      }
+      return;
+    }
     let i = 0;
     while (i < data.length) {
       const ch = data[i];
@@ -373,8 +680,8 @@ export class LineEditor {
   }
 
   private refreshMenu(): void {
-    if (!this.pending) return;
-    const getMenu = this.pending.options.getMenu;
+    if (!this.pending && !this.ambient) return;
+    const getMenu = this.activeOptions().getMenu;
     const items = getMenu ? getMenu(this.buffer) : [];
     const previous = this.menu[this.selected]?.label;
     this.menu = items;
@@ -387,6 +694,20 @@ export class LineEditor {
   }
 
   private submit(): void {
+    // Ambient Enter (AI busy): erase the region, hand the line to the loop
+    // (which shows the queue modal), and redraw with an empty buffer.
+    if (!this.pending && this.ambient) {
+      const value = this.buffer;
+      this.buffer = '';
+      this.cursor = 0;
+      this.menu = [];
+      this.selected = 0;
+      this.refreshMenu();
+      this.eraseRegion();
+      this.ambient.onSubmit(value);
+      if (this.ambient) this.render();
+      return;
+    }
     const pending = this.pending;
     if (!pending) return;
     const value = this.buffer;
@@ -395,7 +716,8 @@ export class LineEditor {
     // must never settle in the scrollback (feedback v0.6 #2).
     if (pending.options.menuOnlyClose?.(value)) {
       let out = '';
-      if (this.drawnCursorRow > 0) out += `\u001b[${this.drawnCursorRow}A`;
+      const climb = this.drawnCursorRow + this.statusRows;
+      if (climb > 0) out += `\u001b[${climb}A`;
       out += '\r\u001b[0J';
       this.output.write(out);
       // Resolve as an empty line — the loop ignores it and keeps reading.
@@ -404,20 +726,33 @@ export class LineEditor {
     }
     const shown = pending.options.mask ? '*'.repeat(value.length) : value;
     const finalLine = pending.options.prompt + shown;
-    // Return to the first row of the drawn (possibly wrapped) region, erase
-    // the overlay and any extra rows, then commit the final line.
+    // Return to the FIRST row of the drawn region (status line included),
+    // erase the live region — status bar, overlay and any extra rows — then
+    // commit the final line. The bar is erased on purpose: the next REPL
+    // iteration redraws it in place, so no stale version may settle in
+    // scrollback (feedback v0.6.2).
     let out = '';
-    if (this.drawnCursorRow > 0) out += `\u001b[${this.drawnCursorRow}A`;
+    const climb = this.drawnCursorRow + this.statusRows;
+    if (climb > 0) out += `\u001b[${climb}A`;
     out += `\r\u001b[0J${finalLine}\n`;
     this.output.write(out);
     this.finish(value);
   }
 
   private cancel(): void {
+    // Ambient Ctrl+C: interrupt the AI turn, NOT the session (feedback v0.7 #3).
+    if (!this.pending && this.ambient) {
+      this.eraseRegion();
+      this.rawWrite('^\n');
+      this.ambient.onInterrupt();
+      if (this.ambient) this.render();
+      return;
+    }
     const pending = this.pending;
     if (!pending) return;
     let out = '';
-    if (this.drawnCursorRow > 0) out += `\u001b[${this.drawnCursorRow}A`;
+    const climb = this.drawnCursorRow + this.statusRows;
+    if (climb > 0) out += `\u001b[${climb}A`;
     out += '\r\u001b[0J^\n';
     this.output.write(out);
     this.finish(null);

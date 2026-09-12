@@ -85,11 +85,11 @@ export class Agent {
   }
 
   /** Returns the assistant's textual response ('' when nothing to say). */
-  async handleInstruction(instruction: string): Promise<string> {
+  async handleInstruction(instruction: string, signal?: AbortSignal): Promise<string> {
     this.callCounts.clear();
     this.lastUsage = null;
     return this.llmProvider.isConfigured
-      ? this.runWithLlm(instruction)
+      ? this.runWithLlm(instruction, signal)
       : this.runManual(instruction);
   }
 
@@ -117,7 +117,7 @@ export class Agent {
   }
 
   /** LLM mode: agent loop with tool calls, streaming the visible reply. */
-  private async runWithLlm(instruction: string): Promise<string> {
+  private async runWithLlm(instruction: string, signal?: AbortSignal): Promise<string> {
     const history = this.ctx.window(this.config.maxContextChars);
     const messages: ContextMessage[] = [
       { role: 'system', content: this.systemPrompt(), timestamp: '' },
@@ -129,6 +129,9 @@ export class Agent {
 
     this.lastResponseStreamed = false;
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i += 1) {
+      // v0.7: user chose "kirim sekarang" — stop before the next request so
+      // the interrupted turn ends cleanly instead of starting new work.
+      if (signal?.aborted) return '';
       usage.promptChars += messages.reduce((s, m) => s + m.content.length, 0);
       const spinner = createSpinner('Thinking');
       const gate = new LineGate((text) => {
@@ -140,7 +143,13 @@ export class Agent {
       try {
         raw = await this.llmProvider.chat(messages, {
           onToken: (token) => reveal.feed(token),
+          signal,
         });
+      } catch (err) {
+        // v0.7: an interrupted stream rejects with AbortError — that is a
+        // clean stop requested by the user, not a provider failure.
+        if (signal?.aborted || isAbortError(err)) return '';
+        throw err;
       } finally {
         reveal.end();
         spinner.stop();
@@ -177,7 +186,9 @@ export class Agent {
           config: this.config,
           onLog: (line) => console.log(line),
           planMode: this.planMode,
+          signal,
         });
+        if (signal?.aborted) return '';
         messages.push({
           role: 'tool',
           content: `Result of tool "${call.tool}":\n${result}`,
@@ -197,6 +208,11 @@ export class Agent {
     this.callCounts.set(sig, n);
     return n > LOOP_REPEAT_LIMIT;
   }
+}
+
+/** True for the DOM-style rejection an aborted fetch/stream throws. */
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
 }
 
 /** AGENT.md discovery, isolated for error-safety in the hot loop. */

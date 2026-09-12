@@ -57,6 +57,11 @@ export interface ChatOptions {
   maxTokens?: number;
   /** Called with every text token as it streams in (real-time reveal). */
   onToken?: (token: string) => void;
+  /**
+   * v0.7 live input: aborts the in-flight request (fetch + stream reader)
+   * when the user interrupts the turn.
+   */
+  signal?: AbortSignal;
 }
 
 /** Abstraction over any chat-completion backend the agent can talk to. */
@@ -270,6 +275,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
         max_tokens: options?.maxTokens ?? 2048,
         stream: true,
       }),
+      signal: options?.signal,
     });
 
     if (!response.ok) {

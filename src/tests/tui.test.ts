@@ -244,3 +244,188 @@ test('wrapped line + wrapped overlay: up-count covers both regions', async () =>
   input.send('\u0003');
   assert.equal(await line, null);
 });
+
+// --- live status line (feedback v0.6.2: green bar piled up in scrollback) ---
+
+test('statusLine draws above the prompt and redraws IN PLACE each frame', async () => {
+  const { editor, input, output } = makeEditor();
+  let ctx = 0;
+  const line = editor.readLine({
+    prompt: '› ',
+    statusLine: () => `BAR ctx ${ctx}%`,
+  });
+  const first = output.data;
+  assert.ok(first.includes('BAR ctx 0%'), 'status line drawn on first frame');
+  assert.ok(first.indexOf('BAR ctx 0%') < first.indexOf('› '), 'status line sits ABOVE the prompt');
+  ctx = 1; // the turn "finished" — bar value changes
+  output.data = '';
+  input.send('h');
+  const frame = output.data;
+  // The redraw must CLIMB over the status row before erasing (ESC[1A + ESC[0J),
+  // otherwise the old bar would stay on screen and the new one print below it.
+  assert.match(frame, /^\u001b\[1A\r\u001b\[0J/, 'frame climbs 1 status row then erases from the top');
+  assert.ok(frame.includes('BAR ctx 1%'), 'fresh bar value redrawn in place');
+  assert.ok(!frame.includes('ctx 0%'), 'stale bar value never re-printed');
+  input.send('\u0003');
+  assert.equal(await line, null);
+});
+
+test('submit erases the live status bar — no stale version settles in scrollback', async () => {
+  const { editor, input, output } = makeEditor();
+  const line = editor.readLine({ prompt: '› ', statusLine: () => 'BAR ctx 0%' });
+  output.data = '';
+  input.send('hi\r');
+  assert.equal(await line, 'hi');
+  const frame = output.data;
+  // Climb over status row + erase-to-end BEFORE committing the echoed input:
+  // after this frame the screen holds only '› hi' — the bar is gone until the
+  // next readLine redraws it in place.
+  assert.match(frame, /^\u001b\[1A\r\u001b\[0J/, 'submit climbs over the status row and erases it');
+  assert.ok(!frame.includes('BAR'), 'status bar text not re-printed on commit');
+  assert.equal((frame.match(/\n/g) ?? []).length, 1, 'exactly one newline — only the echo commits');
+});
+
+test('menu-only close and cancel also erase the status row', async () => {
+  const { editor, input, output } = makeEditor();
+  const close = editor.readLine({
+    prompt: '› ',
+    statusLine: () => 'BAR',
+    menuOnlyClose: (b) => b.trim() === '/',
+  });
+  input.send('/');
+  output.data = '';
+  input.send('\r');
+  assert.equal(await close, '');
+  assert.match(output.data, /^\u001b\[1A\r\u001b\[0J/, 'close climbs over status row, erases all');
+  assert.equal((output.data.match(/\n/g) ?? []).length, 0, 'nothing committed to scrollback');
+
+  const { editor: e2, input: i2, output: o2 } = makeEditor();
+  const cancel = e2.readLine({ prompt: '› ', statusLine: () => 'BAR' });
+  o2.data = '';
+  i2.send('\u0003');
+  assert.equal(await cancel, null);
+  assert.match(o2.data, /^\u001b\[1A\r\u001b\[0J/, 'cancel climbs over status row before erasing');
+  assert.ok(!o2.data.includes('BAR'), 'bar erased on cancel too');
+});
+
+test('status line is clamped so it can never wrap and break the rewind math', async () => {
+  const { editor, input, output } = makeEditor();
+  output.columns = 30;
+  const line = editor.readLine({ prompt: '› ', statusLine: () => 'X'.repeat(100) });
+  const drawn = output.data;
+  const bar = drawn.slice(drawn.indexOf('X'), drawn.indexOf('\n'));
+  assert.ok(bar.length <= 29, `bar clamped to width-1 (got ${bar.length})`);
+  input.send('\u0003');
+  assert.equal(await line, null);
+});
+
+// --- ambient live input while the AI works (feedback v0.7) -------------------
+
+function makeAmbient(opts?: Partial<{ status: string }>) {
+  const { editor, input, output } = makeEditor();
+  const submitted: string[] = [];
+  let interrupts = 0;
+  editor.startAmbient({
+    prompt: '› ',
+    placeholder: 'AI sibuk…',
+    statusLine: () => opts?.status ?? 'BAR busy',
+    onSubmit: (line) => submitted.push(line),
+    onInterrupt: () => {
+      interrupts += 1;
+    },
+  });
+  return { editor, input, output, submitted, interrupts: () => interrupts };
+}
+
+test('ambient mode keeps a live input region with status line (v0.7 #1)', () => {
+  const { editor, output } = makeAmbient();
+  assert.ok(output.data.includes('BAR busy'), 'status line drawn in ambient region');
+  assert.ok(output.data.includes('AI sibuk…'), 'placeholder shown while buffer empty');
+  assert.ok(editor.isActive === false, 'ambient is not a blocking readLine');
+  editor.stopAmbient();
+});
+
+test('ambient Enter hands the line to onSubmit and redraws empty (v0.7 #2)', async () => {
+  const { editor, input, output, submitted } = makeAmbient();
+  output.data = '';
+  input.send('tambahkan X');
+  assert.ok(output.data.includes('tambahkan X'), 'typing echoes live while AI works');
+  output.data = '';
+  input.send('\r');
+  assert.deepEqual(submitted, ['tambahkan X'], 'Enter routes the line to the loop, not execution');
+  // The region was erased (climb over status row) and redrawn with an empty buffer.
+  assert.match(output.data, /^\u001b\[1A\r\u001b\[0J/, 'erase from top of region');
+  assert.ok(output.data.includes('AI sibuk…'), 'empty prompt redrawn after submit');
+  editor.stopAmbient();
+});
+
+test('ambient Ctrl+C interrupts the turn, not the session (v0.7 #3)', async () => {
+  const { editor, input, output } = makeAmbient();
+  let count = 0;
+  (editor as unknown as { ambient: { onInterrupt: () => void } }).ambient.onInterrupt = () => {
+    count += 1;
+  };
+  output.data = '';
+  input.send('\u0003');
+  assert.equal(count, 1, 'onInterrupt fired once');
+  assert.ok(output.data.includes('^'), '^ marker echoed for the user');
+  editor.stopAmbient();
+});
+
+test('askModal answers with a single key; Enter takes the default (v0.7 #2)', async () => {
+  const { editor, input } = makeAmbient();
+  const modal = editor.askModal({ prompt: 'Pilih [1/2]:', keys: ['1', '2'], defaultKey: '2' });
+  assert.ok(editor.modalActive, 'modal is open');
+  input.send('1');
+  assert.equal(await modal, '1', 'key 1 resolves immediately');
+
+  const modal2 = editor.askModal({ prompt: 'Pilih [1/2]:', keys: ['1', '2'], defaultKey: '2' });
+  input.send('\r');
+  assert.equal(await modal2, '2', 'bare Enter takes the safer default (queue)');
+  editor.stopAmbient();
+});
+
+test('modal owns the keyboard: buffer frozen, other keys ignored (v0.7 #6)', async () => {
+  const { editor, input, output, submitted } = makeAmbient();
+  input.send('halo'); // type into the ambient buffer first
+  const modal = editor.askModal({ prompt: 'Pilih [1/2]:', keys: ['1', '2'], defaultKey: '2' });
+  output.data = '';
+  input.send('9x\r'); // junk keys must not leak into the buffer or submit
+  assert.equal(await modal, '2', 'Enter still answers the modal default');
+  assert.deepEqual(submitted, [], 'no ambient submit happened while modal open');
+  assert.ok(!output.data.includes('9x'), 'junk keys never echoed');
+  editor.stopAmbient();
+});
+
+test('stdout writes land ABOVE the ambient region and keep it alive (v0.7)', () => {
+  const { editor, input, output } = makeAmbient();
+  const before = output.data;
+  assert.ok(before.includes('BAR busy'));
+  // Simulate streamed agent output (the editor patches its own output stream):
+  // a completed line + a partial line.
+  output.write('jawaban AI baris 1\njawaban AI mengetik');
+  // The region was erased, output written, region redrawn below it.
+  assert.ok(output.data.includes('jawaban AI baris 1'), 'completed line committed');
+  assert.ok(output.data.includes('jawaban AI mengetik'), 'partial line shown');
+  const tail = output.data.slice(output.data.indexOf('jawaban AI baris 1'));
+  assert.ok(tail.includes('BAR busy'), 'status bar redrawn BELOW streamed output');
+  assert.ok(tail.includes('AI sibuk…'), 'input region still alive after output');
+  // Typing still works after output interleaving.
+  output.data = '';
+  input.send('x');
+  assert.ok(output.data.includes('x'), 'input still echoes after output');
+  editor.stopAmbient();
+});
+
+test('stopAmbient leaves the committed output line and erases the region', () => {
+  const { editor, output } = makeAmbient();
+  output.write('teks belum newline');
+  // The intercepted write already committed the partial line (with a newline)
+  // above the region — stopAmbient must not duplicate it.
+  assert.ok(output.data.includes('teks belum newline\n'), 'partial line committed once, during write');
+  output.data = '';
+  editor.stopAmbient();
+  assert.match(output.data, /\u001b\[0J/, 'live region erased on stop');
+  assert.ok(!output.data.includes('BAR busy'), 'no region redrawn after stop');
+  assert.ok(!output.data.includes('teks belum newline'), 'output line not re-printed');
+});

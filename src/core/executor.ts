@@ -11,6 +11,11 @@ export interface ExecOptions {
   /** Apply the log summarizer to the captured output (default: true). */
   summarize?: boolean;
   maxLogChars?: number;
+  /**
+   * v0.7 live input: firing this kills the running child so an interrupted
+   * turn stops its shell work instead of leaving it running behind the REPL.
+   */
+  signal?: AbortSignal;
 }
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
@@ -27,7 +32,7 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const started = Date.now();
 
-    exec(
+    const child = exec(
       command,
       {
         cwd: options.cwd,
@@ -73,5 +78,12 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
         });
       },
     );
+
+    // v0.7: an interrupted turn kills its shell child (SIGKILL so grandchildren
+    // die too) — the callback above still resolves with what was captured.
+    if (options.signal) {
+      if (options.signal.aborted) child.kill('SIGKILL');
+      else options.signal.addEventListener('abort', () => child.kill('SIGKILL'), { once: true });
+    }
   });
 }

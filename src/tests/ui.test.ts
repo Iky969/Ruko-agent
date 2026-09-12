@@ -143,3 +143,35 @@ test('renderBox clamps to the terminal width so borders never wrap-stack', () =>
     process.stdout.columns = saved;
   }
 });
+
+// --- v0.7: double-width aware measuring (root cause of the bar wrap-stack) ---
+
+test('visibleLength counts emoji/CJK as 2 terminal columns (wcwidth)', () => {
+  assert.equal(visibleLength('⚡'), 2, 'U+26A1 high voltage is wide in terminals');
+  assert.equal(visibleLength('⏳'), 2);
+  assert.equal(visibleLength('中文'), 4);
+  assert.equal(visibleLength('abc'), 3);
+  assert.equal(visibleLength('\u001b[32m⚡ok\u001b[0m'), 4, 'ANSI ignored, emoji wide');
+});
+
+test('truncateVisible never splits a double-width cell', () => {
+  const cut = truncateVisible('⚡⚡⚡', 3);
+  assert.equal(visibleLength(cut), 2, 'stops before the third emoji, not mid-cell');
+});
+
+test('status bar with busy+queue badge measures within its clamp', () => {
+  const bar = buildStatusBar({
+    model: 'm',
+    usedChars: 10,
+    budgetChars: 30000,
+    busy: true,
+    pending: 1,
+    turn: { promptChars: 2600, completionChars: 28 },
+  });
+  const plain = stripAnsi(bar);
+  assert.ok(plain.includes('⏳ AI bekerja'), 'busy indicator in the bar');
+  assert.ok(plain.includes('1 menunggu'), 'queue badge in the bar');
+  // The editor clamps to width-1 with truncateVisible; measuring must agree
+  // with what terminals actually render (the v0.7 stacking root cause).
+  assert.ok(visibleLength(truncateVisible(bar, 40)) <= 40);
+});
