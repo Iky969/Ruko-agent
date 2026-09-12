@@ -260,7 +260,6 @@ Browser automation, computer-use, voice/TTS, plugin system, sandbox backend (Doc
   6. **Digest header estimate (60 char)** — proyeksi budget konservatif; aman, hanya sedikit membuang ruang.
   7. ~~**Event `keypress` readline tidak ter-emit di semua PTY**~~ **SELESAI (v0.5.0 #4)** — REPL TTY kini memakai editor raw-mode sendiri (`src/core/tui.ts`) yang mem-parse byte stdin, jadi menu `/` muncul live per-keystroke. Jalur non-TTY tetap readline (tanpa overlay). ~~Sisa batasan: editor mengasumsikan input satu baris (tanpa wrapping)~~ **SELESAI (v0.5.1 #1)** — redraw kini sadar-wrap (naik ke baris pertama region sebelum clear). ~~Sisa batasan: karakter double-width (emoji/CJK) dihitung 1 kolom oleh `visibleLength`, jadi posisi cursor bisa meleset untuk input semacam itu~~ **SELESAI (v0.7.0)** — `charWidth()` (subset wcwidth) dipakai `visibleLength`/`truncateVisible`; akar bug wrap-bar yang sama ditemukan lewat verifikasi PTY.
   8. **Streaming + `console.log` dapat selang-seling** — teks LLM ditulis via `process.stdout.write` tanpa newline saat spinner aktif; newline sudah dijaga di `runWithLlm`, tapi interleave dengan spinner TTY yang lambat bisa terlihat berantakan pada terminal sangat sempit.
-  ~~4. **`rm -rf /etc` terdeteksi `dangerous` (bukan `blocked`)** — hanya `rm -rf /` persis yang diblokir; pola lain yang menghapus path sistem bisa lolos ke level "tanya". Perlu audit pola regex.~~ **SELESAI (v0.7.1)** — lihat detail di bawah.
 
 ---
 
