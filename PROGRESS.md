@@ -84,6 +84,33 @@
 - [x] **Verifikasi manual (feedback: 2 skenario wajib)** — harness baru `scripts/pty-liveinput.py` + runner `scripts/run-liveinput-checks.sh` (server fake mode SLOW, PTY nyata, dump layar pyte): mode `typing` (ketik saat busy → echo hidup, badge muncul), mode `queue` (pesan kedua Enter → modal → "2" → terkirim OTOMATIS persis setelah turn pertama selesai, tepat 1 echo, 0 bar basi), mode `interrupt` (pilih "1" → turn berhenti bersih, pesan kedua tetap diproses). **KETIGA-NYA OK.** Regresi: `pty-statusbar.py` (100×24 + 40×12), `pty-cycle.py` a/b, `pty-repro.py` 40/60, smoke pipe — SEMUA LOLOS.
 - [x] **Unit test** — +10 test (7 ambient/modal/intersep di `tui.test.ts`, 2 abort di `agent.test.ts`, 3 wcwidth di `ui.test.ts` — sebagian digabung hitungan). Suite: **143 hijau** + typecheck + build bersih. `fake-llm-server.mjs` dapat `FAKE_LLM_SLOW=1` (chunk 300ms) supaya jendela "AI masih kerja" cukup lebar untuk tes. Versi 0.6.2 → **0.7.0**.
 
+### v0.7.1 — Audit keamanan approval-gate (Known Bug #4)
+
+- [x] **Audit & perbaikan pola BLOCKED** (`src/core/approval.ts`) — audit menyeluruh pola regex berdasarkan feedback; ditemukan 21 celah nyata yang tadinya lolos ke level DANGEROUS atau NONE padahal seharusnya BLOCKED:
+  - **Path sistem kritis:** `rm -rf /etc`, `/bin`, `/usr`, `/lib[64]`, `/boot`, `/var`, `/sys`, `/proc`, `/dev`, `/home`, `/root`, `/run`, `/opt`, `/srv`
+  - **Home directory:** `rm -rf ~/`, `rm -rf $HOME`, `rm -rf /home/<user>`
+  - **Wildcard destruktif:** `rm -rf /*`, `rm -rf /etc/*`
+  - **Variasi flag:** `-fr` (reversed), `-r -f` / `-f -r` (terpisah), `--recursive [--force]`
+  - **Bypass eksplisit:** `rm -rf --no-preserve-root /`
+  - **Fork bomb nama kustom:** `f(){ f|f& };f`, `bomb(){ bomb|bomb& };bomb`
+- [x] **Chain evaluation** — `chainedSegments()` baru memecah command pada operator `;`, `&&`, `||`, `|`; tiap segmen dievaluasi independen; **level paling ketat menang** (BLOCKED > DANGEROUS > NONE). Ini menutup bypass `echo ok && rm -rf /etc` yang sebelumnya bisa menurunkan level dari BLOCKED ke DANGEROUS.
+- [x] **Verifikasi wajib (test gagal di kode lama, lulus di kode baru)** — 21 test adversarial baru di `src/tests/approval.test.ts`; **terbukti GAGAL semua pada kode pra-fix** (dibuktikan dengan menjalankan test sebelum menulis fix); **lulus semua setelah fix**. Ditambah 1 test regresi untuk 10 command aman (tetap NONE). Suite penuh: **164 hijau** (+21) + typecheck + build bersih.
+- [x] **Known limitation (catat sebagai audit lanjutan):** encoding/eval obfuscation — `echo <b64> | base64 -d | sh`, `eval "$(…)"`, variabel shell `X=/etc; rm -rf $X` — tidak dapat ditutup dengan regex tanpa false positive masif. Dicatat di Known Bugs #4 dan Roadmap #5 (LLM-based approval guardian).
+
+### v0.7.2 — Audit independen + 4 fix keamanan approval-gate
+
+- [x] **Audit independen** — review oleh model berbeda (Claude Opus 4.6 Thinking) atas fix v0.7.1. 36 probe adversarial independen dijalankan; menemukan **15 celah** di 5 kategori yang tidak tercakup audit sebelumnya. Setelah fix: 30/36 probe pass (naik dari 21/36); 6 sisa = known limitation (semua sudah DANGEROUS, bukan NONE).
+- [x] **Fix #1: Redirect ke disk device → BLOCKED** (`src/core/approval.ts`) — pattern baru `>{1,2}\s*\/dev\/(sd|nvme|hd|disk)\S*` di BLOCKED_PATTERNS. Menutup `echo x > /dev/sda`, `cat file > /dev/nvme0n1`, `>> /dev/hda`, `> /dev/disk/by-id/...` yang sebelumnya lolos NONE total. Pattern `dd` dan `of=` juga digeneralisasi dari `(sd|nvme|hd)` → `(sd|nvme|hd|disk)`.
+- [x] **Fix #2: base64|sh → DANGEROUS** — pattern baru `\bbase64\b[^|]*\|\s*(ba|z)?sh\b` di DANGEROUS_PATTERNS. Menutup `echo <b64> | base64 -d | sh` yang sebelumnya lolos NONE (sudah tercatat di known limitation v0.7.1, sekarang terdeteksi).
+- [x] **Fix #3: Quote-stripping** — fungsi `testCandidates()` baru; tiap segment dites JUGA dengan `"`, `'`, `` ` `` di-strip. `detectRisk()` diperbarui untuk loop over candidates. Ini menutup `bash -c "rm -rf /etc"` dan `sh -c "rm -rf /var"` yang sebelumnya hanya DANGEROUS (bukan BLOCKED) karena trailing quote menghalangi regex path terminator.
+- [x] **Fix #4: Interpreter inline execution → DANGEROUS** — pattern baru `\b(?:python[23]?\s+-c|(?:node|perl|ruby|lua)\s+-e|php\s+-r)\b` di DANGEROUS_PATTERNS. SETIAP pemanggilan interpreter dengan flag eksekusi inline otomatis minimal DANGEROUS — konten tidak dapat diverifikasi oleh regex. Menutup `python3 -c "import shutil; shutil.rmtree('/etc')"` yang sebelumnya lolos sebagai NONE total.
+- [x] **Known limitation (roadmap guardian LLM):**
+  - Interpreter execution: `python3 -c "shutil.rmtree(...)"` kini DANGEROUS (dari NONE), tapi tidak bisa BLOCKED karena regex tidak bisa parse nested language syntax
+  - Quote-aware chain splitting: `chainedSegments()` split naif pada `;` tanpa perhatikan quotes di dalam string interpreter
+  - Variable indirection: `X=/etc; rm -rf $X` sudah DANGEROUS, tapi regex tidak bisa resolve variabel
+  - eval/subshell obfuscation: `eval "$(obfuscated)"` tidak bisa dievaluasi regex
+- [x] **Test** — +20 test baru (5 redirect disk, 4 quote-stripping, 2 base64|sh, 7 interpreter inline, 2 regresi). Suite penuh: **184 hijau** (+20) + typecheck bersih. Versi 0.7.1 → **0.7.2**.
+
 ### v0.6.2 — Eksekusi feedback.txt (status bar hijau numpuk di scrollback → TITIK KETIGA bug render-loop; audit TOTAL + satu mesin redraw)
 
 - [x] **#0 Konfirmasi bug (repro otomatis PRA-FIX)** — harness baru `scripts/pty-statusbar.py` (PTY nyata + pyte HistoryScreen; kirim 4 pesan berturut-turut lewat fake-llm-server): **pra-fix REPRO — 5 baris `⚡ [model] | ctx …` hidup sekaligus di layar** (versi lama tidak pernah dihapus, versi baru dicetak di bawahnya — persis laporan feedback). Pasca-fix: **1 baris hidup, 0 di scrollback**, di 100×24 DAN 40×12.
@@ -213,20 +240,33 @@ Browser automation, computer-use, voice/TTS, plugin system, sandbox backend (Doc
 ## 🐞 Known Bugs / Issues
 
 - **Belum ada bug terkonfirmasi pada fitur aktif.** Catatan batasan yang disadari:
-  1. **Compression menyerah bila budget tak terjangkau** — jika turn yang dilindungi + ekscerpt minimum melebihi `maxContextChars`, history dibiarkan utuh (over budget). Aman, tapi konteks bisa tetap besar; solusi jangka panjang: summarization via LLM.
+  1. **Compression menyerab bila budget tak terjangkau** — jika turn yang dilindungi + ekscerpt minimum melebihi `maxContextChars`, history dibiarkan utuh (over budget). Aman, tapi konteks bisa tetap besar; solusi jangka panjang: summarization via LLM.
   2. **`--exec` timeout mencatat exit code `null`** (bukan 124) — perilaku `child_process.exec` bawaan; migrasi ke `spawn` memungkinkan exit code akurat + streaming.
   3. **Urutan stdout vs stderr** di field `output` tidak dijamin (limitasi callback `exec`).
-  4. **`rm -rf /etc` terdeteksi `dangerous` (bukan `blocked`)** — hanya `rm -rf /` persis yang diblokir; pola lain yang menghapus path sistem bisa lolos ke level "tanya". Perlu audit pola regex.
+  4. ~~**`rm -rf /etc` terdeteksi `dangerous` (bukan `blocked`)**~~ **SELESAI (v0.7.1)**. Pola yang tadinya lolos sebagai DANGEROUS (bukan BLOCKED):
+     - Path sistem kritis: `rm -rf /etc`, `/bin`, `/usr`, `/lib`, `/boot`, `/var`, `/sys`, `/proc`, `/dev`, `/home`, `/root`, `/run`, `/opt`, `/srv`
+     - Home directory: `rm -rf ~/`, `rm -rf $HOME`, `rm -rf /home/user`
+     - Wildcard destruktif: `rm -rf /*`, `rm -rf /etc/*`
+     - Flag reversed: `rm -fr /bin`
+     - Flag terpisah: `rm -r -f /usr`, `rm -f -r /boot`
+     - Long-form: `rm --recursive /home`
+     - Bypass eksplisit: `rm -rf --no-preserve-root /`
+     - Chain bypass: `echo ok && rm -rf /etc`, `true; rm -rf /bin`, `ls || rm -rf /var`
+     - Fork bomb nama kustom: `f(){ f|f& };f`, `bomb(){ bomb|bomb& };bomb`
+     - Semua varian di atas sekarang BLOCKED. Chain evaluation: level paling ketat menang (BLOCKED > DANGEROUS > NONE).
+     - **(v0.7.2)** Redirect ke disk device (`echo x > /dev/sda`, `> /dev/nvme*`, `> /dev/hd*`, `> /dev/disk/*`) → BLOCKED. Quote-wrapped commands (`bash -c "rm -rf /etc"`, `sh -c '...'`, `eval "..."`) → BLOCKED (via quote-stripping). `base64 -d | sh` → DANGEROUS. Interpreter inline (`python -c`, `node -e`, `perl -e`, `ruby -e`, `php -r`, `lua -e`) → DANGEROUS minimal.
+     - **Known limitation (tidak bisa ditutup dengan regex):** semantic analysis payload interpreter (e.g. `shutil.rmtree` tanpa literal `rm`), variable indirection (`$X` di-resolve ke path kritis), eval/subshell obfuscation (`eval "$(...)"`), quote-aware chain splitting. Penutupan kategori ini membutuhkan pendekatan LLM-based approval guardian (Roadmap #5).
   5. **Approval non-TTY selalu menolak** — di skenario CI yang memang ingin menjalankan perintah berisiko harus pakai `--yes` atau `RUKO_YOLO_MODE` (by design, tapi bisa mengejutkan).
   6. **Digest header estimate (60 char)** — proyeksi budget konservatif; aman, hanya sedikit membuang ruang.
   7. ~~**Event `keypress` readline tidak ter-emit di semua PTY**~~ **SELESAI (v0.5.0 #4)** — REPL TTY kini memakai editor raw-mode sendiri (`src/core/tui.ts`) yang mem-parse byte stdin, jadi menu `/` muncul live per-keystroke. Jalur non-TTY tetap readline (tanpa overlay). ~~Sisa batasan: editor mengasumsikan input satu baris (tanpa wrapping)~~ **SELESAI (v0.5.1 #1)** — redraw kini sadar-wrap (naik ke baris pertama region sebelum clear). ~~Sisa batasan: karakter double-width (emoji/CJK) dihitung 1 kolom oleh `visibleLength`, jadi posisi cursor bisa meleset untuk input semacam itu~~ **SELESAI (v0.7.0)** — `charWidth()` (subset wcwidth) dipakai `visibleLength`/`truncateVisible`; akar bug wrap-bar yang sama ditemukan lewat verifikasi PTY.
   8. **Streaming + `console.log` dapat selang-seling** — teks LLM ditulis via `process.stdout.write` tanpa newline saat spinner aktif; newline sudah dijaga di `runWithLlm`, tapi interleave dengan spinner TTY yang lambat bisa terlihat berantakan pada terminal sangat sempit.
+  ~~4. **`rm -rf /etc` terdeteksi `dangerous` (bukan `blocked`)** — hanya `rm -rf /` persis yang diblokir; pola lain yang menghapus path sistem bisa lolos ke level "tanya". Perlu audit pola regex.~~ **SELESAI (v0.7.1)** — lihat detail di bawah.
 
 ---
 
 ## 🤖 Context Handoff untuk AI Berikutnya
 
-1. **Verifikasi baseline dulu:** `npm install && npm run build && npm test` → 143 test harus hijau. Harness PTY (butuh `pip install pyte` + fake server: `node scripts/fake-llm-server.mjs` — mode fitur live-input: `FAKE_LLM_SLOW=1`; config test `.ruko/config-pty-test.json` dipakai otomatis oleh harness): `scripts/pty-liveinput.py` (v0.7: mode typing/queue/interrupt — jalankan semua via `scripts/run-liveinput-checks.sh`), `scripts/pty-statusbar.py` (status bar — kirim 4 pesan, harus ≤1 baris hidup), `scripts/pty-cycle.py`, `scripts/pty-repro.py`. Smoke test: `printf 'run echo hi\n/context\n/exit\n' | node dist/index.js`. Penting: spawn ruko via child pipe TIDAK mengaktifkan jalur TTY — driver harus benar-benar PTY.
+1. **Verifikasi baseline dulu:** `npm install && npm run build && npm test` → 184 test harus hijau. Harness PTY (butuh `pip install pyte` + fake server: `node scripts/fake-llm-server.mjs` — mode fitur live-input: `FAKE_LLM_SLOW=1`; config test `.ruko/config-pty-test.json` dipakai otomatis oleh harness): `scripts/pty-liveinput.py` (v0.7: mode typing/queue/interrupt — jalankan semua via `scripts/run-liveinput-checks.sh`), `scripts/pty-statusbar.py` (status bar — kirim 4 pesan, harus ≤1 baris hidup), `scripts/pty-cycle.py`, `scripts/pty-repro.py`. Smoke test: `printf 'run echo hi\n/context\n/exit\n' | node dist/index.js`. Penting: spawn ruko via child pipe TIDAK mengaktifkan jalur TTY — driver harus benar-benar PTY.
 2. **Mulai dari Roadmap #1** (tool read/write/patch/search) — dampak terbesar dengan usaha terkecil. Pola menambah tool: (1) case baru di `runToolCall()` `src/agent/tools.ts`, (2) sebut di `SYSTEM_PROMPT` `src/agent/agent.ts`, (3) unit test.
 3. **Struktur kode:** `src/core/` = infrastruktur (loop, executor, summarizer, approval, compressor, context, session, config); `src/agent/` = logika agen (agent, llm, tools, commands). Entry point `src/index.ts`. Semua ESM, import pakai ekstensi `.js`, TypeScript strict, JSDoc singkat.
 4. **Fitur wajib dari spesifikasi awal (jangan dihapus):** Log Summarizer >1000 char terpasang di `executor.ts` (param `summarize`, default `true`); System Loop menerima instruksi; eksekusi shell bawaan.
