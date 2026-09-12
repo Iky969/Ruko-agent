@@ -27,3 +27,24 @@ test('/anim command exists in registry', () => {
   const names = new Set(listCommands().map((c) => c.name));
   assert.ok(names.has('anim'), 'missing /anim');
 });
+
+test('maskApiKey never exposes full secret for short, medium, or long keys (M3)', async () => {
+  const { maskApiKey } = await import('../agent/commands.js');
+  // Unset or empty
+  assert.match(maskApiKey(''), /belum diatur/);
+  assert.match(maskApiKey(undefined), /belum diatur/);
+
+  // Short keys (<= 8 chars) - completely masked
+  assert.equal(maskApiKey('sk-12345'), '•••••••• (masked)');
+  assert.equal(maskApiKey('12345678'), '•••••••• (masked)');
+
+  // Medium keys (9-14 chars) - 2 head, 2 tail
+  const med = maskApiKey('secret1234'); // 10 chars
+  assert.equal(med, 'se…34 (masked)');
+  assert.ok(!med.includes('secret'));
+
+  // Long keys (> 14 chars) - 3 head, 4 tail
+  const longKey = maskApiKey('sk-proj-abc123xyz789'); // 20 chars
+  assert.equal(longKey, 'sk-…z789 (masked)');
+  assert.ok(!longKey.includes('abc123xyz'));
+});

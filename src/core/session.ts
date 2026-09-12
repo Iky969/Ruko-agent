@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ContextMessage } from '../types.js';
 
@@ -23,7 +23,7 @@ export function defaultSessionDir(): string {
   return join(process.cwd(), '.ruko', 'sessions');
 }
 
-/** Saves the current messages; reuses `id` when given, else derives a new one. */
+/** Saves a session to disk (creates directory if missing). */
 export function saveSession(
   messages: ContextMessage[],
   dir = defaultSessionDir(),
@@ -40,7 +40,13 @@ export function saveSession(
     messageCount: messages.length,
     messages,
   };
-  writeFileSync(join(dir, `${sessionId}.json`), `${JSON.stringify(session, null, 2)}\n`, 'utf8');
+  const filePath = join(dir, `${sessionId}.json`);
+  writeFileSync(filePath, `${JSON.stringify(session, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  try {
+    chmodSync(filePath, 0o600); // M4: enforce owner-only permissions on session transcripts
+  } catch {
+    // Best-effort on filesystems without POSIX permissions
+  }
   return session;
 }
 

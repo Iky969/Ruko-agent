@@ -379,9 +379,7 @@ const COMMANDS: CommandDef[] = [
       const parts = args.trim().split(/\s+/);
       if (parts.length === 0 || parts[0] === '') {
         const c = env.config;
-        const key = c.apiKey && c.apiKey.length > 0
-          ? `${c.apiKey.slice(0, 6)}…${c.apiKey.slice(-4)} (masked)`
-          : '•••••• (belum diatur)';
+        const key = maskApiKey(c.apiKey);
         console.log(
           renderBox('Config', [
             `apiKey: ${key}`,
@@ -448,6 +446,14 @@ const COMMANDS: CommandDef[] = [
     },
   },
 ];
+
+export function maskApiKey(apiKey?: string): string {
+  if (!apiKey || apiKey.trim().length === 0) return '•••••• (belum diatur)';
+  const k = apiKey.trim();
+  if (k.length <= 8) return '•••••••• (masked)';
+  if (k.length <= 14) return `${k.slice(0, 2)}…${k.slice(-2)} (masked)`;
+  return `${k.slice(0, 3)}…${k.slice(-4)} (masked)`;
+}
 
 function maskBaseUrl(c: AgentConfig): string {
   if (c.baseUrl && c.baseUrl.trim()) return c.baseUrl;
