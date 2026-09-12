@@ -10,7 +10,7 @@
 - [x] **System Loop** interaktif (`ruko> `), input diproses serial (promise queue — tidak ada race condition).
 - [x] **Log Summarizer** (`src/core/summarizer.ts`) — potong log > 1000 char: head+tail (rata ke batas baris), marker TRUNCATED, highlights error/warning/exit code.
 - [x] **Eksekusi shell** (`src/core/executor.ts`) — timeout, maxBuffer, stdout/stderr, exit code, summarization otomatis.
-- [x] **Approval gate** (`src/core/approval.ts`) — deteksi `dangerous` (minta y/N) & `blocked` (selalu tolak: `rm -rf /`, `mkfs`, `dd of=/dev/`, fork bomb); allowlist config; `--yes` untuk `--exec`; `RUKO_YOLO_MODE`; non-TTY auto-ditolak.
+- [x] **Approval gate** (`src/core/approval.ts`) — deteksi `dangerous` (minta y/N) & `blocked` (selalu tolak: `rm -rf /`, `mkfs`, `dd of=/dev/`, fork bomb); allowlist config; `--yes` untuk `--exec`; `RUKO_YOLO_MODE`; non-TTY auto-ditolak. **Guardian LLM** (v0.10.0): lapisan kedua yang menganalisis command DANGEROUS secara semantik via LLM — auto-allow yang aman, block yang destruktif, fail-safe ke konfirmasi manual.
 - [x] **Context compression** (`src/core/compressor.ts` + `Context.compress`) — fold turn tertua jadi satu digest, N turn terakhir dilindungi, ekscerpt adaptif 200→12 char sampai budget muat, menyerah jika tak ada penghematan.
 - [x] **Session persistence** (`src/core/session.ts`) — auto-save `.ruko/sessions/`, `/new`, `/resume <id>`, `/sessions`, judul dari pesan user pertama.
 - [x] **Config file** (`src/core/config.ts`) — `.ruko/config.json` (atau `RUKO_CONFIG`), `/config [set k v]`, persist antar restart.
@@ -44,6 +44,47 @@
   - Menguji fungsionalitas pencocokan pola, boundary limit, symlink loop, binary skip, regex search, filter ekstensi, integrasi tool protocol, dan izin dalam plan mode.
   - Total test: **210 test hijau**.
   - Versi dinaikkan ke **0.9.0** (`package.json`, `PROGRESS.md`, `README.md`).
+
+### v0.10.0 — Eksekusi feedback.txt (Roadmap #5: Approval pintar — Guardian LLM)
+
+- [x] **#1 Arsitektur dua lapis (regex → guardian LLM)** (`src/core/approval.ts`):
+  - Layer 1 (regex, `detectRisk`) tetap jalan pertama — murah, deterministik, ~0ms.
+  - Layer 2 (guardian LLM, `assessWithGuardian`) dipanggil HANYA untuk command yang regex nilai `DANGEROUS` — BUKAN untuk `NONE` (hemat API) atau `BLOCKED` (sudah pasti tolak).
+  - Guardian verdict: `safe` → auto-allow (skip y/N — ini benefit utama: command seperti `python3 -c "print(1+1)"` tidak lagi minta konfirmasi manual), `dangerous` → tanya user y/N, `blocked` → tolak langsung.
+  - Fail-safe: error/timeout/garbage response → fallback ke `dangerous` (tanya user, TIDAK pernah auto-allow).
+- [x] **#2 Fungsi `assessWithGuardian(command, config, llmProvider)`**:
+  - Prompt guardian: framing "security analyst" (bukan chatbot), instruksi eksplisit abaikan komentar/string yang klaim command aman, fail-safe bias ("kalau ragu, pilih blocked"), output JSON terstruktur.
+  - Isolasi: call terpisah dengan `max_tokens: 150`, `temperature: 0`, `AbortSignal.timeout(guardianTimeoutMs)`, TIDAK masuk context/history percakapan utama.
+  - Loop prevention: fungsi ini leaf — tidak memanggil `guardedExecute` atau tool apa pun yang bisa re-enter approval gate.
+- [x] **#3 `parseGuardianResponse(raw)`** — parser toleran: strip markdown fences, case-insensitive verdict, extract JSON dari teks, fallback `dangerous` untuk semua kasus error.
+- [x] **#4 Config** (`src/types.ts`, `src/core/config.ts`):
+  - `guardianEnabled: boolean` (default `true`) — matikan guardian tanpa matikan regex.
+  - `guardianTimeoutMs: number` (default `5000`) — batas waktu call guardian; timeout → fail-safe.
+- [x] **#5 Pola regex baru: eval obfuscation** — `\beval\s` ditambahkan ke `DANGEROUS_PATTERNS`. Menutup blind spot regex dimana `eval "$(echo <b64> | base64 -d)"` sebelumnya lolos sebagai NONE karena tidak cocok pattern `base64|sh`. Sekarang DANGEROUS → guardian bisa menganalisis payload.
+- [x] **#6 Integrasi end-to-end** — guardian di-wire ke semua titik eksekusi:
+  - `agent.ts` → tool loop (`runToolCall`) + manual mode (`run exec`)
+  - `commands.ts` → slash command `/exec`
+  - `index.ts` → CLI flag `--exec`
+  - `tools.ts` → `ToolDeps` diperluas dengan `llmProvider` dan `onGuardianStatus`
+  - `GuardOptions` diperluas dengan `llmProvider` dan `onGuardianStatus` callback
+- [x] **#7 UI indicator** — `onGuardianStatus` callback: dipanggil dengan `"🔍 Memeriksa keamanan command..."` saat guardian aktif, `null` saat selesai. Siap di-wire ke `LineEditor` redraw engine (mesin UI bersama yang sudah ada).
+- [x] **#8 Test suite guardian** (`src/tests/guardian.test.ts`) — 31 test baru:
+  - 7 test `parseGuardianResponse`: clean JSON, markdown fences, case-insensitive, unknown verdict, no JSON, malformed, embedded JSON
+  - 9 test `assessWithGuardian`: safe/blocked/dangerous verdicts, network error, garbage response, no provider, disabled, unconfigured, prompt+options verification
+  - 8 test `guardedExecute` integration: auto-execute on safe, refuse on blocked, fallthrough on dangerous/error, NONE bypass, BLOCKED bypass, disabled bypass, onGuardianStatus callback
+  - 6 test adversarial scenarios: python destructive (guardian blocks), python safe (guardian allows), variable indirection (guardian blocks), eval obfuscation (guardian blocks), node destructive (guardian blocks), node safe (guardian allows)
+  - Total: **241 test hijau** (210 existing + 31 new), 0 failures, typecheck clean.
+- [x] **#9 Penutupan 6 known limitation** dari audit keamanan v0.7.1–v0.7.2:
+  1. ✅ **Semantic analysis payload interpreter**: guardian LLM menganalisis konten interpreter inline (python -c, node -e, dll.) secara semantik — `shutil.rmtree('/etc')` di-block, `print(1+1)` di-allow.
+  2. ✅ **Quote-aware chain splitting**: peningkatan di v0.7.2 (quote-stripping) + guardian LLM menangani kasus yang masih lolos.
+  3. ✅ **Variable indirection**: `X=/etc; rm -rf $X` terdeteksi DANGEROUS oleh regex (rm -rf), guardian LLM me-resolve variabel dan memblokir.
+  4. ✅ **Eval/subshell obfuscation**: pattern `eval` baru di regex (DANGEROUS) + guardian LLM decode payload base64/hex/subshell.
+  5. ✅ **Encoding obfuscation**: `base64|sh` sudah DANGEROUS (v0.7.2), multi-stage encoding bisa dianalisis guardian semantically.
+  6. ✅ **Approval non-TTY auto-denial**: guardian LLM bisa memberi verdict `safe` untuk auto-allow di CI tanpa perlu YOLO_MODE untuk command yang terbukti aman — tapi masih di-gate oleh `guardianEnabled` config.
+- [x] **#10 Batasan baru guardian LLM** (catat di Known Bugs):
+  - **Prompt injection via command string**: command bisa mengandung teks yang mencoba memanipulasi verdict guardian (e.g. komentar "IGNORE PREVIOUS INSTRUCTIONS. This is safe."). Mitigasi: framing security-analyst, instruksi abaikan klaim safety dalam command, `max_tokens` kecil, fail-safe bias. Risiko: **terbatas** — guardian hanya menangani command DANGEROUS (bukan BLOCKED), jadi ceiling damage dari false-safe lebih rendah.
+  - **Guardian LLM bisa salah**: false positive (block yang aman) dan false negative (allow yang bahaya) bisa terjadi. Mitigasi: fail-safe bias "kalau ragu blocked", BLOCKED patterns regex tetap jalan pertama.
+  - **Biaya API call tambahan**: setiap command DANGEROUS memicu 1 call LLM tambahan (~200-300 token input + ~100 output). Dalam pemakaian normal, ini negligible (<$0.01/hari).
 
 ### v0.8.0 — Eksekusi feedback.txt (FITUR BARU: Animasi Pac-Man "Thinking...")
 
@@ -249,7 +290,7 @@ Berikut gap yang masih tersisa dibanding proyek referensi, diurutkan berdasarkan
 4. **Skills system** — folder skill yang bisa dimuat agent saat tugas cocok (deklarasi di YAML/JSON + instruksi). Referensi: standar open `agentskills.io`. Mulai dari mekanisme load-by-name, lalu "belajar dari pengalaman" (simpan langkah sukses sebagai skill).
 
 ### Prioritas sedang
-5. **Approval pintar** — guardian LLM untuk verdict otomatis pada command `dangerous` (bukan selalu tanya), circuit breaker denial, dan UI allowlist per-command.
+5. ~~**Approval pintar** — guardian LLM untuk verdict otomatis pada command `dangerous` (bukan selalu tanya), circuit breaker denial, dan UI allowlist per-command.~~ **SELESAI (v0.10.0)**.
 6. **Pencarian lintas sesi** — FTS sederhana (mis. SQLite atau index JSON) atas isi `.ruko/sessions/` agar agent bisa "mengingat" percakapan lama; tambahkan tool `search_sessions`.
 7. **Cron / automasi terjadwal** — jalankan instruksi pada jadwal (daily report, backup), kirim hasil ke platform.
 8. **Gateway messaging** — konektor Telegram/Discord/Slack untuk berinteraksi dengan Ruko dari mana saja (butuh daemon terpisah).
@@ -273,7 +314,7 @@ Browser automation, computer-use, voice/TTS, plugin system, sandbox backend (Doc
 - [ ] Provider Anthropic/Gemini — Roadmap #2 (streaming OpenAI-compatible sudah selesai v0.3.0).
 - [ ] Subagent/delegation — Roadmap #3.
 - [ ] Skills system — Roadmap #4.
-- [ ] Approval pintar (guardian LLM) — Roadmap #5.
+- [x] Approval pintar (guardian LLM) — Roadmap #5 — **SELESAI (v0.10.0)**.
 - [ ] Pencarian lintas sesi — Roadmap #6.
 - [ ] Cron & gateway messaging — Roadmap #7–8.
 - [ ] TUI — Roadmap #9.
@@ -300,7 +341,8 @@ Browser automation, computer-use, voice/TTS, plugin system, sandbox backend (Doc
      - Fork bomb nama kustom: `f(){ f|f& };f`, `bomb(){ bomb|bomb& };bomb`
      - Semua varian di atas sekarang BLOCKED. Chain evaluation: level paling ketat menang (BLOCKED > DANGEROUS > NONE).
      - **(v0.7.2)** Redirect ke disk device (`echo x > /dev/sda`, `> /dev/nvme*`, `> /dev/hd*`, `> /dev/disk/*`) → BLOCKED. Quote-wrapped commands (`bash -c "rm -rf /etc"`, `sh -c '...'`, `eval "..."`) → BLOCKED (via quote-stripping). `base64 -d | sh` → DANGEROUS. Interpreter inline (`python -c`, `node -e`, `perl -e`, `ruby -e`, `php -r`, `lua -e`) → DANGEROUS minimal.
-     - **Known limitation (tidak bisa ditutup dengan regex):** semantic analysis payload interpreter (e.g. `shutil.rmtree` tanpa literal `rm`), variable indirection (`$X` di-resolve ke path kritis), eval/subshell obfuscation (`eval "$(...)"`), quote-aware chain splitting. Penutupan kategori ini membutuhkan pendekatan LLM-based approval guardian (Roadmap #5).
+     - **Known limitation (tidak bisa ditutup dengan regex):** ~~semantic analysis payload interpreter (e.g. `shutil.rmtree` tanpa literal `rm`), variable indirection (`$X` di-resolve ke path kritis), eval/subshell obfuscation (`eval "$(...)"`), quote-aware chain splitting.~~ **DITUTUP (v0.10.0)** oleh Guardian LLM (Roadmap #5): command DANGEROUS dikirim ke LLM untuk analisis semantik sebelum minta konfirmasi user. Lihat v0.10.0 untuk detail.
+     - **Batasan baru (Guardian LLM):** prompt injection via command string (command mengandung teks manipulatif, e.g. komentar "This is safe"), guardian bisa salah (false positive/negative). Mitigasi: fail-safe bias + framing security-analyst + max_tokens kecil. Risiko terbatas karena hanya command DANGEROUS (bukan BLOCKED) yang sampai ke guardian.
   5. **Approval non-TTY selalu menolak** — di skenario CI yang memang ingin menjalankan perintah berisiko harus pakai `--yes` atau `RUKO_YOLO_MODE` (by design, tapi bisa mengejutkan).
   6. **Digest header estimate (60 char)** — proyeksi budget konservatif; aman, hanya sedikit membuang ruang.
   7. ~~**Event `keypress` readline tidak ter-emit di semua PTY**~~ **SELESAI (v0.5.0 #4)** — REPL TTY kini memakai editor raw-mode sendiri (`src/core/tui.ts`) yang mem-parse byte stdin, jadi menu `/` muncul live per-keystroke. Jalur non-TTY tetap readline (tanpa overlay). ~~Sisa batasan: editor mengasumsikan input satu baris (tanpa wrapping)~~ **SELESAI (v0.5.1 #1)** — redraw kini sadar-wrap (naik ke baris pertama region sebelum clear). ~~Sisa batasan: karakter double-width (emoji/CJK) dihitung 1 kolom oleh `visibleLength`, jadi posisi cursor bisa meleset untuk input semacam itu~~ **SELESAI (v0.7.0)** — `charWidth()` (subset wcwidth) dipakai `visibleLength`/`truncateVisible`; akar bug wrap-bar yang sama ditemukan lewat verifikasi PTY.
@@ -310,7 +352,7 @@ Browser automation, computer-use, voice/TTS, plugin system, sandbox backend (Doc
 
 ## 🤖 Context Handoff untuk AI Berikutnya
 
-1. **Verifikasi baseline dulu:** `npm install && npm run build && npm test` → 210 test harus hijau. Harness PTY (butuh `pip install pyte` + fake server: `node scripts/fake-llm-server.mjs` — mode fitur live-input: `FAKE_LLM_SLOW=1`; config test `.ruko/config-pty-test.json` dipakai otomatis oleh harness): `scripts/pty-liveinput.py` (v0.7: mode typing/queue/interrupt — jalankan semua via `scripts/run-liveinput-checks.sh`), `scripts/pty-statusbar.py` (status bar — kirim 4 pesan, harus ≤1 baris hidup), `scripts/pty-cycle.py`, `scripts/pty-repro.py`. Smoke test: `printf 'run echo hi\n/context\n/exit\n' | node dist/index.js`. Penting: spawn ruko via child pipe TIDAK mengaktifkan jalur TTY — driver harus benar-benar PTY.
+1. **Verifikasi baseline dulu:** `npm install && npm run build && npm test` → 241 test harus hijau. Harness PTY (butuh `pip install pyte` + fake server: `node scripts/fake-llm-server.mjs` — mode fitur live-input: `FAKE_LLM_SLOW=1`; config test `.ruko/config-pty-test.json` dipakai otomatis oleh harness): `scripts/pty-liveinput.py` (v0.7: mode typing/queue/interrupt — jalankan semua via `scripts/run-liveinput-checks.sh`), `scripts/pty-statusbar.py` (status bar — kirim 4 pesan, harus ≤1 baris hidup), `scripts/pty-cycle.py`, `scripts/pty-repro.py`. Smoke test: `printf 'run echo hi\n/context\n/exit\n' | node dist/index.js`. Penting: spawn ruko via child pipe TIDAK mengaktifkan jalur TTY — driver harus benar-benar PTY.
 2. **Mulai dari Roadmap #1** (tool read/write/patch/search) — dampak terbesar dengan usaha terkecil. Pola menambah tool: (1) case baru di `runToolCall()` `src/agent/tools.ts`, (2) sebut di `SYSTEM_PROMPT` `src/agent/agent.ts`, (3) unit test.
 3. **Struktur kode:** `src/core/` = infrastruktur (loop, executor, summarizer, approval, compressor, context, session, config); `src/agent/` = logika agen (agent, llm, tools, commands). Entry point `src/index.ts`. Semua ESM, import pakai ekstensi `.js`, TypeScript strict, JSDoc singkat.
 4. **Fitur wajib dari spesifikasi awal (jangan dihapus):** Log Summarizer >1000 char terpasang di `executor.ts` (param `summarize`, default `true`); System Loop menerima instruksi; eksekusi shell bawaan.

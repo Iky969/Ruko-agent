@@ -99,7 +99,7 @@ export class Agent {
     if (match) {
       const result = await guardedExecute(
         match[1],
-        { timeoutMs: this.config.execTimeoutMs, confirm: this.confirm },
+        { timeoutMs: this.config.execTimeoutMs, confirm: this.confirm, llmProvider: this.llmProvider },
         this.config,
       );
       return (
@@ -188,6 +188,7 @@ export class Agent {
           onLog: (line) => console.log(line),
           planMode: this.planMode,
           signal,
+          llmProvider: this.llmProvider,
         });
         if (signal?.aborted) return '';
         messages.push({

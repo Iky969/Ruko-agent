@@ -76,9 +76,10 @@ async function main(): Promise<void> {
       : process.stdin.isTTY
         ? makeTtyConfirmer()
         : null;
+    const llm = createProvider(config);
     const result = await guardedExecute(
       command,
-      { timeoutMs: config.execTimeoutMs, confirm },
+      { timeoutMs: config.execTimeoutMs, confirm, llmProvider: llm },
       config,
     );
     console.log(result.output || `(no output — exit code ${result.code ?? 'killed'})`);

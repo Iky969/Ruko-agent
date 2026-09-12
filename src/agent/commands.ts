@@ -310,7 +310,7 @@ const COMMANDS: CommandDef[] = [
       }
       const result = await guardedExecute(
         args,
-        { timeoutMs: env.config.execTimeoutMs, confirm: env.confirm },
+        { timeoutMs: env.config.execTimeoutMs, confirm: env.confirm, llmProvider: env.llm },
         env.config,
       );
       console.log(result.output || '(no output)');

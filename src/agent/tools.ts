@@ -104,6 +104,13 @@ export interface ToolDeps {
   planMode?: boolean;
   /** v0.7: abort signal — an interrupted turn kills its running exec child. */
   signal?: AbortSignal;
+  /**
+   * Roadmap #5: LLM provider for the guardian second layer.
+   * Passed through to guardedExecute for semantic command analysis.
+   */
+  llmProvider?: import('../agent/llm.js').LLMProvider | null;
+  /** Callback for guardian status UI indicator. */
+  onGuardianStatus?: (message: string | null) => void;
 }
 
 /** Tools refused while plan mode is active (read_file stays available). */
@@ -176,6 +183,8 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
           timeoutMs: typeof call.timeoutMs === 'number' ? call.timeoutMs : undefined,
           confirm: deps.confirm ?? null,
           signal: deps.signal,
+          llmProvider: deps.llmProvider,
+          onGuardianStatus: deps.onGuardianStatus,
         },
         config,
       );
