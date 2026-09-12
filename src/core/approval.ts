@@ -1,5 +1,8 @@
+import { appendFileSync, chmodSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { AgentConfig, ExecResult } from '../types.js';
 import { execute } from './executor.js';
+import { green } from './ui.js';
 import type { LLMProvider } from '../agent/llm.js';
 
 /**
@@ -318,6 +321,34 @@ export function parseGuardianResponse(raw: string): GuardianVerdict {
   }
 }
 
+export function defaultGuardianAuditLogPath(): string {
+  return join(process.cwd(), '.ruko', 'guardian-audit.log');
+}
+
+/**
+ * GAP-03: Records every guardian evaluation to an audit log file (.ruko/guardian-audit.log).
+ * Ensures a persistent audit trail outside of conversation context.
+ */
+export function writeGuardianAuditLog(
+  command: string,
+  verdict: GuardianVerdict,
+  logPath = defaultGuardianAuditLogPath(),
+): void {
+  try {
+    mkdirSync(dirname(logPath), { recursive: true });
+    const timestamp = new Date().toISOString();
+    const entry = `[${timestamp}] verdict=${verdict.verdict} command=${JSON.stringify(command)} reasoning=${JSON.stringify(verdict.reasoning)}\n`;
+    appendFileSync(logPath, entry, { encoding: 'utf8', mode: 0o600 });
+    try {
+      chmodSync(logPath, 0o600);
+    } catch {
+      // Best-effort on filesystems without POSIX permissions
+    }
+  } catch {
+    // Non-blocking: audit log failure should never crash command execution
+  }
+}
+
 /** User confirmation hook; returns true to allow execution. */
 export type Confirmer = (command: string, reason: string) => Promise<boolean>;
 
@@ -340,6 +371,10 @@ export interface GuardOptions {
    * Called with the message to display; called with null when done.
    */
   onGuardianStatus?: (message: string | null) => void;
+  /** Optional logger for displaying command actions & visual indicators (GAP-01). */
+  onLog?: (line: string) => void;
+  /** Optional override for audit log path (GAP-03, e.g. for testing). */
+  auditLogPath?: string;
 }
 
 /**
@@ -369,7 +404,19 @@ export async function guardedExecute(
       options.onGuardianStatus?.('🔍 Memeriksa keamanan command...');
       try {
         const guardian = await assessWithGuardian(command, config, options.llmProvider);
+
+        // GAP-03: Catat seluruh verdict guardian ke .ruko/guardian-audit.log
+        writeGuardianAuditLog(command, guardian, options.auditLogPath);
+
         if (guardian.verdict === 'safe') {
+          // GAP-01: Tampilkan indikator visual sebelum eksekusi (bukan diam-diam)
+          const note = guardian.reasoning ? ` — ${guardian.reasoning}` : '';
+          const indicator = green(`✓ Guardian: aman${note}`);
+          if (options.onLog) {
+            options.onLog(indicator);
+          } else {
+            console.log(indicator);
+          }
           return execute(command, {
             timeoutMs: options.timeoutMs,
             summarize: options.summarize,

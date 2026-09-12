@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   assessWithGuardian,
   detectRisk,
   guardedExecute,
   parseGuardianResponse,
+  writeGuardianAuditLog,
 } from '../core/approval.js';
 import { AgentConfig, ContextMessage, DEFAULT_CONFIG } from '../types.js';
 import type { LLMProvider, ChatOptions, ConnectionResult } from '../agent/llm.js';
@@ -403,4 +407,64 @@ test('guardian scenario: node -e safe → guardian allows', async () => {
   );
   assert.equal(result.code, 0);
   assert.match(result.output, /hello/);
+});
+
+test('GAP-01: safe verdict outputs visual indicator before execution', async () => {
+  const logs: string[] = [];
+  const result = await guardedExecute(
+    'node -e "console.log(\'safe-test\')"',
+    {
+      confirm: async () => { throw new Error('Should not reach user on safe'); },
+      llmProvider: verdictProvider('safe', 'Perintah cetak sederhana tidak destruktif'),
+      onLog: (line) => logs.push(line),
+    },
+    config(),
+  );
+  assert.equal(result.code, 0);
+  assert.ok(
+    logs.some((l) => l.includes('✓ Guardian: aman') && l.includes('Perintah cetak sederhana tidak destruktif')),
+    'Visual indicator must be logged with reasoning before execution',
+  );
+});
+
+test('GAP-03: writes verdict to guardian audit log file with 0600 mode', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ruko-guardian-audit-'));
+  const auditFile = join(dir, 'guardian-audit.log');
+
+  const result = await guardedExecute(
+    'python3 -c "print(42)"',
+    {
+      confirm: async () => true,
+      llmProvider: verdictProvider('safe', 'Kalkulasi matematika sederhana'),
+      auditLogPath: auditFile,
+    },
+    config(),
+  );
+  assert.equal(result.code, 0);
+
+  const content = readFileSync(auditFile, 'utf8');
+  assert.match(content, /verdict=safe/);
+  assert.ok(content.includes('python3 -c'), 'Log should include command');
+  assert.ok(content.includes('print(42)'), 'Log should include command args');
+  assert.match(content, /Kalkulasi matematika sederhana/);
+
+  if (process.platform !== 'win32') {
+    const st = statSync(auditFile);
+    assert.equal(st.mode & 0o777, 0o600, 'Audit log file must have 0600 mode');
+  }
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('GAP-03: writeGuardianAuditLog direct call handles errors gracefully', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ruko-guardian-direct-'));
+  const auditFile = join(dir, 'audit.log');
+
+  writeGuardianAuditLog('test-cmd', { verdict: 'blocked', reasoning: 'Bahaya' }, auditFile);
+  const content = readFileSync(auditFile, 'utf8');
+  assert.match(content, /verdict=blocked/);
+  assert.match(content, /test-cmd/);
+  assert.match(content, /Bahaya/);
+
+  rmSync(dir, { recursive: true, force: true });
 });

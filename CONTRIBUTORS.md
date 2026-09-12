@@ -7,6 +7,8 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 ## Gemini 3.8 Flash
 - Kontribusi: Hardening keamanan (H1 workspace sandbox path traversal, H2 allowlist token match, H4 blocked commands protection)
 - Tanggal: 2026-09-12
+- Kontribusi: Penutupan gap H6 (destructive patterns), GAP-01 visual indicator, GAP-03 guardian audit log (.ruko/guardian-audit.log)
+- Tanggal: 2026-09-12
 
 ## Claude Opus 4.6
 - Kontribusi: Audit keamanan pre-publish & inisiasi implementasi hardening

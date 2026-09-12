@@ -226,6 +226,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
           signal: deps.signal,
           llmProvider: deps.llmProvider,
           onGuardianStatus: deps.onGuardianStatus,
+          onLog: deps.onLog,
         },
         config,
       );

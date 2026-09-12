@@ -45,7 +45,7 @@
   - Total test: **210 test hijau**.
   - Versi dinaikkan ke **0.9.0** (`package.json`, `PROGRESS.md`, `README.md`).
 
-### v0.10.1 — Hardening Keamanan Pre-Publish (5 HIGH + 4 MEDIUM Selesai)
+### v0.10.1 — Hardening Keamanan Pre-Publish (6 HIGH + 4 MEDIUM + GAP-01/03 Selesai)
 
 - [x] **#1 (H1) Workspace Sandbox & Proteksi Path Traversal** (`src/agent/tools.ts`, `src/agent/filetools.ts`):
   - `assertInsideWorkspace(abs, workspaceRoot)` diterapkan ke semua 6 file tools: `read_file`, `glob`, `code_search`, `write_file`, `edit_file`, `patch_file`.
@@ -64,15 +64,21 @@
   - Test suite diupdate untuk memastikan proteksi BLOCKED tetap aktif meski approval dimatikan.
 - [x] **#5 (H5) Fallback Config Tool Aman** (`src/agent/tools.ts`):
   - Mengganti fallback tidak aman `{ approvalEnabled: false }` menjadi `DEFAULT_CONFIG` di `runToolCallRaw`, memastikan approval gate tidak mati diam-diam jika caller lupa meneruskan konfigurasi.
-- [x] **#6 (M1) Validasi Skema Konfigurasi** (`src/core/config.ts`):
+- [x] **#6 (H6) Penutupan Pola Destruktif Tambahan** (`src/core/approval.ts`):
+  - Menambahkan pola `find ... -delete`, `truncate -s`, `shred`, dan `wipefs` ke dalam `DANGEROUS_PATTERNS` di layer regex agar tidak pernah lolos sebagai `NONE` (selalu memicu penilaian Guardian LLM).
+- [x] **#7 (GAP-01) Indikator Visual Guardian Sebelum Eksekusi** (`src/core/approval.ts`, `src/agent/tools.ts`):
+  - Ketika Guardian LLM memberikan verdict `safe`, sistem mencetak indikator visual berwarna hijau: `✓ Guardian: aman — <reasoning>` sebelum mengeksekusi perintah.
+- [x] **#8 (GAP-03) Audit Log Guardian Terpisah** (`src/core/approval.ts`):
+  - Setiap evaluasi Guardian LLM dicatat ke audit log `.ruko/guardian-audit.log` dengan format `[timestamp] verdict=<verdict> command=<cmd> reasoning=<reasoning>` dan permission `0o600`.
+- [x] **#9 (M1) Validasi Skema Konfigurasi** (`src/core/config.ts`):
   - Fungsi `sanitizeConfigFile()` memvalidasi tipe data, membatasi rentang nilai angka (timeout, maxLogChars, maxContextChars), dan membersihkan entri kosong/invalid pada `approvalAllowlist`.
-- [x] **#7 (M2 & M4) Enforce File Permissions 0600 (Owner Only)** (`src/core/config.ts`, `src/core/session.ts`):
-  - `saveConfig()` dan `saveSession()` kini memanggil `chmodSync(path, 0o600)` eksplisit untuk menjamin izin file tetap 0600 meskipun file sudah ada sebelumnya dengan mode longgar.
-- [x] **#8 (M3) Masking API Key Sadar Panjang Token** (`src/agent/commands.ts`):
+- [x] **#10 (M2 & M4) Enforce File Permissions 0600 (Owner Only)** (`src/core/config.ts`, `src/core/session.ts`):
+  - `saveConfig()`, `saveSession()`, dan `writeGuardianAuditLog()` kini memanggil `chmodSync(path, 0o600)` eksplisit untuk menjamin izin file tetap 0600 meskipun file sudah ada sebelumnya dengan mode longgar.
+- [x] **#11 (M3) Masking API Key Sadar Panjang Token** (`src/agent/commands.ts`):
   - Implementasi `maskApiKey()` mencegah bocornya token pendek pada tampilan `/config`: token ≤ 8 karakter dimask 100%, token 9–14 karakter menampilkan 2 karakter awal/akhir, token > 14 karakter menampilkan 3 awal dan 4 akhir.
-- [x] **#9 Anti-Regression Tests**:
-  - 10 unit test baru ditambahkan di `src/tests/` (`config.test.ts`, `session.test.ts`, `commands.test.ts`, `filetools.test.ts`, `glob_search.test.ts`, `fileedit.test.ts`, `patchfile.test.ts`).
-  - Total: **251 test hijau** (sebelumnya 241), 0 failures, `npm run typecheck` bersih.
+- [x] **#12 Anti-Regression Tests**:
+  - Unit test baru ditambahkan di `src/tests/` (`config.test.ts`, `session.test.ts`, `commands.test.ts`, `filetools.test.ts`, `glob_search.test.ts`, `fileedit.test.ts`, `patchfile.test.ts`, `approval.test.ts`, `guardian.test.ts`).
+  - Total: **255 test hijau** (sebelumnya 241), 0 failures, `npm run typecheck` bersih.
 
 ### v0.10.0 — Eksekusi feedback.txt (Roadmap #5: Approval pintar — Guardian LLM)
 
