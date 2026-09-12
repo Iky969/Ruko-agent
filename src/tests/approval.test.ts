@@ -322,3 +322,17 @@ test('regression: python/node without inline flag remains none', () => {
   assert.equal(detectRisk('php artisan serve', config()).risk, 'none');
   assert.equal(detectRisk('lua script.lua', config()).risk, 'none');
 });
+
+test('adversarial: alternative destructive commands trigger dangerous (H6 gap fix)', () => {
+  for (const cmd of [
+    'find / -delete',
+    'find . -name "*.tmp" -delete',
+    'truncate -s 0 /etc/passwd',
+    'truncate --size=0 file.txt',
+    'shred /dev/sda',
+    'shred -u secret.txt',
+    'wipefs -a /dev/sda',
+  ]) {
+    assert.equal(detectRisk(cmd, config()).risk, 'dangerous', `Expected DANGEROUS for cmd: ${cmd}`);
+  }
+});

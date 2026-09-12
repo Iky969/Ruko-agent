@@ -103,6 +103,12 @@ const DANGEROUS_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // secara statis oleh regex. Minimal minta konfirmasi (guardian LLM bisa
   // menganalisis lebih dalam).
   [/\beval\s/i, 'eval (eksekusi kode dinamis tidak dapat diverifikasi)'],
+  // Utilitas destruktif alternatif (H6 gap closure) — penghapusan / pemotongan
+  // file tanpa melalui rm, yang sebelumnya lolos sebagai NONE.
+  [/\bfind\b[^|;&\n]*-delete\b/i, 'find -delete (penghapusan file secara rekursif)'],
+  [/\btruncate\b/i, 'truncate (pengosongan/pemotongan ukuran file)'],
+  [/\bshred\b/i, 'shred (penghancuran file/disk secara permanen)'],
+  [/\bwipefs\b/i, 'wipefs (penghapusan signature filesystem)'],
 ];
 
 /**
