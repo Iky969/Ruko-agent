@@ -3,12 +3,17 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, after } from 'node:test';
-import { applySearchReplace, capToolResult, runToolCall, TOOL_RESULT_CHAR_LIMIT } from '../agent/tools.js';
+import { applySearchReplace, capToolResult, runToolCall, setWorkspaceRoot, TOOL_RESULT_CHAR_LIMIT } from '../agent/tools.js';
+
+const testWorkspace = mkdtempSync(join(tmpdir(), 'ruko-ws-pf-'));
+setWorkspaceRoot(testWorkspace);
 
 // Keep undo snapshots out of the repo during tests.
 const undoDir = mkdtempSync(join(tmpdir(), 'ruko-undo-env-'));
 process.env.RUKO_UNDO_DIR = undoDir;
 after(() => {
+  setWorkspaceRoot(null);
+  rmSync(testWorkspace, { recursive: true, force: true });
   delete process.env.RUKO_UNDO_DIR;
   rmSync(undoDir, { recursive: true, force: true });
 });
@@ -29,8 +34,7 @@ test('applySearchReplace rejects identical old/new', () => {
 });
 
 test('patch_file tool applies and writes the file', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'ruko-patch-'));
-  const file = join(dir, 'p.txt');
+  const file = join(testWorkspace, 'p.txt');
   writeFileSync(file, 'halo dunia\nbaris dua\n', 'utf8');
   const logs: string[] = [];
   const result = await runToolCall(
@@ -39,19 +43,16 @@ test('patch_file tool applies and writes the file', async () => {
   );
   assert.equal(readFileSync(file, 'utf8'), 'hai dunia\nbaris dua\n');
   assert.ok((JSON.parse(result) as { ok: boolean }).ok);
-  rmSync(dir, { recursive: true, force: true });
 });
 
 test('patch_file surfaces a helpful error when oldText is stale', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'ruko-patch-'));
-  const file = join(dir, 'q.txt');
+  const file = join(testWorkspace, 'q.txt');
   writeFileSync(file, 'isi asli\n', 'utf8');
   const result = JSON.parse(
     await runToolCall({ tool: 'patch_file', path: file, oldText: 'tidak ada', newText: 'x' }, {}),
   ) as { error?: string };
   assert.match(result.error ?? '', /tidak ditemukan/);
   assert.equal(readFileSync(file, 'utf8'), 'isi asli\n', 'file untouched on failed patch');
-  rmSync(dir, { recursive: true, force: true });
 });
 
 test('capToolResult head+tail caps huge results (§5.31)', () => {
@@ -72,4 +73,14 @@ test('plan mode blocks mutating tools in CODE (§6.38)', async () => {
   // read_file stays allowed (probe: error must NOT be the plan-mode message)
   const read = await runToolCall({ tool: 'read_file', path: '__nope__' }, { planMode: true });
   assert.ok(!read.includes('plan mode aktif'));
+});
+
+test('patch_file rejects path outside workspace (H1 sandbox)', async () => {
+  const result = JSON.parse(
+    await runToolCall(
+      { tool: 'patch_file', path: '/etc/passwd', oldText: 'root', newText: 'toor' },
+      {},
+    ),
+  ) as { error?: string };
+  assert.match(result.error ?? '', /di luar working directory/);
 });

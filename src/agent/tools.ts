@@ -1,5 +1,5 @@
 import { Confirmer, guardedExecute } from '../core/approval.js';
-import { AgentConfig } from '../types.js';
+import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
 import { renderFileDiff, splitLines } from '../core/diff.js';
 import { takeSnapshot } from '../core/undo.js';
 import { dim, green, red, yellow } from '../core/ui.js';
@@ -111,14 +111,54 @@ export interface ToolDeps {
   llmProvider?: import('../agent/llm.js').LLMProvider | null;
   /** Callback for guardian status UI indicator. */
   onGuardianStatus?: (message: string | null) => void;
+  /**
+   * Workspace root directory for file sandboxing (H1 fix).
+   * Defaults to process.cwd() in production, but tests or callers can set
+   * an explicit workspace boundary.
+   */
+  workspaceRoot?: string;
 }
 
 /** Tools refused while plan mode is active (read_file stays available). */
 const PLAN_MODE_BLOCKED = new Set(['exec', 'write_file', 'edit_file', 'patch_file']);
 
-/** Working directory used by file tools (always the user's cwd). */
-function resolveToolPath(p: string): string {
-  return path.resolve(process.cwd(), p);
+let customWorkspaceRoot: string | null = null;
+
+/** Sets an explicit global workspace root (e.g. for test suites). */
+export function setWorkspaceRoot(root: string | null): void {
+  customWorkspaceRoot = root ? path.resolve(root) : null;
+}
+
+/** Resolves the active workspace root. */
+export function getWorkspaceRoot(): string {
+  return customWorkspaceRoot ?? process.env.RUKO_WORKSPACE ?? process.cwd();
+}
+
+/**
+ * Asserts that an absolute path is inside the workspace boundary.
+ * Exported for use by filetools.ts path validation.
+ */
+export function assertInsideWorkspace(abs: string, workspaceRoot: string = getWorkspaceRoot()): void {
+  const cwd = path.resolve(workspaceRoot);
+  // Normalise both to trailing-sep for prefix comparison so that
+  // /project-foo doesn't match /project as a valid workspace.
+  const cwdPrefix = cwd.endsWith(path.sep) ? cwd : cwd + path.sep;
+  if (abs !== cwd && !abs.startsWith(cwdPrefix)) {
+    throw new Error(
+      `Path "${abs}" di luar working directory — akses file di luar project tidak diizinkan. ` +
+      `Workspace: ${cwd}`,
+    );
+  }
+}
+
+/**
+ * Resolves a tool file path relative to workspace root and validates sandbox boundary.
+ */
+function resolveToolPath(p: string, workspaceRoot: string = getWorkspaceRoot()): string {
+  const cwd = path.resolve(workspaceRoot);
+  const abs = path.resolve(cwd, p);
+  assertInsideWorkspace(abs, cwd);
+  return abs;
 }
 
 /** Shared implementation for edit_file / write_file with colored diff display. */
@@ -168,13 +208,14 @@ export async function runToolCall(call: ToolCall, deps: ToolDeps = {}): Promise<
 }
 
 async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
+  const ws = deps.workspaceRoot ?? getWorkspaceRoot();
   switch (call.tool) {
     case 'exec': {
       const command = String(call.command ?? '');
       if (!command) {
         return JSON.stringify({ error: 'exec: missing "command" field' });
       }
-      const config = deps.config ?? ({ approvalEnabled: false } as AgentConfig);
+      const config = deps.config ?? DEFAULT_CONFIG;
       const short = command.length > 60 ? `${command.slice(0, 57)}…` : command;
       deps.onLog?.(green(`🟢 Bash(${short})`));
       const result = await guardedExecute(
@@ -208,7 +249,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       const result = await readFileTool(file, {
         offset: typeof call.offset === 'number' ? call.offset : undefined,
         limit: typeof call.limit === 'number' ? call.limit : undefined,
-      });
+      }, ws);
       return result.ok
         ? result.text
         : JSON.stringify({ error: result.text });
@@ -224,7 +265,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       const result = await globTool(pattern, {
         path: searchPath,
         limit: typeof call.limit === 'number' ? call.limit : undefined,
-      });
+      }, ws);
       return result.ok
         ? result.text
         : JSON.stringify({ error: result.text });
@@ -250,7 +291,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
           ? call.limit
           : (typeof call.maxMatches === 'number' ? call.maxMatches : undefined),
         contextLines: typeof call.contextLines === 'number' ? call.contextLines : undefined,
-      });
+      }, ws);
       return result.ok
         ? result.text
         : JSON.stringify({ error: result.text });
@@ -265,8 +306,16 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       if (content == null) {
         return JSON.stringify({ error: `${call.tool}: missing "content" field (string)` });
       }
-      const abs = resolveToolPath(file);
-      const rel = path.relative(process.cwd(), abs) || file;
+      let abs: string;
+      let rel: string;
+      try {
+        abs = resolveToolPath(file, ws);
+        rel = path.relative(ws, abs) || file;
+      } catch (err) {
+        return JSON.stringify({
+          error: `${call.tool}: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
       if (call.tool === 'write_file' && existsSync(abs)) {
         return JSON.stringify({
           error: 'write_file: file sudah ada. Gunakan tool "edit_file" untuk menimpa dengan diff.',
@@ -290,8 +339,16 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       if (oldText == null || newText == null) {
         return JSON.stringify({ error: 'patch_file: missing "oldText"/"newText" (strings)' });
       }
-      const abs = resolveToolPath(file);
-      const rel = path.relative(process.cwd(), abs) || file;
+      let abs: string;
+      let rel: string;
+      try {
+        abs = resolveToolPath(file, ws);
+        rel = path.relative(ws, abs) || file;
+      } catch (err) {
+        return JSON.stringify({
+          error: `patch_file: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
       if (!existsSync(abs)) {
         return JSON.stringify({ error: `patch_file: file tidak ada: ${rel} (pakai write_file untuk file baru)` });
       }

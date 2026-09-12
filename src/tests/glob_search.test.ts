@@ -11,12 +11,13 @@ import {
   isBinaryFile,
   walkDirectory,
 } from '../agent/filetools.js';
-import { parseToolCalls, runToolCall } from '../agent/tools.js';
+import { parseToolCalls, runToolCall, setWorkspaceRoot } from '../agent/tools.js';
 
 let tmpDir: string;
 
 before(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ruko-glob-search-'));
+  setWorkspaceRoot(tmpDir);
 
   // Create normal project directory structure
   await fs.mkdir(path.join(tmpDir, 'src', 'utils'), { recursive: true });
@@ -60,6 +61,7 @@ before(async () => {
 });
 
 after(async () => {
+  setWorkspaceRoot(null);
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -261,4 +263,14 @@ test('plan mode permits glob and code_search (read-only inspection)', async () =
     { planMode: true },
   );
   assert.ok(!searchResult.includes('plan mode aktif: tool "code_search" diblok'));
+});
+
+test('glob and code_search reject paths outside workspace (H1 sandbox)', async () => {
+  const globRes = await globTool('*.txt', { path: '/etc' });
+  assert.equal(globRes.ok, false);
+  assert.match(globRes.text, /di luar working directory/);
+
+  const searchRes = await codeSearchTool('root', { path: '/etc' });
+  assert.equal(searchRes.ok, false);
+  assert.match(searchRes.text, /di luar working directory/);
 });

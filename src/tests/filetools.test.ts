@@ -4,19 +4,21 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { after, before, test } from 'node:test';
 import { looksBinary, readFileTool, MAX_READ_LIMIT } from '../agent/filetools.js';
-import { parseToolCalls, runToolCall } from '../agent/tools.js';
+import { parseToolCalls, runToolCall, setWorkspaceRoot } from '../agent/tools.js';
 
 let tmpDir: string;
 let sample: string;
 
 before(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ruko-read-'));
+  setWorkspaceRoot(tmpDir);
   sample = path.join(tmpDir, 'sample.txt');
   const lines = Array.from({ length: 500 }, (_, i) => `baris ${i + 1}`);
   await fs.writeFile(sample, lines.join('\n'), 'utf8');
 });
 
 after(async () => {
+  setWorkspaceRoot(null);
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -89,4 +91,10 @@ test('runToolCall reports missing path as a tool error', async () => {
   const out = await runToolCall({ tool: 'read_file' });
   const parsed = JSON.parse(out);
   assert.match(parsed.error, /missing "path"/);
+});
+
+test('readFileTool rejects path traversal outside workspace (H1 sandbox)', async () => {
+  const r = await readFileTool('/etc/passwd');
+  assert.equal(r.ok, false);
+  assert.match(r.text, /di luar working directory/);
 });

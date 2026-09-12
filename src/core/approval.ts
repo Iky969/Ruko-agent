@@ -133,29 +133,26 @@ function testCandidates(segment: string): string[] {
 /** Classifies a shell command. */
 export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
   if (!config.approvalEnabled || isYoloMode()) {
-    return { risk: 'none', reason: null };
-  }
-  for (const allow of config.approvalAllowlist) {
-    if (command.trim() === allow || command.includes(allow)) {
-      return { risk: 'none', reason: null };
-    }
+    // H4 fix: even when approval is disabled, BLOCKED patterns are still checked
+    // to prevent catastrophic commands from ever executing.
+    return checkBlockedOnly(command);
   }
 
   let worst: RiskVerdict = { risk: 'none', reason: null };
 
-  for (const seg of chainedSegments(command)) {
+  const segments = chainedSegments(command);
+  for (const seg of segments) {
     const candidates = testCandidates(seg);
-    // BLOCKED is the highest level — return immediately if found.
-    for (const candidate of candidates) {
-      for (const [re, reason] of BLOCKED_PATTERNS) {
-        if (re.test(candidate)) return { risk: 'blocked', reason };
+    for (const c of candidates) {
+      // BLOCKED patterns are always checked first — cannot be bypassed.
+      for (const [pat, reason] of BLOCKED_PATTERNS) {
+        if (pat.test(c)) {
+          return { risk: 'blocked', reason };
+        }
       }
-    }
-    // Accumulate DANGEROUS only if we haven't already found something worse.
-    if (RISK_RANK[worst.risk] < RISK_RANK.dangerous) {
-      for (const candidate of candidates) {
-        for (const [re, reason] of DANGEROUS_PATTERNS) {
-          if (re.test(candidate)) {
+      if (worst.risk !== 'dangerous') {
+        for (const [pat, reason] of DANGEROUS_PATTERNS) {
+          if (pat.test(c)) {
             worst = { risk: 'dangerous', reason };
             break;
           }
@@ -165,7 +162,41 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
     }
   }
 
+  // H2 fix: allowlist checked AFTER blocked/dangerous patterns.
+  // BLOCKED can NEVER be bypassed by allowlist (hardline safety).
+  // Only DANGEROUS commands can be downgraded to NONE via allowlist.
+  if (worst.risk === 'dangerous') {
+    const trimmed = command.trim();
+    for (const allow of config.approvalAllowlist) {
+      if (!allow || !allow.trim()) continue; // skip empty strings (H2: prevent universal bypass)
+      const a = allow.trim();
+      if (trimmed === a || trimmed.startsWith(a + ' ')) {
+        return { risk: 'none', reason: null };
+      }
+    }
+  }
+
   return worst;
+}
+
+/**
+ * H4 fix: checks ONLY blocked patterns — used when approval is disabled
+ * (approvalEnabled: false or YOLO_MODE) to ensure catastrophic commands
+ * are still refused even without the full approval gate.
+ */
+function checkBlockedOnly(command: string): RiskVerdict {
+  const segments = chainedSegments(command);
+  for (const seg of segments) {
+    const candidates = testCandidates(seg);
+    for (const c of candidates) {
+      for (const [pat, reason] of BLOCKED_PATTERNS) {
+        if (pat.test(c)) {
+          return { risk: 'blocked', reason };
+        }
+      }
+    }
+  }
+  return { risk: 'none', reason: null };
 }
 
 /** True when RUKO_YOLO_MODE is set to a truthy value. */

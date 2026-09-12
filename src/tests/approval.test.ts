@@ -43,8 +43,22 @@ test('detectRisk: allowlist bypasses the gate', () => {
   assert.equal(detectRisk('git push origin main', cfg).risk, 'none');
 });
 
-test('detectRisk: disabled approval returns none', () => {
-  assert.equal(detectRisk('sudo rm -rf /', config({ approvalEnabled: false })).risk, 'none');
+test('detectRisk: disabled approval skips dangerous but blocked commands stay blocked (H4 fix)', () => {
+  // Dangerous command skips confirmation when approval is disabled
+  assert.equal(detectRisk('sudo apt update', config({ approvalEnabled: false })).risk, 'none');
+  assert.equal(detectRisk('git push origin main', config({ approvalEnabled: false })).risk, 'none');
+  // Blocked command remains blocked even when approval is disabled
+  assert.equal(detectRisk('sudo rm -rf /', config({ approvalEnabled: false })).risk, 'blocked');
+  assert.equal(detectRisk('rm -rf /', config({ approvalEnabled: false })).risk, 'blocked');
+});
+
+test('detectRisk: allowlist cannot bypass blocked commands or use empty strings (H2 fix)', () => {
+  // Empty string in allowlist does not bypass
+  const emptyAllow = config({ approvalAllowlist: [''] });
+  assert.equal(detectRisk('sudo apt update', emptyAllow).risk, 'dangerous');
+  // Allowlist cannot bypass blocked commands
+  const blockedAllow = config({ approvalAllowlist: ['rm -rf /'] });
+  assert.equal(detectRisk('rm -rf /', blockedAllow).risk, 'blocked');
 });
 
 test('guardedExecute: blocked command is refused even with a confirming user', async () => {

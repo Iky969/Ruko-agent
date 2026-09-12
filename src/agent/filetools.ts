@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
+import { assertInsideWorkspace, getWorkspaceRoot } from './tools.js';
 
 /** Default number of lines a `read_file` call returns when not asked for. */
 export const DEFAULT_READ_LIMIT = 200;
@@ -89,9 +90,15 @@ export const TEXT_EXTENSIONS = new Set([
 export async function readFileTool(
   filePath: string,
   opts: ReadFileOptions = {},
-  cwd: string = process.cwd(),
+  cwd: string = getWorkspaceRoot(),
 ): Promise<ReadFileResult> {
-  const abs = path.resolve(cwd, filePath);
+  let abs: string;
+  try {
+    abs = path.resolve(cwd, filePath);
+    assertInsideWorkspace(abs, cwd);
+  } catch (err) {
+    return { ok: false, text: err instanceof Error ? err.message : String(err) };
+  }
   const limit = clampInt(opts.limit, 1, MAX_READ_LIMIT, DEFAULT_READ_LIMIT);
   const offset = Math.max(1, Math.trunc(opts.offset ?? 1));
 
@@ -332,10 +339,22 @@ export interface GlobResult {
 export async function globTool(
   pattern = '',
   opts: GlobOptions = {},
-  cwd: string = process.cwd(),
+  cwd: string = getWorkspaceRoot(),
 ): Promise<GlobResult> {
   const limit = clampInt(opts.limit, 1, MAX_GLOB_LIMIT, DEFAULT_GLOB_LIMIT);
-  const startDir = opts.path ? path.resolve(cwd, opts.path) : cwd;
+  let startDir: string;
+  try {
+    startDir = opts.path ? path.resolve(cwd, opts.path) : cwd;
+    assertInsideWorkspace(startDir, cwd);
+  } catch (err) {
+    return {
+      ok: false,
+      text: err instanceof Error ? err.message : String(err),
+      files: [],
+      totalFound: 0,
+      truncated: false,
+    };
+  }
 
   try {
     const st = await fs.stat(startDir);
@@ -437,7 +456,7 @@ export interface CodeSearchResult {
 export async function codeSearchTool(
   query: string,
   opts: CodeSearchOptions = {},
-  cwd: string = process.cwd(),
+  cwd: string = getWorkspaceRoot(),
 ): Promise<CodeSearchResult> {
   if (!query || typeof query !== 'string' || query.trim() === '') {
     return {
@@ -460,15 +479,17 @@ export async function codeSearchTool(
     }
   }
 
+  let flags = 'g';
+  if (!opts.caseSensitive) flags += 'i';
+
   let matcher: RegExp;
-  const flags = opts.caseSensitive ? '' : 'i';
   if (opts.isRegex) {
     try {
       matcher = new RegExp(query, flags);
     } catch (err) {
       return {
         ok: false,
-        text: `code_search: regex tidak valid "${query}": ${errorMessage(err)}`,
+        text: `code_search: pola regex tidak valid: ${errorMessage(err)}`,
         totalMatches: 0,
         totalFiles: 0,
         truncated: false,
@@ -482,7 +503,19 @@ export async function codeSearchTool(
   const contextLines = clampInt(opts.contextLines, 0, MAX_CONTEXT_LINES, DEFAULT_CONTEXT_LINES);
   const limit = clampInt(opts.limit, 1, MAX_SEARCH_LIMIT, DEFAULT_SEARCH_LIMIT);
 
-  const targetPath = opts.path ? path.resolve(cwd, opts.path) : cwd;
+  let targetPath: string;
+  try {
+    targetPath = opts.path ? path.resolve(cwd, opts.path) : cwd;
+    assertInsideWorkspace(targetPath, cwd);
+  } catch (err) {
+    return {
+      ok: false,
+      text: err instanceof Error ? err.message : String(err),
+      totalMatches: 0,
+      totalFiles: 0,
+      truncated: false,
+    };
+  }
 
   let candidateFiles: WalkEntry[] = [];
   try {

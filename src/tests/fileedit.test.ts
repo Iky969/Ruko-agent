@@ -3,19 +3,23 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, after } from 'node:test';
-import { runToolCall } from '../agent/tools.js';
+import { runToolCall, setWorkspaceRoot } from '../agent/tools.js';
 import { stripAnsi } from '../core/ui.js';
+
+const testWorkspace = mkdtempSync(join(tmpdir(), 'ruko-ws-fe-'));
+setWorkspaceRoot(testWorkspace);
 
 // Route undo snapshots to a temp dir so repo stays clean.
 process.env.RUKO_UNDO_DIR = mkdtempSync(join(tmpdir(), 'ruko-undo-fe-'));
 after(() => {
+  setWorkspaceRoot(null);
+  rmSync(testWorkspace, { recursive: true, force: true });
   rmSync(process.env.RUKO_UNDO_DIR!, { recursive: true, force: true });
   delete process.env.RUKO_UNDO_DIR;
 });
 
 function tmpFile(name: string, content = ''): string {
-  const dir = mkdtempSync(join(tmpdir(), 'ruko-tools-'));
-  const abs = join(dir, name);
+  const abs = join(testWorkspace, name);
   if (content) writeFileSync(abs, content, 'utf8');
   return abs;
 }
@@ -78,4 +82,16 @@ test('edit_file requires content field', async () => {
   const abs = tmpFile('req.txt', 'x\n');
   const result = JSON.parse(await runToolCall({ tool: 'edit_file', path: abs }, {})) as { error?: string };
   assert.ok(result.error?.includes('missing "content"'));
+});
+
+test('write_file and edit_file reject paths outside workspace (H1 sandbox)', async () => {
+  const writeRes = JSON.parse(
+    await runToolCall({ tool: 'write_file', path: '/etc/evil.sh', content: 'echo bad' }, {}),
+  ) as { error?: string };
+  assert.match(writeRes.error ?? '', /di luar working directory/);
+
+  const editRes = JSON.parse(
+    await runToolCall({ tool: 'edit_file', path: '/etc/hosts', content: '127.0.0.1 evil' }, {}),
+  ) as { error?: string };
+  assert.match(editRes.error ?? '', /di luar working directory/);
 });
