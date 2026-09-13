@@ -21,6 +21,8 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Tanggal: 2026-09-13
 - Kontribusi: Pemisahan tampilan model dan provider 2 baris pada banner splash REPL & optimasi layar sempit (>= 40 kolom)
 - Tanggal: 2026-09-13
+- Kontribusi: Release v1.1.1 — sinkronisasi versi 1.1.1, update install.sh TAG v1.1.1, dan build release
+- Tanggal: 2026-09-13
 
 ## Claude Opus 4.6
 - Kontribusi: Audit keamanan pre-publish & inisiasi implementasi hardening

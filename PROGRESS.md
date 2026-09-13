@@ -45,6 +45,19 @@
   - Total test: **210 test hijau**.
   - Versi dinaikkan ke **0.9.0** (`package.json`, `PROGRESS.md`, `README.md`).
 
+### v1.1.1 — Layout Banner Splash REPL Terpisah, Hardening Provider Anthropic & Gemini, dan Sanitasi Kredensial
+
+- [x] **#1 Pemisahan Tampilan Model & Provider Banner Splash REPL** (`src/core/splash.ts`, `src/core/loop.ts`):
+  - Memisahkan informasi model dan provider menjadi 2 baris terpisah (`model: <name>` dan `provider: <name>`) menggantikan pemisah inline horizontal yang rentan terpotong.
+  - Perhitungan border dan padding banner responsif serta adaptif terhadap layar sempit/mobile (>= 40 kolom).
+- [x] **#2 Hardening Keamanan Provider LLM** (`src/agent/llm.ts`):
+  - Otentikasi Gemini dipindahkan seluruhnya dari URL query string ke header `x-goog-api-key`.
+  - Sanitasi kutip baseUrl dan masking kredensial (`••••••••`) pada pesan error jaringan / response exception.
+  - Verifikasi dan kesesuaian AnthropicProvider terhadap spesifikasi Messages API `/v1/messages` dan parser streaming SSE.
+- [x] **#3 Verifikasi & Suite Pengujian**:
+  - Penambahan 8 unit test baru (total **297 unit test hijau**, 100% pass + 1 E2E test).
+  - Versi dinaikkan ke **1.1.1** (`package.json`, `package-lock.json`, `install.sh`, `README.md`, `PROGRESS.md`).
+
 ### v1.1.0 — Provider Anthropic/Gemini, Zero-Dep .env, REPL History, Trajectory Export, UI Polish & Skills System
 
 - [x] **#1 Loader .env Zero-Dependency & Prioritas Config** (`src/core/dotenv.ts`, `src/index.ts`):

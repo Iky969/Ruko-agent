@@ -1,6 +1,6 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.1.1-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
