@@ -6,7 +6,7 @@
  * spinner, and a fence-aware streaming reveal filter.
  */
 
-const ANSI_RE = /\u001b\[[0-9;]*m/g;
+const ANSI_RE = /\u001b\[[0-9;]*[a-zA-Z]/g;
 
 /** Colors are dropped automatically for non-TTY output (tests, pipes). */
 export function colorsEnabled(): boolean {
@@ -24,6 +24,7 @@ export const red = (s: string): string => wrap('31', s);
 export const green = (s: string): string => wrap('32', s);
 export const yellow = (s: string): string => wrap('33', s);
 export const cyan = (s: string): string => wrap('36', s);
+export const magenta = (s: string): string => wrap('35', s);
 export const whiteBright = (s: string): string => wrap('97', s);
 export const bgBlue = (s: string): string => wrap('44', s);
 export const bgGreen = (s: string): string => wrap('42', s);
@@ -305,7 +306,7 @@ export function createSpinner(label = 'Thinking', options: SpinnerOptions = {}):
     return {
       stop() {
         clearInterval(timer);
-        process.stdout.write(`\r${' '.repeat(24)}\r`);
+        process.stdout.write(`\r\u001b[2K${' '.repeat(24)}\r`);
       },
     };
   }
@@ -364,7 +365,7 @@ export function createSpinner(label = 'Thinking', options: SpinnerOptions = {}):
   return {
     stop() {
       clearInterval(timer);
-      process.stdout.write(`\r${' '.repeat(maxCleared)}\r`);
+      process.stdout.write(`\r\u001b[2K${' '.repeat(maxCleared)}\r`);
     },
   };
 }
@@ -510,3 +511,161 @@ export class RevealFilter {
     }
   }
 }
+
+/**
+ * Lightweight Terminal Markdown Formatter (zero runtime dependency).
+ *
+ * Converts markdown formatting to ANSI escape codes:
+ * - Bold: `**teks**` -> Bold Cyan (\u001b[1;36mteks\u001b[0m)
+ * - Inline Code: ` `teks` ` -> Yellow (\u001b[33mteks\u001b[0m)
+ * - Regular vertical spacing before bold headings/bullet labels
+ * - Fenced code blocks (` ```...``` `) pass through without inline modifications
+ * - Non-TTY or NO_COLOR: cleanly strips `**` and ` ` ` without escape codes
+ */
+export function formatTerminalMarkdown(text: string, forceColors?: boolean): string {
+  if (!text) return '';
+  const useColors = forceColors ?? colorsEnabled();
+
+  const lines = text.split('\n');
+  const result: string[] = [];
+  let inCodeBlock = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+
+    // Track fenced code blocks
+    if (trimmed.startsWith('```')) {
+      inCodeBlock = !inCodeBlock;
+      result.push(useColors ? dim(rawLine) : rawLine);
+      continue;
+    }
+
+    // Inside code fences, pass content through untouched
+    if (inCodeBlock) {
+      result.push(rawLine);
+      continue;
+    }
+
+    // Add vertical breathing room before standalone bold section headings if previous line wasn't blank
+    const isBoldHeading = /^\*\*[^*]+\*\*/.test(trimmed);
+    if (isBoldHeading && result.length > 0 && result[result.length - 1].trim() !== '') {
+      result.push('');
+    }
+
+    // Replace **bold** with Bold Cyan (\u001b[1;36m)
+    let formatted = rawLine.replace(/\*\*([^*]+)\*\*/g, (_match, p1) => {
+      return useColors ? `\u001b[1;36m${p1}\u001b[0m` : p1;
+    });
+
+    // Replace `inline code` with Yellow (\u001b[33m)
+    formatted = formatted.replace(/`([^`]+)`/g, (_match, p1) => {
+      return useColors ? `\u001b[33m${p1}\u001b[0m` : p1;
+    });
+
+    result.push(formatted);
+  }
+
+  return result.join('\n');
+}
+
+export interface ToolCallLike {
+  tool: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Infers a clean, contextual step description from the batch of tool calls.
+ */
+export function inferStepDescription(
+  calls: ToolCallLike[],
+  stepNumber: number,
+): string {
+  const tools = new Set(calls.map((c) => c.tool));
+  if (tools.has('read_file') || tools.has('glob') || tools.has('code_search')) {
+    if (tools.has('write_file') || tools.has('edit_file') || tools.has('patch_file')) {
+      return 'Pemeriksaan dan modifikasi berkas proyek';
+    }
+    return 'Membaca konfigurasi & struktur berkas';
+  }
+  if (tools.has('write_file') || tools.has('edit_file') || tools.has('patch_file')) {
+    return 'Modifikasi berkas proyek';
+  }
+  if (tools.has('exec')) {
+    return 'Menjalankan perintah shell';
+  }
+  if (tools.has('remember')) {
+    return 'Menyimpan catatan ke persistent memory';
+  }
+  if (tools.has('load_skill') || tools.has('save_skill')) {
+    return 'Mengelola skill operasional proyek';
+  }
+  if (tools.has('search_sessions')) {
+    return 'Mencari riwayat percakapan sesi sebelumnya';
+  }
+  if (tools.has('delegate')) {
+    return 'Mendelegasikan sub-tugas ke subagent terisolasi';
+  }
+  return `Langkah ${stepNumber}`;
+}
+
+/**
+ * Workflow Step Indicator & Tool Tree (Claude Code / Gemini CLI standard).
+ *
+ * Renders tool execution sequences in a connected unicode box tree:
+ *   ┌─ ● [Langkah 1] Membaca konfigurasi & struktur berkas
+ *   │  🟢 Read(package.json)
+ *   ├─ ● [Langkah 2] Modifikasi berkas proyek
+ *   │  🟡 Edit(src/core/ui.ts)
+ *   └─ ✓ [Selesai] Semua langkah tuntas
+ */
+export class WorkflowTree {
+  private stepCount = 0;
+  private active = false;
+
+  constructor(private readonly out: (line: string) => void = (l) => console.log(l)) {}
+
+  startStep(description: string): void {
+    this.stepCount++;
+    this.active = true;
+    const prefix = this.stepCount === 1 ? '┌─' : '├─';
+    const badge = cyan(`● [Langkah ${this.stepCount}]`);
+    this.out(`${prefix} ${badge} ${description}`);
+  }
+
+  log(line: string): void {
+    if (!this.active) {
+      this.out(line);
+      return;
+    }
+    const lines = line.split('\n');
+    for (const l of lines) {
+      this.out(`│  ${l}`);
+    }
+  }
+
+  error(message: string): void {
+    if (!this.active) {
+      this.out(message);
+      return;
+    }
+    const badge = red('✖ [Gagal]');
+    this.out(`│  ${badge} ${message}`);
+  }
+
+  finish(summary = 'Semua langkah tuntas'): void {
+    if (!this.active) return;
+    const badge = green('✓ [Selesai]');
+    this.out(`└─ ${badge} ${summary}`);
+    this.active = false;
+  }
+
+  get isTreeActive(): boolean {
+    return this.active;
+  }
+
+  get currentStep(): number {
+    return this.stepCount;
+  }
+}
+

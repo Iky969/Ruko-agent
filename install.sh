@@ -3,7 +3,7 @@ set -e
 
 REPO="https://github.com/Iky969/Ruko-agent.git"
 INSTALL_DIR="$HOME/.ruko-agent"
-TAG="v1.0.0"
+TAG="v1.1.0"
 
 echo "== Ruko Agent Installer =="
 

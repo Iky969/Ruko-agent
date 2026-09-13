@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { UiMode } from '../types.js';
+import { formatMemoryForPrompt } from '../core/memory.js';
 
 /**
  * Layered system prompts + built-in roles (feedback §4).
@@ -46,6 +47,19 @@ export const TOOL_RULES =
   '- To read a text file (numbered lines, paginated), reply with:\n' +
   '```tool\n{"tool": "read_file", "path": "<file>", "offset": 1, "limit": 200}\n```\n' +
   '  Use offset/limit to page through large files; the result reports the total line count.\n' +
+  '- To record a persistent fact, project decision, or user preference across sessions, reply with:\n' +
+  '```tool\n{"tool": "remember", "content": "<concise note or fact>"}\n```\n' +
+  '  Appends a dated bullet to .ruko/memory.md. Use only for important project facts, architectural decisions, and user preferences useful in future sessions; NEVER use for temporary state or trivial details.\n' +
+  '- To search past conversation histories across saved sessions, reply with:\n' +
+  '```tool\n{"tool": "search_sessions", "query": "<keywords>"}\n```\n' +
+  '  Returns matching conversation snippets from past sessions.\n' +
+  '- To load detailed instructions for a specific project skill, reply with:\n' +
+  '```tool\n{"tool": "load_skill", "name": "<skill-name>"}\n```\n' +
+  '- To save a successful procedure or learned workflow as a reusable skill, reply with:\n' +
+  '```tool\n{"tool": "save_skill", "name": "<skill-name>", "description": "<summary>", "instructions": "<markdown instructions>"}\n```\n' +
+  '- To delegate a self-contained sub-task or research query to an isolated subagent, reply with:\n' +
+  '```tool\n{"tool": "delegate", "task": "<task description>"}\n```\n' +
+  '  Spawns an isolated subagent with its own fresh context and returns the concise result.\n' +
   '- To create a new file, reply with:\n' +
   '```tool\n{"tool": "write_file", "path": "<file>", "content": "<full file content>"}\n```\n' +
   '- To modify an existing file with a targeted search-replace (PREFERRED, token-cheap):\n' +
@@ -70,7 +84,7 @@ export const BUILT_IN_ROLES: RoleDef[] = [
     name: 'reviewer',
     description: 'Hanya baca + memberi masukan (tidak mengubah file).',
     prompt:
-      'Role: code reviewer. You are READ-ONLY: never call exec/write_file/edit_file/patch_file — only read_file, glob, and code_search are allowed. Give structured feedback: bugs and risks first (with file:line), then improvements, then positives. Suggest concrete fixes as snippets, do not apply them.',
+      'Role: code reviewer. You are READ-ONLY: never call exec/write_file/edit_file/patch_file/remember/save_skill — only read_file, glob, code_search, load_skill, and search_sessions are allowed. Give structured feedback: bugs and risks first (with file:line), then improvements, then positives. Suggest concrete fixes as snippets, do not apply them.',
   },
   {
     name: 'teacher',
@@ -154,12 +168,14 @@ export interface PromptLayers {
   planMode: boolean;
   mode: UiMode;
   agentDoc: string | null;
+  memory?: string | null;
+  skills?: string | null;
 }
 
 /** Plan-mode guard as prose — the hard enforcement lives in the CLI code (§4). */
 export function planModeAddendum(): string {
   return (
-    'ACTIVE MODE — PLAN: You may ONLY read and propose. Do not call exec/write_file/edit_file/patch_file ' +
+    'ACTIVE MODE — PLAN: You may ONLY read and propose. Do not call exec/write_file/edit_file/patch_file/remember/save_skill ' +
     '(the CLI blocks them anyway). Output a numbered step plan for user approval; the user runs it after ' +
     'exiting plan mode with /plan off.'
   );
@@ -179,8 +195,16 @@ export function modeAddendum(mode: UiMode): string | null {
 /** Assembles the final system prompt in fixed, cache-friendly layer order. */
 export function buildSystemPrompt(layers: PromptLayers): string {
   const parts = [CORE_IDENTITY, TOOL_RULES, layers.role.prompt];
+  if (layers.skills && layers.skills.trim()) parts.push(layers.skills);
   if (layers.agentDoc) parts.push(layers.agentDoc);
   const addenda = [layers.planMode ? planModeAddendum() : null, modeAddendum(layers.mode)];
   for (const a of addenda) if (a) parts.push(a);
-  return parts.join('\n\n');
+  const mainPrompt = parts.join('\n\n');
+
+  if (layers.memory && layers.memory.trim()) {
+    const memorySection = formatMemoryForPrompt(layers.memory);
+    return `${memorySection}\n\n## Instruksi sistem\n${mainPrompt}`;
+  }
+
+  return mainPrompt;
 }

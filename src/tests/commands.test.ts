@@ -4,7 +4,7 @@ import { buildHelpText, listCommands, matchCommands } from '../agent/commands.js
 
 test('every core command from feedback §3.18 exists', () => {
   const names = new Set(listCommands().map((c) => c.name));
-  for (const want of ['help', 'login', 'model', 'plan', 'compact', 'clear', 'undo', 'usage', 'resume', 'role', 'mode']) {
+  for (const want of ['help', 'login', 'model', 'plan', 'compact', 'clear', 'undo', 'usage', 'resume', 'role', 'mode', 'memory', 'export']) {
     assert.ok(names.has(want), `missing /${want}`);
   }
 });

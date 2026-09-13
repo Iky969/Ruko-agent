@@ -45,6 +45,88 @@
   - Total test: **210 test hijau**.
   - Versi dinaikkan ke **0.9.0** (`package.json`, `PROGRESS.md`, `README.md`).
 
+### v1.1.0 — Provider Anthropic/Gemini, Zero-Dep .env, REPL History, Trajectory Export, UI Polish & Skills System
+
+- [x] **#1 Loader .env Zero-Dependency & Prioritas Config** (`src/core/dotenv.ts`, `src/index.ts`):
+  - Parser `.env` native tanpa library eksternal (mendukung komentar `#`, string berkuotasi tunggal/ganda, karakter escape newline, multiline value).
+  - Penegakan hierarki prioritas konfigurasi: **Flag CLI > Process ENV > .ruko/config.json > .env**.
+  - Opsi CLI baru: `--model <name>`, `--provider <name>`, `--base-url <url>`, `--api-key <key>`, `--env-file <path>`.
+- [x] **#2 Provider LLM Lain (Anthropic & Google Gemini)** (`src/agent/llm.ts`):
+  - Interface `LLMProvider` diperluas dengan `AnthropicProvider` (mendukung Claude Messages API `/v1/messages`, `x-api-key`, header `anthropic-version: 2023-06-01`, streaming SSE native `content_block_delta`).
+  - Implementasi `GeminiProvider` (mendukung Generative Language API Google Gemini, streaming SSE native `candidates.parts.text`, query parameter key atau header `x-goog-api-key`).
+  - Auto-routing dan resolver di `createProvider()` berbasis config `provider`, base URL domain, atau environment variable aktif.
+- [x] **#3 (#11) Persistensi History REPL** (`src/core/history.ts`, `src/core/tui.ts`, `src/core/loop.ts`):
+  - Menyimpan riwayat masukan terminal ke `.ruko/history` dengan izin berkas owner-only `0o600`.
+  - Tombol panah atas/bawah (↑/↓) pada `LineEditor` kini otomatis menelusuri riwayat perintah sesi sebelumnya ketika overlay menu slash tidak aktif.
+  - Memori buffer sementara pengguna tetap aman saat menelusuri riwayat dan kembali ke baris terbaru.
+- [x] **#4 (#10) Trajectory Export** (`src/core/session.ts`, `src/agent/commands.ts`):
+  - Slash command `/export [json|markdown]` mengekspor percakapan dan jejak tool sesi aktif ke `.ruko/exports/<session-id>.<format>` (mode `0o600`).
+  - Mendukung format JSONL terstruktur (step, role, content, timestamp) untuk evals/training, dan Markdown terformat untuk dokumentasi tim.
+- [x] **#5 (#13) E2E Test Runner Terintegrasi** (`src/tests/e2e.test.ts`, `package.json`):
+  - Pengujian end-to-end terintegrasi berbasis mock SSE streaming server (`OpenAiCompatibleProvider` probe, multi-chunk tool execution loop `exec`, context history recording, dan export trajectory).
+  - Script npm baru `"test:e2e": "npm run build && node --test dist/tests/e2e.test.js"`.
+- [x] **#6 Skills System & Subagent Delegation** (`src/core/skills.ts`, `src/agent/subagent.ts`, `src/agent/tools.ts`):
+  - Folder skills terstruktur di `.ruko/skills/` dengan format markdown + YAML frontmatter. Tool `load_skill` dan `save_skill`.
+  - Tool `delegate` untuk menjalankan subagent mandiri dengan context terisolasi untuk menghemat token dan menjaga jendela konteks utama.
+  - Tool `search_sessions` dan `/sessions search <query>` untuk pencarian kata kunci lintas sesi riwayat percakapan.
+- [x] **#7 Unit Test & Status Pengujian**:
+  - Unit test baru ditambahkan di `src/tests/` (`dotenv.test.ts`, `providers.test.ts`, `history.test.ts`, `session_search.test.ts`, `skills.test.ts`, `e2e.test.ts`).
+  - Total test: **288 test hijau** (sebelumnya 273), 0 failures, `npm run typecheck` 100% bersih.
+  - Versi dinaikkan ke **1.1.0** (`package.json`, `package-lock.json`, `README.md`, `PROGRESS.md`).
+
+### UI/UX Cosmetic Polish & Workflow Step Indicator (Standard Modern TUI)
+
+- [x] **#1 Lightweight Terminal Markdown Formatter** (`src/core/ui.ts`):
+  - Mengubah pola bold `**teks**` menjadi ANSI Bold Cyan (`\x1b[1;36mteks\x1b[0m`) dan membersihkan simbol bintang ganda mentah.
+  - Mengubah inline code `` `teks` `` menjadi ANSI Yellow kontras (`\x1b[33mteks\x1b[0m`) dan membersihkan backtick mentah.
+  - Menghindari modifikasi pada blok kode berpagar (fenced code blocks ```` ```...``` ````).
+  - Memberikan jeda vertikal reguler sebelum judul seksi bertanda `**` agar hierarki visual antar bagian terbaca jelas dan tidak berupa dinding teks datar.
+  - Fallback bersih ke teks polos saat terminal tanpa warna (`NO_COLOR` atau non-TTY).
+- [x] **#2 Workflow Step Indicator & Tool Tree** (`src/core/ui.ts`, `src/agent/agent.ts`):
+  - Mengimplementasikan kelas `WorkflowTree` dengan karakter unicode box drawing (`┌─`, `│  `, `├─`, `└─`) dan badge status visual modern (ala Claude Code / Gemini CLI):
+    * Langkah awal: `┌─ ● [Langkah 1] <deskripsi>`
+    * Transisi langkah: `├─ ● [Langkah N] <deskripsi>`
+    * Log tool call & diff: Setiap baris log terhubung rapi di bawah cabang vertikal `│  `
+    * Selesai kerja: `└─ ✓ [Selesai] Semua langkah tuntas`
+    * Ralat/gagal: `│  ✖ [Gagal] <pesan>`
+  - Fungsi `inferStepDescription` menghasilkan deskripsi langkah kontekstual (inspeksi berkas, modifikasi kode, eksekusi shell, atau memori persisten).
+- [x] **#3 Clean Status, Spacing, & Ergonomi TUI** (`src/core/ui.ts`, `src/core/loop.ts`):
+  - Pembersihan total animasi spinner Pac-Man via `\r\x1b[2K\r` pada `createSpinner.stop()` agar tidak meninggalkan residu karakter apa pun.
+  - Penambahan 1 baris jeda kosong (`\n`) setelah alur respons selesai sebelum prompt input kembali muncul.
+  - Mempertahankan prinsip *zero runtime dependency* (100% native string manipulation & ANSI escape sequences).
+- [x] **#4 Unit Test Komprehensif**:
+  - 6 unit test baru di `src/tests/tui_workflow.test.ts`.
+  - Total test: **273 test hijau** (sebelumnya 267), 0 failures, `npm run typecheck` bersih.
+
+### Persistent Memory (Eksekusi feedback.txt — Obsidian-style Persistent Notes)
+
+- [x] **#1 Modul Inti Persistent Memory** (`src/core/memory.ts`):
+  - File memory terisolasi di `.ruko/memory.md` (append-only dari sisi tool, user bebas mengedit manual kapan saja).
+  - Inisialisasi otomatis file kosong dengan header placeholder saat startup jika belum ada, dengan penegakan izin berkas ketat `0o600` (`chmodSync`).
+  - Input sanitization: membersihkan newline (`\r`, `\n`) dari input `content` agar setiap catatan selalu tepat satu baris bullet `- [YYYY-MM-DD] <content>`.
+  - Deteksi batas ukuran `~8000` karakter (`MEMORY_WARN_THRESHOLD = 8000`): memunculkan peringatan transparan ke pengguna saat startup/inspeksi tanpa *silent trimming* atau penghapusan diam-diam (data pengguna tetap utuh).
+- [x] **#2 Proteksi Prompt Injection Boundary & Auto-load** (`src/agent/roles.ts`, `src/agent/agent.ts`, `src/core/loop.ts`):
+  - Injeksi otomatis memori ke system prompt sebelum instruksi sistem utama jika file memiliki catatan bermakna (skip injeksi bila file kosong atau hanya header placeholder).
+  - Pembungkus boundary ketat `<persistent_memory>...</persistent_memory>` disertai klausul keamanan eksplisit bahwa isi memori adalah data konteks pasif catatan masa lalu dan dilarang keras meng-override instruksi sistem atau guardrail agen.
+  - Startup warning ditampilkan di REPL loop saat karakter `memory.md` melampaui batas ~8000 karakter.
+- [x] **#3 Tool Protokol `remember`** (`src/agent/tools.ts`, `src/agent/roles.ts`):
+  - Tool terdaftar dengan parameter `content` (string) dan panduan penggunaan ketat: hanya untuk fakta proyek, keputusan arsitektur, dan preferensi pengguna masa depan (bukan state sementara).
+  - Plan Mode Enforcement di level kode: tool `remember` otomatis diblokir saat `/plan on` aktif (terdaftar di `PLAN_MODE_BLOCKED`).
+  - Path traversal protection: path file strictly hardcoded ke `.ruko/memory.md`, parameter path apa pun yang dikirim model diabaikan, dan akses divalidasi ke workspace boundary.
+  - Observability: mencetak visual action log `🟢 Remember(...)` via callback `onLog`.
+- [x] **#4 Slash Command `/memory`** (`src/agent/commands.ts`):
+  - `/memory`: Menampilkan isi memori saat ini dalam panel visual `renderBox` beserta statistik jumlah karakter dan status ukuran.
+  - `/memory clear`: Mengosongkan dan mereset `.ruko/memory.md` kembali ke placeholder awal dengan mode `0o600`.
+- [x] **#5 Keputusan Desain (Single Markdown File vs Cross-Session Vector Search)**:
+  - Diputuskan menggunakan file tunggal plain markdown (`.ruko/memory.md`) daripada database/vector search/embeddings:
+    1. *Zero runtime dependencies*: Menjaga arsitektur Ruko tetap zero-dependency murni tanpa dependensi native vector DB atau ONNX runtime embeddings.
+    2. *User inspectability & ownership*: Pengguna dapat langsung membuka, membaca, mengoreksi, atau menambahkan catatan secara manual menggunakan editor teks apa pun (seperti Obsidian, VS Code, atau nano).
+    3. *Deterministic & lightweight*: Membaca satu file teks kecil (~8KB) saat startup memiliki overhead ~0ms dan hemat token, tanpa kompleksitas embedding mismatch atau retrieval hallucinations.
+- [x] **#6 Unit Test Komprehensif**:
+  - 12 unit test baru di `src/tests/memory.test.ts` dan integrasi `/memory` di `src/tests/commands.test.ts`.
+  - Menguji: skip injection saat kosong/tidak ada, format injeksi XML boundary, append format & newline sanitization, permission 0o600, path traversal ditolak, warning threshold 8000 char tanpa trimming, blokir plan mode, observability log, dan slash command `/memory [clear]`.
+  - Total test: **267 test hijau** (sebelumnya 255), 0 failures, `npm run typecheck` bersih.
+
 ### v1.0.0 — Rilis Stabil Pertama (Production Ready & Full Security Hardening)
 
 - [x] **#1 (H1) Workspace Sandbox & Proteksi Path Traversal** (`src/agent/tools.ts`, `src/agent/filetools.ts`):
@@ -346,15 +428,15 @@ Browser automation, computer-use, voice/TTS, plugin system, sandbox backend (Doc
 ## ⏳ Fitur yang Belum / Tertunda (belum dikerjakan)
 
 - [x] Tool lanjutan (`patch`/`apply_diff`, `code_search`/`glob`) — SELESAI di v0.4.0 & v0.9.0.
-- [ ] Provider Anthropic/Gemini — Roadmap #2 (streaming OpenAI-compatible sudah selesai v0.3.0).
-- [ ] Subagent/delegation — Roadmap #3.
-- [ ] Skills system — Roadmap #4.
+- [x] Provider Anthropic/Gemini — Roadmap #2 — SELESAI (AnthropicProvider & GeminiProvider dengan SSE streaming native).
+- [x] Subagent/delegation — Roadmap #3 — SELESAI (tool `delegate` & subagent runner).
+- [x] Skills system — Roadmap #4 — SELESAI (.ruko/skills/, tool `load_skill` & `save_skill`).
 - [x] Approval pintar (guardian LLM) — Roadmap #5 — **SELESAI (v0.10.0)**.
-- [ ] Pencarian lintas sesi — Roadmap #6.
-- [ ] Cron & gateway messaging — Roadmap #7–8.
-- [ ] TUI — Roadmap #9.
-- [ ] Trajectory export, packaging npm publish, E2E CI — Roadmap #10–13 (mock server SSE lokal sudah ada: `scripts/fake-llm-server.mjs`).
-- [ ] Config lanjutan (.env loader, validasi tipe, YAML) — Roadmap #14.
+- [x] Pencarian lintas sesi — Roadmap #6 — SELESAI (`search_sessions` & `/sessions search`).
+- [ ] Cron & gateway messaging — Roadmap #7–8 (DITUNDA / OUT OF SCOPE per instruksi feedback.txt).
+- [x] TUI — Roadmap #9 — SELESAI (raw-mode editor, in-place redraw, ambient input, WorkflowTree, ANSI markdown).
+- [x] Trajectory export (#10), REPL history persistence (#11), E2E test runner (#13) — SELESAI.
+- [x] Config lanjutan (.env loader, prioritas konfigurasi, CLI flags override) — Roadmap #14 — SELESAI.
 
 ---
 

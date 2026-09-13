@@ -89,3 +89,125 @@ export function inferTitle(messages: ContextMessage[]): string {
   if (!line) return 'untitled';
   return line.length > 60 ? `${line.slice(0, 57)}…` : line;
 }
+
+export interface SessionSearchResult {
+  sessionId: string;
+  title: string;
+  updatedAt: string;
+  role: string;
+  snippet: string;
+}
+
+/**
+ * Searches saved sessions for matching keywords across all messages.
+ */
+export function searchSessions(
+  query: string,
+  dir = defaultSessionDir(),
+  maxResults = 20,
+): SessionSearchResult[] {
+  if (!existsSync(dir) || !query.trim()) return [];
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const results: SessionSearchResult[] = [];
+
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith('.json')) continue;
+    try {
+      const s = JSON.parse(readFileSync(join(dir, file), 'utf8')) as Session;
+      if (!s.messages || !Array.isArray(s.messages)) continue;
+
+      for (let i = 0; i < s.messages.length; i++) {
+        const msg = s.messages[i];
+        const lower = msg.content.toLowerCase();
+        const matchesAll = terms.every((t) => lower.includes(t));
+        if (matchesAll) {
+          const firstTerm = terms[0];
+          const pos = lower.indexOf(firstTerm);
+          const start = Math.max(0, pos - 40);
+          const end = Math.min(msg.content.length, pos + firstTerm.length + 40);
+          let snippet = msg.content.slice(start, end).replace(/\r?\n/g, ' ').trim();
+          if (start > 0) snippet = '…' + snippet;
+          if (end < msg.content.length) snippet = snippet + '…';
+
+          results.push({
+            sessionId: s.id,
+            title: s.title,
+            updatedAt: s.updatedAt,
+            role: msg.role,
+            snippet,
+          });
+
+          if (results.length >= maxResults) return results;
+        }
+      }
+    } catch {
+      // skip corrupt files
+    }
+  }
+
+  return results.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+}
+
+export function defaultExportDir(): string {
+  return join(process.cwd(), '.ruko', 'exports');
+}
+
+export interface ExportResult {
+  filePath: string;
+  entryCount: number;
+  format: 'jsonl' | 'md';
+}
+
+/**
+ * Exports conversation trajectory to JSONL or Markdown for evaluation / analysis.
+ */
+export function exportSessionTrajectory(
+  messages: ContextMessage[],
+  format: 'jsonl' | 'md' = 'jsonl',
+  dir = defaultExportDir(),
+  sessionId?: string,
+): ExportResult {
+  mkdirSync(dir, { recursive: true });
+  const id = sessionId ?? new Date().toISOString().replace(/[:.]/g, '-');
+  const filePath = join(dir, `${id}.${format}`);
+
+  let content = '';
+  if (format === 'jsonl') {
+    const lines = messages.map((m, idx) =>
+      JSON.stringify({
+        step: idx + 1,
+        role: m.role,
+        content: m.content,
+        timestamp: m.timestamp,
+      }),
+    );
+    content = lines.join('\n') + (lines.length > 0 ? '\n' : '');
+  } else {
+    const parts = [
+      `# Trajectory Export: ${id}`,
+      `Generated: ${new Date().toISOString()}`,
+      `Total steps: ${messages.length}`,
+      '---',
+      '',
+    ];
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      parts.push(`### Step ${i + 1} — [${m.role.toUpperCase()}] (${m.timestamp})`);
+      parts.push('');
+      parts.push(m.content);
+      parts.push('');
+    }
+    content = parts.join('\n');
+  }
+
+  writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+  try {
+    chmodSync(filePath, 0o600);
+  } catch {}
+
+  return {
+    filePath,
+    entryCount: messages.length,
+    format,
+  };
+}

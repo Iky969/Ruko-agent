@@ -1,10 +1,10 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-255%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-288%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
@@ -192,6 +192,11 @@ Agen menggunakan protokol tool call terstruktur dalam blok kode:
 | `write_file` | Penulisan | Membuat berkas baru di dalam batas workspace. |
 | `edit_file` | Penulisan | Menimpa isi berkas yang sudah ada dengan menampilkan *diff* visual perubahan. |
 | `patch_file` | Penulisan | Mengganti potongan teks unik secara presisi (*search-and-replace* hemat token). |
+| `remember` | Memori | Menyimpan fakta proyek/preferensi ke `.ruko/memory.md` lintas sesi. |
+| `search_sessions` | Pencarian | Menemukan kutipan percakapan dari riwayat sesi sebelumnya. |
+| `load_skill` | Skill | Memuat instruksi operasional skill proyek dari `.ruko/skills/`. |
+| `save_skill` | Skill | Menyimpan alur kerja sukses sebagai skill baru yang reusable. |
+| `delegate` | Delegasi | Menjalankan subagent mandiri dengan context terisolasi. |
 
 ---
 
@@ -207,6 +212,7 @@ Ketik `/` di terminal untuk memunculkan menu interaktif, atau gunakan perintah b
 | `/new` | Menyimpan sesi saat ini lalu memulai sesi percakapan baru. |
 | `/sessions` | Menampilkan daftar seluruh sesi yang tersimpan. |
 | `/resume <id>` | Melanjutkan sesi percakapan sebelumnya. |
+| `/export [json\|markdown]` | Ekspor log giliran percakapan dan jejak tool sesi aktif. |
 | `/clear` | Membersihkan memori percakapan pada sesi saat ini. |
 | `/compact` | Memaksa kompresi riwayat percakapan saat ini. |
 | `/plan on \| off` | Mode rencana: mengunci tool penulisan dan eksekusi di level kode. |
@@ -218,6 +224,7 @@ Ketik `/` di terminal untuk memunculkan menu interaktif, atau gunakan perintah b
 | `/exec <perintah>` | Menjalankan perintah shell langsung dari baris perintah Ruko. |
 | `/history [n]` | Menampilkan *n* pesan riwayat percakapan terakhir. |
 | `/context` | Menampilkan statistik token dan kapasitas memori percakapan. |
+| `/memory [clear]` | Menampilkan isi memori persisten atau mereset (`.ruko/memory.md`). |
 | `/usage` | Menampilkan statistik konsumsi karakter dan token sesi. |
 | `/config [set <k> <v> \| setup]` | Menampilkan atau memperbarui konfigurasi sistem. |
 | `/model [nama]` | Melihat daftar model yang tersedia atau beralih model aktif. |
@@ -271,16 +278,20 @@ Ruko diuji secara intensif menggunakan test runner bawaan Node.js (`node:test`) 
 # Verifikasi tipe data statis
 npm run typecheck
 
-# Menjalankan 255 unit test anti-regresi
+# Menjalankan 288 unit test anti-regresi
 npm test
+
+# Menjalankan end-to-end (E2E) integration test
+npm run test:e2e
 ```
 
 Test suite mencakup pengujian unit untuk:
 - Deteksi risiko approval regex & skenario adversarial Guardian LLM.
 - Sandboxing direktori dan pencegahan traversal path di seluruh tool.
-- Parser streaming SSE LLM dan penanganan kode status HTTP.
+- Parser streaming SSE LLM multi-provider (OpenAI, Anthropic, Gemini) dan penanganan kode status HTTP.
 - Mekanisme TUI, status bar rewinding, dan input buffer wrapping.
 - Kompresi konteks adaptif dan snapshot undo journal.
+- Persistent memory, skill system, subagent delegation, dan trajectory export.
 
 ---
 
@@ -294,8 +305,9 @@ src/
 │   ├── agent.ts          # Orkestrator eksekusi & tool loop
 │   ├── commands.ts       # Registry terpusat seluruh slash command
 │   ├── filetools.ts      # Tool glob, code_search, dan read_file (sandboxed)
-│   ├── llm.ts            # Client OpenAI-compatible & streaming parser
+│   ├── llm.ts            # Client multi-provider (OpenAI, Anthropic, Gemini) & streaming parser
 │   ├── roles.ts          # Manajemen system prompt berlapis & peran AI
+│   ├── subagent.ts       # Orkestrasi subagent delegasi terisolasi
 │   └── tools.ts          # Handler tool call protocol & pembatas output
 └── core/
     ├── approval.ts       # Dual-Layer Approval Gate & Guardian LLM
@@ -303,9 +315,13 @@ src/
     ├── config.ts         # Loader berkas konfigurasi & sanitasi skema
     ├── context.ts        # Pengelolaan memori jendela percakapan
     ├── diff.ts           # Visualizer git-style line diff
+    ├── dotenv.ts         # Zero-dependency .env file parser & loader
     ├── executor.ts       # Eksekusi subproses shell aman
+    ├── history.ts        # Persistensi input history terminal (.ruko/history)
     ├── loop.ts           # System loop interaktif & TUI controller
+    ├── memory.ts         # Persistent memory sederhana (.ruko/memory.md)
     ├── session.ts        # Penyimpanan sesi percakapan (.ruko/sessions/)
+    ├── skills.ts         # Sistem skill modular (.ruko/skills/)
     ├── splash.ts         # Tampilan pembuka & banner status
     ├── summarizer.ts     # Peringkas log terminal panjang (>1000 char)
     ├── tui.ts            # Terminal raw-mode engine & live overlay

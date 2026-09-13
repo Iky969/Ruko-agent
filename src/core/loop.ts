@@ -8,8 +8,11 @@ import { AgentConfig } from '../types.js';
 import { Context } from './context.js';
 import { saveSession } from './session.js';
 import { createLineEditor, LineEditor, MenuItem } from './tui.js';
-import { buildStatusBar, cyan, dim, promptGlyph, renderBox, stripAnsi, yellow } from './ui.js';
+import { buildStatusBar, cyan, dim, formatTerminalMarkdown, promptGlyph, renderBox, stripAnsi, yellow } from './ui.js';
 import { playSplash, SplashInfo } from './splash.js';
+import { checkMemoryWarning, initMemoryFile } from './memory.js';
+import { appendHistory, defaultHistoryPath, loadHistory } from './history.js';
+import { getWorkspaceRoot } from '../agent/tools.js';
 
 /** Prompt line shown under the status bar (placeholder until the user types). */
 const PROMPT_HINT = 'Ask anything, or type / for commands';
@@ -72,11 +75,27 @@ export class SystemLoop {
     };
     await playSplash(info);
 
+    const ws = getWorkspaceRoot();
+    initMemoryFile(ws);
+    const memWarning = checkMemoryWarning(ws);
+    if (memWarning) {
+      console.log(yellow(`⚠ ${memWarning}`));
+    }
+
     // Wire the approval prompt into the agent now that stdin is available.
     this.agent.setConfirm(this.makeConfirmer());
 
     if (process.stdin.isTTY) {
-      this.editor = createLineEditor();
+      const histPath = defaultHistoryPath(ws);
+      const initialHist = loadHistory(histPath);
+      this.editor = createLineEditor(
+        process.stdin as unknown as import('node:tty').ReadStream,
+        process.stdout as unknown as import('node:tty').WriteStream,
+        {
+          history: initialHist,
+          onHistoryAppend: (entry) => appendHistory(entry, histPath),
+        },
+      );
       // Raw mode swallows Ctrl+C while reading; when it fires while the agent
       // is working, save the session and leave cleanly instead of hard-killing.
       process.once('SIGINT', () => {
@@ -315,12 +334,13 @@ export class SystemLoop {
       if (response) {
         this.ctx.add('assistant', response);
         // With streaming the text was already revealed live by the agent.
-        if (!this.agent.lastResponseStreamed) console.log(response);
+        if (!this.agent.lastResponseStreamed) console.log(formatTerminalMarkdown(response));
       }
     } finally {
       this.busy = false;
       this.turnAbort = null;
       this.editor?.stopAmbient();
+      process.stdout.write('\n');
     }
   }
 

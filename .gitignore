@@ -9,3 +9,7 @@ dist/
 opencode.json
 # Harness PTY (python)
 __pycache__/
+
+# Catatan & instruksi lokal
+feedback.txt
+halo.txt

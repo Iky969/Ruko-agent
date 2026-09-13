@@ -70,6 +70,8 @@ export interface AgentConfig {
   apiKey?: string;
   /** Custom base URL for the OpenAI-compatible endpoint. */
   baseUrl?: string;
+  /** Provider type: 'openai-compatible' | 'anthropic' | 'gemini'. */
+  provider?: string;
   /** beginner (role teacher + tips) or pro (role minimal, terse). */
   mode?: UiMode;
   /** Active role name: default|reviewer|teacher|minimal or a custom file. */
@@ -127,6 +129,7 @@ export function resolveProfileCredentials(
   const out: AgentConfig = { ...config, activeProfile: alias };
   if (profile.baseUrl) out.baseUrl = profile.baseUrl;
   if (profile.model) out.model = profile.model;
+  if (profile.provider) out.provider = profile.provider;
   const envKey = profile.apiKeyEnv ? env[profile.apiKeyEnv] : undefined;
   const key = (envKey || profile.apiKey || '').trim();
   if (key) out.apiKey = key;

@@ -6,7 +6,9 @@ import { execute } from '../core/executor.js';
 import { promptSetup, SetupResult } from '../core/wizard.js';
 import { dim, formatK, green, renderBox, red, yellow } from '../core/ui.js';
 import { listSnapshots, undoLast } from '../core/undo.js';
-import { listSessions, loadSession, saveSession } from '../core/session.js';
+import { exportSessionTrajectory, listSessions, loadSession, saveSession } from '../core/session.js';
+import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
+import { getWorkspaceRoot } from './tools.js';
 import { AgentConfig, ProviderProfile, UiMode } from '../types.js';
 import { ConnectionResult, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
@@ -122,6 +124,27 @@ const COMMANDS: CommandDef[] = [
       env.ctx.replace(session.messages);
       env.handle.setSessionId(session.id);
       console.log(`Sesi dimuat: ${session.title} (${session.messages.length} pesan).`);
+    },
+  },
+  {
+    name: 'export',
+    help: 'Ekspor log giliran percakapan dan jejak tool sesi aktif.',
+    hint: '[json|markdown]',
+    run: (args, env) => {
+      const trimmed = args.trim().toLowerCase();
+      const format: 'jsonl' | 'md' =
+        trimmed === 'markdown' || trimmed === 'md' ? 'md' : 'jsonl';
+      if (env.ctx.size === 0) {
+        console.log('Belum ada pesan dalam sesi aktif untuk diekspor.');
+        return;
+      }
+      const res = exportSessionTrajectory(
+        env.ctx.toJSON(),
+        format,
+        undefined,
+        env.handle.getSessionId() ?? undefined,
+      );
+      console.log(`✔ Trajectory diekspor ke: ${res.filePath} (${res.entryCount} langkah)`);
     },
   },
   {
@@ -348,6 +371,42 @@ const COMMANDS: CommandDef[] = [
           `exec timeout: ${env.config.execTimeoutMs}ms`,
         ]),
       );
+    },
+  },
+  {
+    name: 'memory',
+    help: 'Lihat isi persistent memory (.ruko/memory.md) atau reset.',
+    hint: '[clear]',
+    run: (args) => {
+      const ws = getWorkspaceRoot();
+      const sub = args.trim().toLowerCase();
+      if (sub === 'clear') {
+        clearMemory(ws);
+        console.log(green('✔ Persistent memory telah dibersihkan (.ruko/memory.md di-reset).'));
+        return;
+      }
+      if (sub && sub !== '') {
+        console.log('Usage: /memory  |  /memory clear');
+        return;
+      }
+      const raw = readMemory(ws);
+      if (!raw || !hasMeaningfulMemory(raw)) {
+        console.log(
+          renderBox('Persistent Memory', [
+            '(belum ada catatan tersimpan)',
+            dim('Gunakan tool remember atau edit .ruko/memory.md secara manual.'),
+          ]),
+        );
+        return;
+      }
+      const lines = raw.trim().split('\n');
+      console.log(renderBox('Persistent Memory (.ruko/memory.md)', lines));
+      const warn = checkMemoryWarning(ws);
+      if (warn) {
+        console.log(yellow(`⚠ ${warn}`));
+      } else {
+        console.log(dim(`Ukuran: ${raw.length} karakter — ketik /memory clear untuk reset`));
+      }
     },
   },
   {

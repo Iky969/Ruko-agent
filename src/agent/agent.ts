@@ -1,10 +1,19 @@
 import { Confirmer, guardedExecute } from '../core/approval.js';
 import { Context } from '../core/context.js';
-import { createSpinner, LineGate, RevealFilter } from '../core/ui.js';
+import {
+  createSpinner,
+  formatTerminalMarkdown,
+  inferStepDescription,
+  LineGate,
+  RevealFilter,
+  WorkflowTree,
+} from '../core/ui.js';
 import { AgentConfig, ContextMessage } from '../types.js';
 import { LLMProvider } from './llm.js';
 import { allRoles, buildSystemPrompt, getBuiltInRole, readProjectAgentDoc, RoleDef } from './roles.js';
-import { parseToolCalls, runToolCall, stripToolBlocks, ToolCall } from './tools.js';
+import { getWorkspaceRoot, parseToolCalls, runToolCall, stripToolBlocks, ToolCall } from './tools.js';
+import { readMemorySafe } from '../core/memory.js';
+import { formatSkillsForPrompt, listSkills } from '../core/skills.js';
 
 /** Safety cap on how many tool iterations one instruction may trigger. */
 const MAX_TOOL_ITERATIONS = 6;
@@ -74,13 +83,16 @@ export class Agent {
     );
   }
 
-  /** Layered system prompt: identity + tools + role + AGENT.md + mode (§4). */
+  /** Layered system prompt: identity + tools + role + AGENT.md + mode (§4) + memory + skills. */
   systemPrompt(): string {
+    const ws = getWorkspaceRoot();
     return buildSystemPrompt({
       role: this.activeRole(),
       planMode: this.planMode,
       mode: this.config.mode ?? 'beginner',
       agentDoc: readAgentDocSafe(),
+      memory: readMemorySafe(ws),
+      skills: formatSkillsForPrompt(listSkills(ws)),
     });
   }
 
@@ -128,6 +140,11 @@ export class Agent {
     this.lastUsage = usage;
 
     this.lastResponseStreamed = false;
+    const tree = new WorkflowTree((line) => {
+      process.stdout.write('\r\u001b[2K');
+      console.log(line);
+    });
+
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i += 1) {
       // v0.7: user chose "kirim sekarang" — stop before the next request so
       // the interrupted turn ends cleanly instead of starting new work.
@@ -137,7 +154,8 @@ export class Agent {
       const spinner = createSpinner('Thinking', { pacman: usePacman });
       const gate = new LineGate((text) => {
         spinner.stop();
-        process.stdout.write(text);
+        process.stdout.write('\r\u001b[2K');
+        process.stdout.write(formatTerminalMarkdown(text));
       });
       const reveal = new RevealFilter((text) => gate.push(text));
       let raw: string;
@@ -162,7 +180,12 @@ export class Agent {
       const iterStreamed = gate.finish(calls.length === 0);
       if (calls.length === 0) {
         const text = stripToolBlocks(raw) || '(no response)';
-        if (iterStreamed) process.stdout.write('\n');
+        if (tree.isTreeActive || tree.currentStep > 0) {
+          tree.finish('Semua langkah tuntas');
+          process.stdout.write('\n');
+        } else if (iterStreamed) {
+          process.stdout.write('\n');
+        }
         this.lastResponseStreamed = iterStreamed;
         return text;
       }
@@ -173,9 +196,20 @@ export class Agent {
       if (text) {
         messages.push({ role: 'assistant', content: text, timestamp: '' });
       }
+
+      // Spacing before tool tree begins if not already spaced
+      if (tree.currentStep === 0 && !iterStreamed) {
+        process.stdout.write('\n');
+      }
+
+      // Start workflow step in tree
+      const desc = inferStepDescription(calls, tree.currentStep + 1);
+      tree.startStep(desc);
+
       for (const call of calls) {
         // §5: loop breaker — identical tool call repeated is a stuck model.
         if (this.seenRepeat(call)) {
+          tree.finish('Dihentikan karena deteksi loop');
           return (
             `[deteksi loop] tool "${call.tool}" dengan argumen sama sudah dipanggil ` +
             `> ${LOOP_REPEAT_LIMIT}× — eksekusi dihentikan. Ulangi dengan instruksi lain, ` +
@@ -185,7 +219,7 @@ export class Agent {
         const result = await runToolCall(call, {
           confirm: this.confirm,
           config: this.config,
-          onLog: (line) => console.log(line),
+          onLog: (line) => tree.log(line),
           planMode: this.planMode,
           signal,
           llmProvider: this.llmProvider,
@@ -197,6 +231,10 @@ export class Agent {
           timestamp: '',
         });
       }
+    }
+
+    if (tree.isTreeActive) {
+      tree.finish('Mencapai batas iterasi tool');
     }
 
     return '[agent] reached max tool iterations without a final answer; stopping.';

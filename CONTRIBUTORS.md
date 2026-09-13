@@ -9,6 +9,14 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Tanggal: 2026-09-12
 - Kontribusi: Penutupan gap H6 (destructive patterns), GAP-01 visual indicator, GAP-03 guardian audit log (.ruko/guardian-audit.log)
 - Tanggal: 2026-09-12
+- Kontribusi: Persistent memory (.ruko/memory.md, tool remember, command /memory, prompt injection boundary guard)
+- Tanggal: 2026-09-13
+- Kontribusi: UI/UX cosmetic polish (ANSI markdown formatter, WorkflowTree step indicator, clean TUI spacing)
+- Tanggal: 2026-09-13
+- Kontribusi: Provider Anthropic/Gemini, zero-dep .env loader, REPL history persistence (.ruko/history), trajectory export (/export), dan E2E test runner
+- Tanggal: 2026-09-13
+- Kontribusi: Release v1.1.0 — update installer script TAG, full repository version synchronization, dan test suite verification
+- Tanggal: 2026-09-13
 
 ## Claude Opus 4.6
 - Kontribusi: Audit keamanan pre-publish & inisiasi implementasi hardening

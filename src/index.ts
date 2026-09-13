@@ -9,6 +9,7 @@ import { Context } from './core/context.js';
 import { SystemLoop } from './core/loop.js';
 import { summarizeLog } from './core/summarizer.js';
 import { needsSetup, runSetupWizard } from './core/wizard.js';
+import { loadDotenv } from './core/dotenv.js';
 
 const USAGE = `Ruko — AI Coding Agent CLI
 
@@ -17,6 +18,11 @@ Usage:
   ruko --exec "<cmd>"       Jalankan satu perintah shell (output di-summarize)
   ruko --exec "<cmd>" --yes Jalankan tanpa konfirmasi approval
   ruko --summarize "<txt>"  Demo Log Summarizer pada teks arbitrer
+  ruko --model "<name>"     Override nama model aktif
+  ruko --provider "<name>"  Override provider (openai-compatible | anthropic | gemini)
+  ruko --base-url "<url>"   Override base URL provider
+  ruko --api-key "<key>"    Override API key
+  ruko --env-file "<path>"  Muat file environment khusus (default .env)
   ruko --help               Bantuan ini
   ruko --version            Versi
 
@@ -24,11 +30,13 @@ Konfigurasi (disimpan ke .ruko/config.json — tanpa export manual):
   /config setup             Jalankan wizard API Key / Base URL / Model dari REPL
 
 Environment (opsional, config file lebih prioritas):
-  OPENAI_API_KEY   API key backend OpenAI-compatible
-  OPENAI_BASE_URL  Ganti base URL (mis. http://localhost:11434/v1 untuk Ollama)
-  AGENT_MODEL      Model default
-  RUKO_CONFIG      Path config (default .ruko/config.json)
-  RUKO_YOLO_MODE=1 Bypass persetujuan perintah berisiko`;
+  OPENAI_API_KEY      API key backend OpenAI-compatible
+  OPENAI_BASE_URL     Ganti base URL (mis. http://localhost:11434/v1 untuk Ollama)
+  ANTHROPIC_API_KEY   API key backend Anthropic Claude
+  GEMINI_API_KEY      API key backend Google Gemini
+  AGENT_MODEL         Model default
+  RUKO_CONFIG         Path config (default .ruko/config.json)
+  RUKO_YOLO_MODE=1    Bypass persetujuan perintah berisiko`;
 
 function packageVersion(): string {
   try {
@@ -56,7 +64,26 @@ function makeTtyConfirmer(): Confirmer {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+
+  // Load environment variables from .env or custom path
+  const envFileIdx = args.indexOf('--env-file');
+  const customEnv = envFileIdx !== -1 && args[envFileIdx + 1] ? args[envFileIdx + 1] : undefined;
+  loadDotenv({ path: customEnv });
+
   const config = loadResolvedConfig();
+
+  // Apply CLI flag overrides to config
+  const modelIdx = args.indexOf('--model');
+  if (modelIdx !== -1 && args[modelIdx + 1]) config.model = args[modelIdx + 1];
+
+  const providerIdx = args.indexOf('--provider');
+  if (providerIdx !== -1 && args[providerIdx + 1]) config.provider = args[providerIdx + 1];
+
+  const baseUrlIdx = args.indexOf('--base-url');
+  if (baseUrlIdx !== -1 && args[baseUrlIdx + 1]) config.baseUrl = args[baseUrlIdx + 1];
+
+  const apiKeyIdx = args.indexOf('--api-key');
+  if (apiKeyIdx !== -1 && args[apiKeyIdx + 1]) config.apiKey = args[apiKeyIdx + 1];
 
   if (args.includes('-h') || args.includes('--help')) {
     console.log(USAGE);

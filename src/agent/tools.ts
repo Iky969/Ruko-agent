@@ -2,8 +2,12 @@ import { Confirmer, guardedExecute } from '../core/approval.js';
 import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
 import { renderFileDiff, splitLines } from '../core/diff.js';
 import { takeSnapshot } from '../core/undo.js';
-import { dim, green, red, yellow } from '../core/ui.js';
+import { dim, green, magenta, red, yellow } from '../core/ui.js';
 import { codeSearchTool, globTool, readFileTool } from './filetools.js';
+import { appendMemory } from '../core/memory.js';
+import { readSkill, saveSkill } from '../core/skills.js';
+import { searchSessions } from '../core/session.js';
+import { runSubagent } from './subagent.js';
 import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -120,7 +124,7 @@ export interface ToolDeps {
 }
 
 /** Tools refused while plan mode is active (read_file stays available). */
-const PLAN_MODE_BLOCKED = new Set(['exec', 'write_file', 'edit_file', 'patch_file']);
+const PLAN_MODE_BLOCKED = new Set(['exec', 'write_file', 'edit_file', 'patch_file', 'remember', 'save_skill']);
 
 let customWorkspaceRoot: string | null = null;
 
@@ -360,6 +364,130 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       } catch (err) {
         return JSON.stringify({
           error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    case 'remember': {
+      const content = typeof call.content === 'string' ? call.content : null;
+      if (!content || !content.trim()) {
+        return JSON.stringify({ error: 'remember: missing "content" field (string)' });
+      }
+      try {
+        const result = await appendMemory(content, ws);
+        const short = result.entry.length > 60 ? `${result.entry.slice(0, 57)}…` : result.entry;
+        deps.onLog?.(green(`🟢 Remember(${short})`));
+        return JSON.stringify(
+          {
+            ok: true,
+            message: 'Catatan berhasil disimpan ke persistent memory (.ruko/memory.md).',
+            entry: result.entry,
+            ...(result.warning ? { warning: result.warning } : {}),
+          },
+          null,
+          2,
+        );
+      } catch (err) {
+        return JSON.stringify({
+          error: `remember: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+    case 'load_skill': {
+      const name = String(call.name ?? '');
+      if (!name) {
+        return JSON.stringify({ error: 'load_skill: missing "name" field' });
+      }
+      deps.onLog?.(green(`🟢 Skill(${name})`));
+      const skill = readSkill(name, ws);
+      if (!skill) {
+        return JSON.stringify({ error: `load_skill: skill "${name}" tidak ditemukan di .ruko/skills/` });
+      }
+      return JSON.stringify(
+        {
+          ok: true,
+          name: skill.name,
+          description: skill.description,
+          instructions: skill.instructions,
+        },
+        null,
+        2,
+      );
+    }
+    case 'save_skill': {
+      const name = String(call.name ?? '');
+      const description = String(call.description ?? '');
+      const instructions = String(call.instructions ?? '');
+      if (!name || !instructions) {
+        return JSON.stringify({ error: 'save_skill: missing "name" or "instructions" field' });
+      }
+      deps.onLog?.(green(`🟢 SaveSkill(${name})`));
+      const saved = saveSkill(name, description || name, instructions, ws);
+      return JSON.stringify(
+        {
+          ok: true,
+          message: `Skill "${saved.name}" berhasil disimpan ke .ruko/skills/${saved.name}.md`,
+          name: saved.name,
+          description: saved.description,
+        },
+        null,
+        2,
+      );
+    }
+    case 'search_sessions': {
+      const query = String(call.query ?? '');
+      if (!query.trim()) {
+        return JSON.stringify({ error: 'search_sessions: missing "query" field' });
+      }
+      deps.onLog?.(green(`🟢 SearchSessions(${query})`));
+      const results = searchSessions(query);
+      return JSON.stringify(
+        {
+          ok: true,
+          query,
+          count: results.length,
+          results: results.slice(0, 10),
+        },
+        null,
+        2,
+      );
+    }
+    case 'delegate': {
+      const task = String(call.task ?? call.instruction ?? '');
+      if (!task.trim()) {
+        return JSON.stringify({ error: 'delegate: missing "task" field' });
+      }
+      if (!deps.llmProvider || !deps.llmProvider.isConfigured) {
+        return JSON.stringify({ error: 'delegate: LLM provider tidak tersedia untuk subagent' });
+      }
+      const short = task.length > 50 ? `${task.slice(0, 47)}…` : task;
+      deps.onLog?.(magenta(`🟣 Subagent(${short})`));
+      try {
+        const subResult = await runSubagent(
+          task,
+          {
+            config: deps.config ?? DEFAULT_CONFIG,
+            llmProvider: deps.llmProvider,
+            confirm: deps.confirm,
+            onLog: deps.onLog,
+            signal: deps.signal,
+          },
+          {
+            planMode: deps.planMode,
+            workspaceRoot: ws,
+          },
+        );
+        return JSON.stringify(
+          {
+            ok: true,
+            task,
+            result: subResult,
+          },
+          null,
+          2,
+        );
+      } catch (err) {
+        return JSON.stringify({
+          error: `delegate failed: ${err instanceof Error ? err.message : String(err)}`,
         });
       }
     }

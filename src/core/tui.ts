@@ -84,6 +84,13 @@ interface Modal extends ModalOptions {
 
 const CSI_RE = /^\u001b\[([0-9;]*)([A-Za-z~])/;
 
+export interface LineEditorOptions {
+  /** Initial history entries (oldest first). */
+  history?: string[];
+  /** Callback fired when a new command is submitted and appended to history. */
+  onHistoryAppend?: (line: string) => void;
+}
+
 export class LineEditor {
   private pending: Pending | null = null;
   /** Ambient input while the AI works (feedback v0.7 #1); null when idle. */
@@ -98,6 +105,10 @@ export class LineEditor {
   private cursor = 0;
   private menu: MenuItem[] = [];
   private selected = 0;
+  private history: string[] = [];
+  private historyIndex = -1;
+  private historySavedBuffer = '';
+  private onHistoryAppend?: (line: string) => void;
   private dataHandler: ((chunk: string | Buffer) => void) | null = null;
   /** Bytes that arrived after a submitted line (paste / CRLF) — replayed next. */
   private queuedInput = '';
@@ -122,7 +133,11 @@ export class LineEditor {
   constructor(
     private readonly input: ReadStream = process.stdin as ReadStream,
     private readonly output: WriteStream = process.stdout as WriteStream,
-  ) {}
+    options: LineEditorOptions = {},
+  ) {
+    this.history = options.history ? [...options.history] : [];
+    this.onHistoryAppend = options.onHistoryAppend;
+  }
 
   get isActive(): boolean {
     return this.pending !== null;
@@ -637,15 +652,43 @@ export class LineEditor {
   }
 
   private handleCsi(param: string, final: string): void {
-    if (final === 'A') this.moveSelection(-1);
-    else if (final === 'B') this.moveSelection(1);
-    else if (final === 'C') this.cursor = Math.min(this.buffer.length, this.cursor + 1);
+    if (final === 'A') {
+      if (this.menu.length > 0) this.moveSelection(-1);
+      else this.historyBack();
+    } else if (final === 'B') {
+      if (this.menu.length > 0) this.moveSelection(1);
+      else this.historyForward();
+    } else if (final === 'C') this.cursor = Math.min(this.buffer.length, this.cursor + 1);
     else if (final === 'D') this.cursor = Math.max(0, this.cursor - 1);
     else if (final === 'H') this.cursor = 0;
     else if (final === 'F') this.cursor = this.buffer.length;
     else if (final === '~' && param === '3') this.deleteForward();
     this.refreshMenu();
     this.render();
+  }
+
+  private historyBack(): void {
+    if (this.history.length === 0) return;
+    if (this.historyIndex === -1) {
+      this.historySavedBuffer = this.buffer;
+      this.historyIndex = this.history.length - 1;
+    } else if (this.historyIndex > 0) {
+      this.historyIndex -= 1;
+    }
+    this.buffer = this.history[this.historyIndex];
+    this.cursor = this.buffer.length;
+  }
+
+  private historyForward(): void {
+    if (this.historyIndex === -1) return;
+    if (this.historyIndex < this.history.length - 1) {
+      this.historyIndex += 1;
+      this.buffer = this.history[this.historyIndex];
+    } else {
+      this.historyIndex = -1;
+      this.buffer = this.historySavedBuffer;
+    }
+    this.cursor = this.buffer.length;
   }
 
   private insert(text: string): void {
@@ -736,10 +779,18 @@ export class LineEditor {
     if (climb > 0) out += `\u001b[${climb}A`;
     out += `\r\u001b[0J${finalLine}\n`;
     this.output.write(out);
+    this.historyIndex = -1;
+    this.historySavedBuffer = '';
+    if (value.trim() && !pending.options.mask) {
+      this.history.push(value);
+      this.onHistoryAppend?.(value);
+    }
     this.finish(value);
   }
 
   private cancel(): void {
+    this.historyIndex = -1;
+    this.historySavedBuffer = '';
     // Ambient Ctrl+C: interrupt the AI turn, NOT the session (feedback v0.7 #3).
     if (!this.pending && this.ambient) {
       this.eraseRegion();
@@ -760,6 +811,10 @@ export class LineEditor {
 }
 
 /** Creates the raw-mode editor wired to the process stdio. */
-export function createLineEditor(): LineEditor {
-  return new LineEditor();
+export function createLineEditor(
+  input: ReadStream = process.stdin as ReadStream,
+  output: WriteStream = process.stdout as WriteStream,
+  options: LineEditorOptions = {},
+): LineEditor {
+  return new LineEditor(input, output, options);
 }

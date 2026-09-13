@@ -322,10 +322,380 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       pending = events.pop() ?? '';
       for (const event of events) consumeEvent(event);
     }
-    // Flush the decoder and any final frame that arrived WITHOUT a trailing
-    // blank line — dropping it truncated the reply's last tokens (§2).
     pending += decoder.decode();
     if (pending.trim()) consumeEvent(pending);
+    return full;
+  }
+}
+
+/**
+ * Anthropic Claude provider (messages API format).
+ */
+export class AnthropicProvider implements LLMProvider {
+  readonly name = 'anthropic';
+  private apiKey: string;
+  private baseUrl: string;
+  private currentModel: string;
+  private readonly retry: RetryOptions;
+
+  constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
+    this.apiKey = cfg.apiKey || process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY || '';
+    this.baseUrl = (cfg.baseUrl || process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1').replace(/\/+$/, '');
+    this.currentModel = cfg.model || process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022';
+    this.retry = retry;
+  }
+
+  get isConfigured(): boolean {
+    return this.apiKey.length > 0 && this.baseUrl.length > 0 && this.currentModel.length > 0;
+  }
+
+  get model(): string {
+    return this.currentModel;
+  }
+
+  setModel(model: string): void {
+    this.currentModel = model.trim() || this.currentModel;
+  }
+
+  setCredentials(apiKey: string, baseUrl: string): void {
+    if (apiKey.trim()) this.apiKey = apiKey.trim();
+    if (baseUrl.trim()) this.baseUrl = baseUrl.trim().replace(/\/+$/, '');
+  }
+
+  private authHeaders(): Record<string, string> {
+    return {
+      'Content-Type': 'application/json',
+      'x-api-key': this.apiKey,
+      'anthropic-version': '2023-06-01',
+    };
+  }
+
+  private async requestWithRetry(url: string, init: RequestInit): Promise<Response> {
+    const retries = this.retry.retries ?? 2;
+    const base = this.retry.baseDelayMs ?? 1000;
+    const max = this.retry.maxDelayMs ?? 15_000;
+    const sleep =
+      this.retry.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    for (let attempt = 0; ; attempt += 1) {
+      const response = await fetch(url, init);
+      if (response.ok || attempt >= retries || !RETRYABLE_STATUSES.has(response.status)) {
+        return response;
+      }
+      const retryAfter = parseRetryAfterMs(response.headers.get('retry-after'));
+      await sleep(retryAfter ?? backoffDelay(attempt + 1, base, max));
+    }
+  }
+
+  async testConnection(): Promise<ConnectionResult> {
+    if (!this.isConfigured) {
+      return { ok: false, message: 'Anthropic API key belum diatur — set ANTHROPIC_API_KEY atau jalankan /login.' };
+    }
+    try {
+      const response = await fetch(`${this.baseUrl}/messages`, {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({
+          model: this.currentModel,
+          messages: [{ role: 'user', content: 'ping' }],
+          max_tokens: 16,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Anthropic API error ${response.status}: ${body.slice(0, 200)}`);
+      }
+      return { ok: true, message: this.currentModel };
+    } catch (err) {
+      return { ok: false, message: explainProviderError(err) };
+    }
+  }
+
+  async listModels(): Promise<string[]> {
+    return [
+      'claude-3-5-sonnet-20241022',
+      'claude-3-5-haiku-20241022',
+      'claude-3-opus-20240229',
+    ];
+  }
+
+  async chat(messages: ContextMessage[], options?: ChatOptions): Promise<string> {
+    if (!this.isConfigured) {
+      throw new Error('Konfigurasi Anthropic belum lengkap (API key kosong) — jalankan /login atau set ANTHROPIC_API_KEY.');
+    }
+
+    const systemParts: string[] = [];
+    const nonSystem: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+
+    for (const m of messages) {
+      if (m.role === 'system') {
+        systemParts.push(m.content);
+      } else {
+        const role: 'user' | 'assistant' = m.role === 'tool' ? 'user' : m.role;
+        if (nonSystem.length > 0 && nonSystem[nonSystem.length - 1].role === role) {
+          nonSystem[nonSystem.length - 1].content += '\n\n' + m.content;
+        } else {
+          nonSystem.push({ role, content: m.content });
+        }
+      }
+    }
+
+    if (nonSystem.length === 0) {
+      nonSystem.push({ role: 'user', content: 'Hello' });
+    }
+
+    const payload: Record<string, unknown> = {
+      model: options?.model ?? this.currentModel,
+      messages: nonSystem,
+      max_tokens: options?.maxTokens ?? 2048,
+      temperature: options?.temperature ?? 0.3,
+      stream: true,
+    };
+    if (systemParts.length > 0) {
+      payload.system = systemParts.join('\n\n');
+    }
+
+    const response = await this.requestWithRetry(`${this.baseUrl}/messages`, {
+      method: 'POST',
+      headers: this.authHeaders(),
+      body: JSON.stringify(payload),
+      signal: options?.signal,
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Anthropic API error ${response.status}: ${body.slice(0, 500)}`);
+    }
+
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!contentType.includes('text/event-stream') || !response.body) {
+      const data = (await response.json()) as { content?: Array<{ type?: string; text?: string }> };
+      const text = data.content?.map((c) => c.text ?? '').join('') ?? '';
+      if (text) options?.onToken?.(text);
+      return text;
+    }
+
+    let full = '';
+    let pending = '';
+    const decoder = new TextDecoder();
+    const consumeEvent = (event: string): void => {
+      for (const line of event.split(/\r?\n/)) {
+        if (!line.startsWith('data:')) continue;
+        const payloadStr = line.slice(5).trim();
+        if (!payloadStr) continue;
+        try {
+          const parsed = JSON.parse(payloadStr) as {
+            type?: string;
+            delta?: { type?: string; text?: string };
+          };
+          if (parsed.delta?.text) {
+            full += parsed.delta.text;
+            options?.onToken?.(parsed.delta.text);
+          }
+        } catch {
+          // ignore malformed frame
+        }
+      }
+    };
+
+    for await (const raw of response.body as AsyncIterable<Uint8Array>) {
+      pending += decoder.decode(raw, { stream: true });
+      const events = pending.split(/\r?\n\r?\n/);
+      pending = events.pop() ?? '';
+      for (const event of events) consumeEvent(event);
+    }
+    pending += decoder.decode();
+    if (pending.trim()) consumeEvent(pending);
+    return full;
+  }
+}
+
+/**
+ * Google Gemini provider (Generative Language API format).
+ */
+export class GeminiProvider implements LLMProvider {
+  readonly name = 'gemini';
+  private apiKey: string;
+  private baseUrl: string;
+  private currentModel: string;
+  private readonly retry: RetryOptions;
+
+  constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
+    this.apiKey = cfg.apiKey || process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY || '';
+    this.baseUrl = (cfg.baseUrl || process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '');
+    this.currentModel = cfg.model || process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+    this.retry = retry;
+  }
+
+  get isConfigured(): boolean {
+    return this.apiKey.length > 0 && this.baseUrl.length > 0 && this.currentModel.length > 0;
+  }
+
+  get model(): string {
+    return this.currentModel;
+  }
+
+  setModel(model: string): void {
+    this.currentModel = model.trim() || this.currentModel;
+  }
+
+  setCredentials(apiKey: string, baseUrl: string): void {
+    if (apiKey.trim()) this.apiKey = apiKey.trim();
+    if (baseUrl.trim()) this.baseUrl = baseUrl.trim().replace(/\/+$/, '');
+  }
+
+  private authHeaders(): Record<string, string> {
+    return {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': this.apiKey,
+    };
+  }
+
+  private async requestWithRetry(url: string, init: RequestInit): Promise<Response> {
+    const retries = this.retry.retries ?? 2;
+    const base = this.retry.baseDelayMs ?? 1000;
+    const max = this.retry.maxDelayMs ?? 15_000;
+    const sleep =
+      this.retry.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    for (let attempt = 0; ; attempt += 1) {
+      const response = await fetch(url, init);
+      if (response.ok || attempt >= retries || !RETRYABLE_STATUSES.has(response.status)) {
+        return response;
+      }
+      const retryAfter = parseRetryAfterMs(response.headers.get('retry-after'));
+      await sleep(retryAfter ?? backoffDelay(attempt + 1, base, max));
+    }
+  }
+
+  async testConnection(): Promise<ConnectionResult> {
+    if (!this.isConfigured) {
+      return { ok: false, message: 'Gemini API key belum diatur — set GEMINI_API_KEY atau jalankan /login.' };
+    }
+    try {
+      const url = `${this.baseUrl}/models/${this.currentModel}:generateContent?key=${encodeURIComponent(this.apiKey)}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
+          generationConfig: { maxOutputTokens: 16 },
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Gemini API error ${response.status}: ${body.slice(0, 200)}`);
+      }
+      return { ok: true, message: this.currentModel };
+    } catch (err) {
+      return { ok: false, message: explainProviderError(err) };
+    }
+  }
+
+  async listModels(): Promise<string[]> {
+    return [
+      'gemini-2.0-flash',
+      'gemini-1.5-pro',
+      'gemini-1.5-flash',
+    ];
+  }
+
+  async chat(messages: ContextMessage[], options?: ChatOptions): Promise<string> {
+    if (!this.isConfigured) {
+      throw new Error('Konfigurasi Gemini belum lengkap (API key kosong) — jalankan /login atau set GEMINI_API_KEY.');
+    }
+
+    const systemParts: string[] = [];
+    const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+
+    for (const m of messages) {
+      if (m.role === 'system') {
+        systemParts.push(m.content);
+      } else {
+        const role: 'user' | 'model' = m.role === 'assistant' ? 'model' : 'user';
+        if (contents.length > 0 && contents[contents.length - 1].role === role) {
+          contents[contents.length - 1].parts[0].text += '\n\n' + m.content;
+        } else {
+          contents.push({ role, parts: [{ text: m.content }] });
+        }
+      }
+    }
+
+    if (contents.length === 0) {
+      contents.push({ role: 'user', parts: [{ text: 'Hello' }] });
+    }
+
+    const payload: Record<string, unknown> = {
+      contents,
+      generationConfig: {
+        maxOutputTokens: options?.maxTokens ?? 2048,
+        temperature: options?.temperature ?? 0.3,
+      },
+    };
+    if (systemParts.length > 0) {
+      payload.systemInstruction = {
+        parts: [{ text: systemParts.join('\n\n') }],
+      };
+    }
+
+    const modelName = options?.model ?? this.currentModel;
+    const url = `${this.baseUrl}/models/${modelName}:streamGenerateContent?key=${encodeURIComponent(this.apiKey)}&alt=sse`;
+
+    const response = await this.requestWithRetry(url, {
+      method: 'POST',
+      headers: this.authHeaders(),
+      body: JSON.stringify(payload),
+      signal: options?.signal,
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Gemini API error ${response.status}: ${body.slice(0, 500)}`);
+    }
+
+    let full = '';
+    let pending = '';
+    const decoder = new TextDecoder();
+    const consumeEvent = (event: string): void => {
+      for (const line of event.split(/\r?\n/)) {
+        if (!line.startsWith('data:')) continue;
+        const payloadStr = line.slice(5).trim();
+        if (!payloadStr) continue;
+        try {
+          const parsed = JSON.parse(payloadStr) as {
+            candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+          };
+          const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) {
+            full += text;
+            options?.onToken?.(text);
+          }
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    if (response.body) {
+      for await (const raw of response.body as AsyncIterable<Uint8Array>) {
+        pending += decoder.decode(raw, { stream: true });
+        const events = pending.split(/\r?\n\r?\n/);
+        pending = events.pop() ?? '';
+        for (const event of events) consumeEvent(event);
+      }
+      pending += decoder.decode();
+      if (pending.trim()) consumeEvent(pending);
+    } else {
+      const data = (await response.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      };
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      if (text) {
+        full = text;
+        options?.onToken?.(text);
+      }
+    }
+
     return full;
   }
 }
@@ -335,5 +705,13 @@ export function createProvider(
   config: Partial<AgentConfig> = {},
   retry: RetryOptions = {},
 ): LLMProvider {
+  const provider = (config.provider || '').toLowerCase();
+  const baseUrl = (config.baseUrl || '').toLowerCase();
+  if (provider === 'anthropic' || baseUrl.includes('anthropic.com')) {
+    return new AnthropicProvider(config, retry);
+  }
+  if (provider === 'gemini' || baseUrl.includes('googleapis.com')) {
+    return new GeminiProvider(config, retry);
+  }
   return new OpenAiCompatibleProvider(config, retry);
 }
