@@ -12,7 +12,15 @@ import {
 import { AgentConfig, ContextMessage } from '../types.js';
 import { LLMProvider } from './llm.js';
 import { allRoles, buildSystemPrompt, getBuiltInRole, readProjectAgentDoc, RoleDef } from './roles.js';
-import { getWorkspaceRoot, parseToolCalls, runToolCall, stripToolBlocks, ToolCall } from './tools.js';
+import {
+  detectSensitiveFileAccessInExec,
+  getWorkspaceRoot,
+  isSensitiveEnvCommand,
+  parseToolCalls,
+  runToolCall,
+  stripToolBlocks,
+  ToolCall,
+} from './tools.js';
 import { readMemorySafe } from '../core/memory.js';
 import { formatSkillsForPrompt, listSkills } from '../core/skills.js';
 
@@ -57,6 +65,7 @@ export class Agent {
     private readonly llmProvider: LLMProvider,
     private readonly config: AgentConfig,
     confirm?: Confirmer | null,
+    private readonly workspaceRoot?: string,
   ) {
     this.confirm = confirm ?? null;
   }
@@ -88,7 +97,7 @@ export class Agent {
 
   /** Layered system prompt: identity + tools + role + AGENT.md + mode (§4) + memory + skills. */
   systemPrompt(): string {
-    const ws = getWorkspaceRoot();
+    const ws = this.workspaceRoot ?? getWorkspaceRoot();
     return buildSystemPrompt({
       role: this.activeRole(),
       planMode: this.planMode,
@@ -113,8 +122,17 @@ export class Agent {
   private async runManual(instruction: string): Promise<string> {
     const match = instruction.match(/^(?:run|exec|jalankan)\s+([\s\S]+)$/i);
     if (match) {
+      const cmd = match[1];
+      const ws = this.workspaceRoot ?? getWorkspaceRoot();
+      if (isSensitiveEnvCommand(cmd)) {
+        return `exec ditolak: command berpotensi membocorkan environment variable sensitif. Kredensial tidak dapat diakses lewat tool ini.`;
+      }
+      const fileCheck = detectSensitiveFileAccessInExec(cmd, ws);
+      if (fileCheck.blocked) {
+        return fileCheck.message ?? 'exec ditolak: akses ke file sensitif diblokir.';
+      }
       const result = await guardedExecute(
-        match[1],
+        cmd,
         { timeoutMs: this.config.execTimeoutMs, confirm: this.confirm, llmProvider: this.llmProvider },
         this.config,
       );
@@ -267,6 +285,7 @@ export class Agent {
           planMode: this.planMode,
           signal,
           llmProvider: this.llmProvider,
+          workspaceRoot: this.workspaceRoot,
         });
         if (signal?.aborted) {
           if (tree.isTreeActive) {

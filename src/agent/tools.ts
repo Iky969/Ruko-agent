@@ -169,12 +169,82 @@ export function assertInsideWorkspace(abs: string, workspaceRoot: string = getWo
 }
 
 /**
+ * Checks if a target path points to a sensitive file or directory:
+ * - .ruko/config.json
+ * - .ruko/undo/**
+ * - .env, .env.*
+ * - id_rsa, id_ed25519, *.pem, *.key
+ *
+ * Case-insensitive, matches relative and absolute variations.
+ */
+export function isSensitivePath(targetPath: string, workspaceRoot: string = getWorkspaceRoot()): boolean {
+  if (!targetPath || typeof targetPath !== 'string') return false;
+  const clean = targetPath.trim().replace(/^['"]|['"]$/g, '');
+  if (!clean) return false;
+
+  const cwd = path.resolve(workspaceRoot);
+  const abs = path.isAbsolute(clean) ? path.resolve(clean) : path.resolve(cwd, clean);
+  const rel = path.relative(cwd, abs).replace(/\\/g, '/');
+  const relLower = rel.toLowerCase();
+  const baseLower = path.basename(abs).toLowerCase();
+  const extLower = path.extname(abs).toLowerCase();
+
+  // 1. .ruko/config.json
+  if (relLower === '.ruko/config.json' || relLower.endsWith('/.ruko/config.json')) {
+    return true;
+  }
+
+  // 2. .ruko/undo/**
+  if (
+    relLower === '.ruko/undo' ||
+    relLower.startsWith('.ruko/undo/') ||
+    relLower.includes('/.ruko/undo/') ||
+    relLower.endsWith('/.ruko/undo')
+  ) {
+    return true;
+  }
+
+  // 3. .env, .env.*
+  if (baseLower === '.env' || baseLower.startsWith('.env.')) {
+    return true;
+  }
+
+  // 4. id_rsa, id_ed25519, *.pem, *.key
+  if (
+    baseLower === 'id_rsa' ||
+    baseLower.startsWith('id_rsa.') ||
+    baseLower === 'id_ed25519' ||
+    baseLower.startsWith('id_ed25519.')
+  ) {
+    return true;
+  }
+  if (extLower === '.pem' || extLower === '.key') {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Asserts that a target path is not a sensitive file or directory.
+ * Throws an Error if sensitive access is attempted.
+ */
+export function assertNotSensitivePath(targetPath: string, workspaceRoot: string = getWorkspaceRoot()): void {
+  if (isSensitivePath(targetPath, workspaceRoot)) {
+    throw new Error(
+      `Akses ke file sensitif "${targetPath}" ditolak demi keamanan kredensial/data sensitif.`,
+    );
+  }
+}
+
+/**
  * Resolves a tool file path relative to workspace root and validates sandbox boundary.
  */
 function resolveToolPath(p: string, workspaceRoot: string = getWorkspaceRoot()): string {
   const cwd = path.resolve(workspaceRoot);
   const abs = path.resolve(cwd, p);
   assertInsideWorkspace(abs, cwd);
+  assertNotSensitivePath(abs, cwd);
   return abs;
 }
 
@@ -343,6 +413,177 @@ export function detectWorkspaceMutationInExec(
   return { blocked: false };
 }
 
+/** Regex pattern for detecting sensitive environment variable names. */
+export const SENSITIVE_VAR_REGEX = /(_API_KEY|_TOKEN|_SECRET|_PASSWORD|API_KEY|TOKEN|SECRET|PASSWORD)/i;
+
+/** Helper to check printenv arguments for broad dump or sensitive targets. */
+function checkPrintenvSegment(segment: string): boolean {
+  const m = segment.trim().match(/^(?:(?:\/usr)?\/bin\/)?printenv(?:\s+(.*))?$/i);
+  if (!m) return false;
+  const rawArgs = m[1]?.trim();
+  if (!rawArgs) {
+    // Bare printenv dumps entire environment
+    return true;
+  }
+
+  // Strip redirection e.g. printenv > out.txt
+  const withoutRedirect = rawArgs.replace(/[><].*$/, '').trim();
+  if (!withoutRedirect) {
+    return true;
+  }
+
+  const tokens = extractCommandArgs(withoutRedirect);
+  if (tokens.length === 0) return true;
+
+  // If all tokens are flags (e.g. -0, --null), it's still a dump
+  const nonFlags = tokens.filter((t) => !t.startsWith('-'));
+  if (nonFlags.length === 0) return true;
+
+  for (const t of nonFlags) {
+    if (SENSITIVE_VAR_REGEX.test(t)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Helper to check env command for broad dump or sensitive targets. */
+function checkEnvSegment(segment: string): boolean {
+  const m = segment.trim().match(/^(?:(?:\/usr)?\/bin\/)?env(?:\s+(.*))?$/i);
+  if (!m) return false;
+  const rawArgs = m[1]?.trim();
+  if (!rawArgs) {
+    // Bare env dumps entire environment
+    return true;
+  }
+
+  // Strip redirection e.g. env > out.txt
+  const withoutRedirect = rawArgs.replace(/[><].*$/, '').trim();
+  if (!withoutRedirect) {
+    return true;
+  }
+
+  const tokens = extractCommandArgs(withoutRedirect);
+  if (tokens.length === 0) return true;
+
+  // If there are no commands to execute (only flags and/or VAR=VAL assignments),
+  // env prints the environment.
+  let hasCommand = false;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.startsWith('-')) {
+      if (t === '-u' || t === '--unset') {
+        i++; // skip variable name following -u
+      }
+      continue;
+    }
+    if (t.includes('=')) {
+      // Check if assignment variable name is sensitive
+      const varName = t.split('=')[0];
+      if (SENSITIVE_VAR_REGEX.test(varName)) {
+        return true;
+      }
+      continue;
+    }
+    hasCommand = true;
+    break;
+  }
+
+  return !hasCommand;
+}
+
+/**
+ * Detects if a shell command in exec attempts to dump environment variables
+ * broadly or target sensitive environment variables specifically.
+ */
+export function isSensitiveEnvCommand(command: string): boolean {
+  if (!command || typeof command !== 'string') return false;
+
+  // 1. Check for sensitive variable expansion anywhere in command:
+  // e.g. $NAME or ${NAME} where NAME matches SENSITIVE_VAR_REGEX
+  const varMatches = command.matchAll(/\$([a-zA-Z_][a-zA-Z0-9_]*|\{([a-zA-Z_][a-zA-Z0-9_]*)\})/g);
+  for (const m of varMatches) {
+    const varName = m[2] ?? m[1];
+    if (varName && SENSITIVE_VAR_REGEX.test(varName)) {
+      return true;
+    }
+  }
+
+  // 2. Check each chained segment
+  const segments = chainedSegments(command);
+  for (const seg of segments) {
+    const s = seg.trim().replace(/^sudo\s+/, '');
+    if (!s) continue;
+
+    if (checkPrintenvSegment(s)) {
+      return true;
+    }
+
+    if (checkEnvSegment(s)) {
+      return true;
+    }
+
+    // Bare export or export -p dumps environment in bash
+    if (/^(?:export)(?:\s+-p)?$/i.test(s)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Detects if an exec command explicitly targets sensitive files
+ * (e.g. 'cat .ruko/config.json', 'grep key .env', etc.).
+ */
+export function detectSensitiveFileAccessInExec(
+  command: string,
+  workspaceRoot: string = getWorkspaceRoot(),
+): { blocked: boolean; message?: string; target?: string } {
+  const segments = chainedSegments(command);
+
+  for (const seg of segments) {
+    const s = seg.trim().replace(/^sudo\s+/, '');
+
+    const tokenRegex = /[^\s"';&|<>]+|"([^"]*)"|'([^']*)'/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = tokenRegex.exec(s)) !== null) {
+      const rawToken = match[1] ?? match[2] ?? match[0];
+      if (!rawToken) continue;
+
+      const candidateTokens = rawToken.includes(' ')
+        ? [rawToken, ...rawToken.split(/\s+/).filter(Boolean)]
+        : [rawToken];
+
+      for (const t of candidateTokens) {
+        let candidate = t.trim();
+
+        if (candidate.startsWith('-')) {
+          if (candidate.includes('=')) {
+            candidate = candidate.split('=', 2)[1];
+          } else {
+            continue;
+          }
+        }
+
+        candidate = candidate.replace(/^[@<>]+/, '');
+        if (!candidate) continue;
+
+        if (isSensitivePath(candidate, workspaceRoot)) {
+          return {
+            blocked: true,
+            target: candidate,
+            message: `exec ditolak: akses ke file sensitif ("${candidate}") diblokir demi keamanan kredensial/data sensitif.`,
+          };
+        }
+      }
+    }
+  }
+
+  return { blocked: false };
+}
+
 /** Executes a parsed tool call; the result is char-capped before re-entering context. */
 export async function runToolCall(call: ToolCall, deps: ToolDeps = {}): Promise<string> {
   // §6: plan mode is a CODE guarantee, not a prompt request.
@@ -363,6 +604,18 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       const command = String(call.command ?? '');
       if (!command) {
         return JSON.stringify({ error: 'exec: missing "command" field' });
+      }
+
+      if (isSensitiveEnvCommand(command)) {
+        const msg = 'exec ditolak: command berpotensi membocorkan environment variable sensitif. Kredensial tidak dapat diakses lewat tool ini.';
+        deps.onLog?.(yellow(`⚠ ${msg}`));
+        return JSON.stringify({ error: msg });
+      }
+
+      const fileCheck = detectSensitiveFileAccessInExec(command, ws);
+      if (fileCheck.blocked) {
+        deps.onLog?.(yellow(`⚠ ${fileCheck.message}`));
+        return JSON.stringify({ error: fileCheck.message });
       }
 
       const mutationCheck = detectWorkspaceMutationInExec(command, ws);
@@ -403,6 +656,11 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       const file = String(call.path ?? call.file ?? '');
       if (!file) {
         return JSON.stringify({ error: 'read_file: missing "path" field' });
+      }
+      try {
+        assertNotSensitivePath(file, ws);
+      } catch (err) {
+        return JSON.stringify({ error: `read_file: ${err instanceof Error ? err.message : String(err)}` });
       }
       deps.onLog?.(green(`🟢 Read(${file})`));
       const result = await readFileTool(file, {

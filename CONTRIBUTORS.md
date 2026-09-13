@@ -27,6 +27,8 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Tanggal: 2026-09-13
 - Kontribusi: Release v1.2.0 — sinkronisasi versi 1.2.0, update install.sh TAG v1.2.0, dan build release
 - Tanggal: 2026-09-13
+- Kontribusi: Proteksi dua lapis file sensitif (.ruko/config.json, .env, kunci privat) & environment variable sensitif di level tool (agent & subagent) untuk mitigasi eksfiltrasi kredensial prompt injection
+- Tanggal: 2026-09-13
 
 ## Claude Opus 4.6
 - Kontribusi: Audit keamanan pre-publish & inisiasi implementasi hardening

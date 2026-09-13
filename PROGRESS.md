@@ -6,6 +6,50 @@
 
 ## 📦 Riwayat Rilis & Status Fitur (Changelog)
 
+### v1.5.0 (13 September 2026) — Proteksi Dua Lapis Berkas & Environment Variable Sensitif (Mitigasi Eksfiltrasi Kredensial & Prompt Injection)
+
+#### Latar Belakang & Temuan Keamanan yang Divalidasi Manual
+1. **Temuan 1 (Pembacaan Berkas Konfigurasi Sensitif)**:
+   - Skenario teruji: Subagent (via tool `delegate`) diminta membaca `.ruko/config.json` melalui tool `read_file` berhasil dieksekusi dan membocorkan API key *plaintext*.
+   - Akar masalah: Hak akses berkas OS (`chmod 600`) hanya melindungi berkas dari proses/pengguna *lain* di sistem operasi. Ketika Ruko berjalan dengan identitas pengguna pemilik, seluruh tool internal Ruko memiliki izin baca penuh terhadap `.ruko/config.json`. Pemeriksaan `assertInsideWorkspace()` mengizinkan akses karena `.ruko/` berada di dalam root direktori kerja.
+2. **Temuan 2 (Ketidakefektifan Solusi "Pindah ke Environment Variable")**:
+   - Skenario teruji: Kredensial dipindahkan ke environment variable shell induk (`export RUKO_API_KEY=sk-TEST-dummy && ruko`), lalu subagent diminta mengeksekusi `printenv`. Subagent berhasil menjalankan `printenv` via tool `exec` dan membocorkan nilai API key tersebut.
+   - Akar masalah: Masalah fundamental bukan terletak pada *media penyimpanan* kredensial (file vs environment variable), melainkan *ketiadaan lapisan filter otorisasi dan kontrol akses data sensitif pada antarmuka tool agen*. Jika agen memproses konten eksternal yang disusupi *prompt injection* (misalnya dari halaman web via `web_fetch` atau repositori/PR tak tepercaya), agen dapat dimanipulasi untuk membaca konfigurasi atau men-dump environment.
+3. **Cakupan Universal Agent & Subagent (`delegate`)**:
+   - Subagent diisolasi dari konteks percakapan pengguna demi efisiensi token, namun **tidak boleh terisolasi dari kebijakan keamanan sistem**. Proteksi keamanan diterapkan di tingkat dispatcher tool tunggal (`runToolCall`), sehingga setiap subagent mewarisi kebijakan dan proteksi yang identik tanpa celah isolasi.
+
+#### Ditambahkan & Diperbarui
+- **Fungsi `isSensitivePath()` & `assertNotSensitivePath()` (`src/agent/tools.ts`)**:
+  * Memblokir akses sebelum berkas dibaca pada daftar path sensitif (*case-insensitive*, mencakup variasi relative dan absolute path):
+    - `.ruko/config.json`
+    - `.ruko/undo/**` (snapshot cadangan yang berpotensi menyimpan konten sensitif lama)
+    - `.env`, `.env.*`
+    - `id_rsa`, `id_ed25519`, `*.pem`, `*.key`
+  * Ditegakkan pada `readFileTool` (`src/agent/filetools.ts`), `resolveToolPath` (`src/agent/tools.ts`), serta penolakan langsung di case `read_file`.
+- **Sanitasi Pencarian & Inspeksi Berkas (`src/agent/filetools.ts`)**:
+  * `globTool`: Menyaring dan tidak pernah menampilkan path sensitif di hasil pencarian, serta menolak traversal jika target path adalah direktori/file sensitif.
+  * `codeSearchTool`: Melewatkan (*skip*) pengindeksan isi berkas sensitif dari pencarian teks/regex, menjamin token tidak bocor lewat hasil pencarian kode.
+- **Fungsi `isSensitiveEnvCommand()` (`src/agent/tools.ts`)**:
+  * Mendeteksi dan menolak eksekusi shell yang men-dump environment secara luas: `printenv` (tanpa argumen atau dengan flag/grep/pipe), `env` (tanpa argumen atau dengan pipe/redirect), dan `export` polos.
+  * Mendeteksi upaya penargetan variabel sensitif via regex: `/(_API_KEY|_TOKEN|_SECRET|_PASSWORD|API_KEY|TOKEN|SECRET|PASSWORD)/i` pada `printenv <NAMA>` serta ekspansi `$<NAMA>` atau `${<NAMA>}`.
+  * **Anti-Overblocking**: Perintah `echo` variabel biasa non-sensitif (seperti `echo $PATH`, `echo $HOME`, `echo $USER`, `echo $NORMAL_VAR`) tetap diizinkan.
+  * Menolak eksekusi dengan pesan terstandardisasi: `"exec ditolak: command berpotensi membocorkan environment variable sensitif. Kredensial tidak dapat diakses lewat tool ini."`
+- **Fungsi `detectSensitiveFileAccessInExec()` (`src/agent/tools.ts`)**:
+  * Mendeteksi dan memblokir perintah shell pada `exec` yang secara eksplisit menargetkan berkas sensitif (mis. `cat .ruko/config.json`, `cat .env`, `tail id_rsa`, redirect input `< .ruko/config.json`).
+- **Integrasi Penuh ke Subagent & Propagasi Workspace (`src/agent/agent.ts`, `src/agent/subagent.ts`)**:
+  * Menambahkan parameter `workspaceRoot` opsional pada kelas `Agent`, diteruskan ke seluruh pemanggilan `runToolCall`.
+  * Runner `runSubagent` meneruskan `options.workspaceRoot` ke instans subagent sehingga kebijakan workspace dan keamanan jalur sensitif tersinkronisasi penuh.
+- **Rangkaian Pengujian Komprehensif (`src/tests/sensitive_protection.test.ts`)**:
+  * 11 unit test baru mencakup: verifikasi path sensitif, penolakan `read_file`, penyembunyian pada `glob`, pengabaian pada `code_search`, penolakan `cat .ruko/config.json`, penolakan `printenv` polos, penolakan `printenv RUKO_API_KEY`, lolosnya `echo $NORMAL_VAR`, reproduksi skenario eksfiltrasi subagent `delegate` (kedua skenario berhasil ditolak), dan uji regresi startup aplikasi Ruko (`loadConfig` internal tetap berfungsi tanpa gangguan).
+
+#### Detail Arsitektural
+- **Pemisahan Jalur Startup Internal vs Tool Agen**:
+  * Pemuatan kredensial internal saat inisiasi CLI (`loadConfig` di `src/core/config.ts`) menggunakan API `node:fs` murni (`readFileSync`) dan tidak melalui tool agen. Dengan demikian, proteksi tool agen tidak mempengaruhi proses startup normal aplikasi.
+- **Verifikasi & Test Suite**:
+  * Total test: **353 passed** (100% lulus, 0 gagal), `npm run typecheck` bersih, `npm run test:e2e` lulus (1 passed).
+
+---
+
 ### v1.4.0 (13 September 2026) — Pencarian Lintas Sesi, Siklus Lengkap Skills System, & In-Flight Cancellation
 
 #### Ditambahkan
@@ -137,7 +181,7 @@ Catatan batasan arsitektural yang disadari:
 
 1. **Verifikasi Baseline**:
    - Jalankan `npm run typecheck` (harus 0 error).
-   - Jalankan `npm test` (harus **342 passed**, 0 fail).
+   - Jalankan `npm test` (harus **353 passed**, 0 fail).
    - E2E test: `npm run test:e2e` (1 passed).
 2. **Struktur Direktori Proyek**:
    - `src/core/`: Infrastruktur murni Node.js (loop, approval, executor, summarizer, undo, context, session, config, wizard, ui, skills).

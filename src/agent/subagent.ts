@@ -44,7 +44,7 @@ export async function runSubagent(
   };
 
   const subCtx = new Context(subConfig);
-  const subAgent = new Agent(subCtx, deps.llmProvider, subConfig, deps.confirm);
+  const subAgent = new Agent(subCtx, deps.llmProvider, subConfig, deps.confirm, options.workspaceRoot);
   if (options.planMode) {
     subAgent.planMode = true;
   }

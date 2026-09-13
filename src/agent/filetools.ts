@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { assertInsideWorkspace, getWorkspaceRoot } from './tools.js';
+import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isSensitivePath } from './tools.js';
 
 /** Default number of lines a `read_file` call returns when not asked for. */
 export const DEFAULT_READ_LIMIT = 200;
@@ -96,6 +96,7 @@ export async function readFileTool(
   try {
     abs = path.resolve(cwd, filePath);
     assertInsideWorkspace(abs, cwd);
+    assertNotSensitivePath(abs, cwd);
   } catch (err) {
     return { ok: false, text: err instanceof Error ? err.message : String(err) };
   }
@@ -227,10 +228,10 @@ export async function walkDirectory(
       const fullPath = path.join(currentDir, entry.name);
 
       if (entry.isDirectory()) {
-        if (IGNORED_DIRS.has(entry.name)) continue;
+        if (IGNORED_DIRS.has(entry.name) || isSensitivePath(fullPath, cwd)) continue;
         try {
           const real = await fs.realpath(fullPath);
-          if (visitedDirs.has(real)) continue;
+          if (visitedDirs.has(real) || isSensitivePath(real, cwd)) continue;
           visitedDirs.add(real);
           queue.push(fullPath);
         } catch {
@@ -242,11 +243,12 @@ export async function walkDirectory(
           const real = await fs.realpath(fullPath);
           const stat = await fs.stat(real);
           if (stat.isDirectory()) {
-            if (IGNORED_DIRS.has(entry.name)) continue;
+            if (IGNORED_DIRS.has(entry.name) || isSensitivePath(fullPath, cwd) || isSensitivePath(real, cwd)) continue;
             if (visitedDirs.has(real)) continue;
             visitedDirs.add(real);
             queue.push(fullPath);
           } else if (stat.isFile()) {
+            if (isSensitivePath(fullPath, cwd) || isSensitivePath(real, cwd)) continue;
             const rel = path.relative(cwd, fullPath).replace(/\\/g, '/');
             results.push({ relPath: rel, absPath: fullPath });
           }
@@ -254,6 +256,7 @@ export async function walkDirectory(
           continue;
         }
       } else if (entry.isFile()) {
+        if (isSensitivePath(fullPath, cwd)) continue;
         const rel = path.relative(cwd, fullPath).replace(/\\/g, '/');
         results.push({ relPath: rel, absPath: fullPath });
       }
@@ -401,6 +404,16 @@ export async function globTool(
     };
   }
 
+  if (isSensitivePath(startDir, cwd)) {
+    return {
+      ok: true,
+      text: 'Tidak ada file ditemukan.',
+      files: [],
+      totalFound: 0,
+      truncated: false,
+    };
+  }
+
   try {
     const st = await fs.stat(startDir);
     if (!st.isDirectory()) {
@@ -430,6 +443,9 @@ export async function globTool(
   let totalFound = 0;
 
   for (const entry of entries) {
+    if (isSensitivePath(entry.absPath, cwd)) {
+      continue;
+    }
     const relNorm = entry.relPath.startsWith('./') ? entry.relPath.slice(2) : entry.relPath;
     const relToStart = path.relative(startDir, entry.absPath).replace(/\\/g, '/');
 
@@ -563,20 +579,33 @@ export async function codeSearchTool(
     };
   }
 
+  if (isSensitivePath(targetPath, cwd)) {
+    return {
+      ok: true,
+      text: 'Tidak ada kecocokan ditemukan.',
+      totalMatches: 0,
+      totalFiles: 0,
+      truncated: false,
+    };
+  }
+
   let candidateFiles: WalkEntry[] = [];
   try {
     const stat = await fs.stat(targetPath);
     if (stat.isFile()) {
-      const ext = path.extname(targetPath).slice(1).toLowerCase();
-      if (!allowedExts || allowedExts.has(ext)) {
-        candidateFiles = [{
-          relPath: path.relative(cwd, targetPath).replace(/\\/g, '/'),
-          absPath: targetPath,
-        }];
+      if (!isSensitivePath(targetPath, cwd)) {
+        const ext = path.extname(targetPath).slice(1).toLowerCase();
+        if (!allowedExts || allowedExts.has(ext)) {
+          candidateFiles = [{
+            relPath: path.relative(cwd, targetPath).replace(/\\/g, '/'),
+            absPath: targetPath,
+          }];
+        }
       }
     } else if (stat.isDirectory()) {
       const entries = await walkDirectory(targetPath, cwd, new Set(), 5000);
       candidateFiles = entries.filter((e) => {
+        if (isSensitivePath(e.absPath, cwd)) return false;
         if (BINARY_EXTENSIONS.has(path.extname(e.absPath).toLowerCase())) return false;
         if (!allowedExts) return true;
         const ext = path.extname(e.absPath).slice(1).toLowerCase();
