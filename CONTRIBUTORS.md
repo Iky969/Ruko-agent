@@ -35,6 +35,8 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 ## Gemini (Google DeepMind)
 - Kontribusi: Implementasi Roadmap #1 (tool glob & code_search dengan deteksi biner), integrasi tool protocol, 22 unit test baru (v0.9.0)
 - Tanggal: 2026-09-12
+- Kontribusi: Subsistem Process Management (start_process, read_process_logs, get_status, stop_process), in-flight ESC cancel, pencarian lintas sesi (search_sessions, /search), dan siklus penuh skills system (delete_skill)
+- Tanggal: 2026-09-13
 
 ## Claude (Anthropic)
 - Kontribusi: Review dan cross-checking sesi pengembangan, prompt engineering, audit keamanan, strategi proyek

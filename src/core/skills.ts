@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 
 /**
  * Skills System for Ruko Agent.
@@ -154,6 +154,32 @@ export function saveSkill(
     instructions: instructions.trim(),
     filePath,
   };
+}
+
+/**
+ * Deletes a skill by name from `.ruko/skills/`.
+ * Removes the .md file or nested directory containing SKILL.md.
+ * Returns true if successfully deleted, or false if not found.
+ */
+export function deleteSkill(name: string, workspaceRoot: string = process.cwd()): boolean {
+  const skill = readSkill(name, workspaceRoot);
+  if (!skill || !skill.filePath) return false;
+
+  try {
+    rmSync(skill.filePath, { force: true });
+    const dir = defaultSkillsDir(workspaceRoot);
+    const parent = dirname(skill.filePath);
+    if (parent !== dir && existsSync(parent)) {
+      try {
+        rmSync(parent, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Formats available skills for inclusion in the system prompt. */

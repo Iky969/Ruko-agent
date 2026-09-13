@@ -51,14 +51,18 @@ export const TOOL_RULES =
   '```tool\n{"tool": "remember", "content": "<concise note or fact>"}\n```\n' +
   '  Appends a dated bullet to .ruko/memory.md. Use only for important project facts, architectural decisions, and user preferences useful in future sessions; NEVER use for temporary state or trivial details.\n' +
   '- To search past conversation histories across saved sessions, reply with:\n' +
-  '```tool\n{"tool": "search_sessions", "query": "<keywords>"}\n```\n' +
-  '  Returns matching conversation snippets from past sessions.\n' +
+  '```tool\n{"tool": "search_sessions", "query": "<keywords>", "limit": 5}\n```\n' +
+  '  Returns matching conversation snippets from past sessions (newest first, up to limit).\n' +
   '- To list available skills, reply with:\n' +
   '```tool\n{"tool": "list_skills"}\n```\n' +
   '- To load detailed instructions for a specific project skill, reply with:\n' +
   '```tool\n{"tool": "load_skill", "name": "<skill-name>"}\n```\n' +
-  '- To save a successful procedure or learned workflow as a reusable skill, reply with:\n' +
+  '- To save a reusable procedure or learned workflow as a skill, reply with:\n' +
   '```tool\n{"tool": "save_skill", "name": "<skill-name>", "description": "<summary>", "instructions": "<markdown instructions>"}\n```\n' +
+  '  RULE: Save a NEW skill ONLY when: (a) user explicitly gives repeated, complex instructions (not for one-off tasks), OR (b) user explicitly asks "simpan ini sebagai skill". NEVER save skills automatically or silently from ordinary turns. Content must be generalizable across contexts, not specific to one task.\n' +
+  '- To delete an obsolete or unneeded project skill, reply with:\n' +
+  '```tool\n{"tool": "delete_skill", "name": "<skill-name>"}\n```\n' +
+  '  Requires user confirmation [Y/N] via approval gate; displays skill content preview before deletion.\n' +
   '- To fetch and sanitize content from a web page (HTTP/HTTPS), reply with:\n' +
   '```tool\n{"tool": "web_fetch", "url": "<https-url>"}\n```\n' +
   '  Fetches web content (HTML sanitized to clean text, JSON, or plain text; capped at 5k chars). Binds to a 10s timeout.\n' +
@@ -105,7 +109,7 @@ export const BUILT_IN_ROLES: RoleDef[] = [
     name: 'reviewer',
     description: 'Hanya baca + memberi masukan (tidak mengubah file).',
     prompt:
-      'Role: code reviewer. You are READ-ONLY: never call exec/start_process/stop_process/write_file/edit_file/patch_file/delete_file/move_file/remember/save_skill — only read_file, glob, code_search, list_skills, load_skill, web_fetch, search_sessions, read_process_logs, and get_status are allowed. Give structured feedback: bugs and risks first (with file:line), then improvements, then positives. Suggest concrete fixes as snippets, do not apply them.',
+      'Role: code reviewer. You are READ-ONLY: never call exec/start_process/stop_process/write_file/edit_file/patch_file/delete_file/move_file/remember/save_skill/delete_skill — only read_file, glob, code_search, list_skills, load_skill, web_fetch, search_sessions, read_process_logs, and get_status are allowed. Give structured feedback: bugs and risks first (with file:line), then improvements, then positives. Suggest concrete fixes as snippets, do not apply them.',
   },
   {
     name: 'teacher',
@@ -196,7 +200,7 @@ export interface PromptLayers {
 /** Plan-mode guard as prose — the hard enforcement lives in the CLI code (§4). */
 export function planModeAddendum(): string {
   return (
-    'ACTIVE MODE — PLAN: You may ONLY read and propose. Do not call exec/start_process/write_file/edit_file/patch_file/delete_file/move_file/remember/save_skill ' +
+    'ACTIVE MODE — PLAN: You may ONLY read and propose. Do not call exec/start_process/write_file/edit_file/patch_file/delete_file/move_file/remember/save_skill/delete_skill ' +
     '(the CLI blocks them anyway). Output a numbered step plan for user approval; the user runs it after ' +
     'exiting plan mode with /plan off.'
   );

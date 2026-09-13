@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ContextMessage } from '../types.js';
 
@@ -94,12 +94,15 @@ export interface SessionSearchResult {
   sessionId: string;
   title: string;
   updatedAt: string;
+  timestamp: string;
+  messageCount: number;
   role: string;
   snippet: string;
 }
 
 /**
  * Searches saved sessions for matching keywords across all messages.
+ * Reads incrementally (file-by-file) sorted by newest first without loading all sessions into memory.
  */
 export function searchSessions(
   query: string,
@@ -108,31 +111,53 @@ export function searchSessions(
 ): SessionSearchResult[] {
   if (!existsSync(dir) || !query.trim()) return [];
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return [];
   const results: SessionSearchResult[] = [];
 
+  // Urutkan file berdasarkan mtime menurun (paling baru duluan) tanpa memuat seluruh konten
+  const fileEntries: { file: string; mtimeMs: number }[] = [];
   for (const file of readdirSync(dir)) {
     if (!file.endsWith('.json')) continue;
     try {
-      const s = JSON.parse(readFileSync(join(dir, file), 'utf8')) as Session;
+      const mtimeMs = statSync(join(dir, file)).mtimeMs;
+      fileEntries.push({ file, mtimeMs });
+    } catch {
+      // abaikan file yang tidak dapat di-stat
+    }
+  }
+  fileEntries.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  for (const { file } of fileEntries) {
+    try {
+      const fullPath = join(dir, file);
+      const raw = readFileSync(fullPath, 'utf8');
+      const s = JSON.parse(raw) as Session;
       if (!s.messages || !Array.isArray(s.messages)) continue;
 
-      for (let i = 0; i < s.messages.length; i++) {
+      const totalMessages = s.messages.length;
+      for (let i = 0; i < totalMessages; i++) {
         const msg = s.messages[i];
+        if (!msg || typeof msg.content !== 'string') continue;
         const lower = msg.content.toLowerCase();
         const matchesAll = terms.every((t) => lower.includes(t));
         if (matchesAll) {
           const firstTerm = terms[0];
           const pos = lower.indexOf(firstTerm);
-          const start = Math.max(0, pos - 40);
-          const end = Math.min(msg.content.length, pos + firstTerm.length + 40);
+          const start = Math.max(0, pos - 50);
+          const end = Math.min(msg.content.length, pos + firstTerm.length + 50);
           let snippet = msg.content.slice(start, end).replace(/\r?\n/g, ' ').trim();
           if (start > 0) snippet = '…' + snippet;
           if (end < msg.content.length) snippet = snippet + '…';
+          if (snippet.length > 150) {
+            snippet = snippet.slice(0, 147) + '…';
+          }
 
           results.push({
             sessionId: s.id,
-            title: s.title,
+            title: s.title || 'untitled',
             updatedAt: s.updatedAt,
+            timestamp: s.updatedAt,
+            messageCount: totalMessages,
             role: msg.role,
             snippet,
           });
@@ -145,7 +170,7 @@ export function searchSessions(
     }
   }
 
-  return results.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+  return results;
 }
 
 export function defaultExportDir(): string {

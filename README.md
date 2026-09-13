@@ -204,9 +204,10 @@ Agen menggunakan protokol tool call terstruktur dalam blok kode:
 | `move_file` | Manipulasi | Memindahkan / mengganti nama berkas (wajib konfirmasi `[Y/N]` dan snapshot undo otomatis). |
 | `web_fetch` | Jaringan | Mengambil konten web publik (HTML/JSON/Text) dengan timeout 10 detik dan sanitasi HTML. |
 | `remember` | Memori | Menyimpan fakta proyek/preferensi ke `.ruko/memory.md` lintas sesi. |
-| `search_sessions` | Pencarian | Menemukan kutipan percakapan dari riwayat sesi sebelumnya. |
+| `search_sessions` | Pencarian | Pencarian percakapan lintas sesi tersimpan secara inkremental (default limit 5, cuplikan maks. 150 karakter). |
 | `load_skill` | Skill | Memuat instruksi operasional skill proyek dari `.ruko/skills/`. |
-| `save_skill` | Skill | Menyimpan alur kerja sukses sebagai skill baru yang reusable. |
+| `save_skill` | Skill | Menyimpan alur kerja sukses sebagai skill baru yang reusable (hanya jika diminta / instruksi berulang). |
+| `delete_skill` | Skill | Menghapus skill yang sudah usang dari `.ruko/skills/` (wajib konfirmasi `[Y/N]` dan menampilkan preview isi). |
 | `list_skills` | Skill | Membaca dan menampilkan daftar seluruh nama dan deskripsi skill yang tersimpan. |
 | `delegate` | Delegasi | Menjalankan subagent mandiri dengan context terisolasi. |
 | `start_process` | Proses | Menjalankan perintah non-blocking / background (wajib konfirmasi `[Y/N]`, batas maks. 3 proses aktif). |
@@ -227,6 +228,7 @@ Ketik `/` di terminal untuk memunculkan menu interaktif, atau gunakan perintah b
 | `/login` | Membuka wizard konfigurasi provider dan tes koneksi langsung. |
 | `/new` | Menyimpan sesi saat ini lalu memulai sesi percakapan baru. |
 | `/sessions` | Menampilkan daftar seluruh sesi yang tersimpan. |
+| `/search <kata kunci>` | Mencari kata kunci percakapan lintas sesi tersimpan (beserta opsi `/resume`). |
 | `/resume <id>` | Melanjutkan sesi percakapan sebelumnya. |
 | `/export [json\|markdown]` | Ekspor log giliran percakapan dan jejak tool sesi aktif. |
 | `/clear` | Membersihkan memori percakapan pada sesi saat ini. |

@@ -635,7 +635,7 @@ export function inferStepDescription(
   if (tools.has('remember')) {
     return 'Menyimpan catatan ke persistent memory';
   }
-  if (tools.has('load_skill') || tools.has('save_skill')) {
+  if (tools.has('load_skill') || tools.has('save_skill') || tools.has('delete_skill')) {
     return 'Mengelola skill operasional proyek';
   }
   if (tools.has('search_sessions')) {

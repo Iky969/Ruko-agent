@@ -1,12 +1,12 @@
 import { Confirmer, guardedExecute } from '../core/approval.js';
-import { relative as relativeFromCwd } from 'node:path';
+import { join, relative as relativeFromCwd } from 'node:path';
 import { Context } from '../core/context.js';
 import { saveConfig } from '../core/config.js';
 import { execute } from '../core/executor.js';
 import { promptSetup, SetupResult } from '../core/wizard.js';
-import { dim, formatK, green, renderBox, red, yellow } from '../core/ui.js';
+import { bold, cyan, dim, formatK, green, renderBox, red, yellow } from '../core/ui.js';
 import { listSnapshots, undoLast } from '../core/undo.js';
-import { exportSessionTrajectory, listSessions, loadSession, saveSession } from '../core/session.js';
+import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
 import { getWorkspaceRoot } from './tools.js';
 import { AgentConfig, ProviderProfile, UiMode } from '../types.js';
@@ -88,7 +88,8 @@ const COMMANDS: CommandDef[] = [
     name: 'sessions',
     help: 'Daftar sesi tersimpan.',
     run: () => {
-      const sessions = listSessions();
+      const dir = join(getWorkspaceRoot(), '.ruko', 'sessions');
+      const sessions = listSessions(dir);
       if (sessions.length === 0) {
         console.log(renderBox('Sessions', ['(belum ada sesi tersimpan)']));
         return;
@@ -104,6 +105,33 @@ const COMMANDS: CommandDef[] = [
     },
   },
   {
+    name: 'search',
+    help: 'Cari kata kunci lintas sesi tersimpan.',
+    hint: '<query>',
+    run: (args) => {
+      const query = args.trim();
+      if (!query) {
+        console.log('Usage: /search <kata kunci>');
+        return;
+      }
+      const dir = join(getWorkspaceRoot(), '.ruko', 'sessions');
+      const results = searchSessions(query, dir, 5);
+      if (results.length === 0) {
+        console.log(renderBox('Search Sessions', [`Tidak ditemukan sesi yang cocok dengan "${query}"`]));
+        return;
+      }
+      const lines: string[] = [];
+      for (const r of results) {
+        lines.push(`${bold(cyan(r.sessionId))}  [${r.messageCount} msg, ${r.updatedAt.slice(0, 19)}]  ${r.title}`);
+        lines.push(`  ${dim(r.role)}: ${r.snippet}`);
+        lines.push(`  → Untuk melanjutkan: /resume ${r.sessionId}`);
+        lines.push('');
+      }
+      if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+      console.log(renderBox(`Search: "${query}" (${results.length} hasil)`, lines));
+    },
+  },
+  {
     name: 'resume',
     help: 'Lanjutkan sesi tersimpan.',
     hint: '<id>  (lihat /sessions)',
@@ -113,13 +141,14 @@ const COMMANDS: CommandDef[] = [
         console.log(`Usage: /resume <session-id>  (contoh id: ${exampleSessionIds() || 'belum ada — lihat /sessions'})`);
         return;
       }
-      const session = loadSession(id);
+      const dir = join(getWorkspaceRoot(), '.ruko', 'sessions');
+      const session = loadSession(id, dir);
       if (!session) {
         console.log(`Sesi tidak ditemukan: ${id}`);
         return;
       }
       if (env.ctx.size > 0) {
-        saveSession(env.ctx.toJSON(), undefined, env.handle.getSessionId() ?? undefined);
+        saveSession(env.ctx.toJSON(), dir, env.handle.getSessionId() ?? undefined);
       }
       env.ctx.replace(session.messages);
       env.handle.setSessionId(session.id);

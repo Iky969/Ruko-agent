@@ -5,7 +5,7 @@ import { takeSnapshot } from '../core/undo.js';
 import { cyan, dim, green, magenta, red, yellow } from '../core/ui.js';
 import { codeSearchTool, globTool, readFileTool } from './filetools.js';
 import { appendMemory } from '../core/memory.js';
-import { listSkills, readSkill, saveSkill } from '../core/skills.js';
+import { deleteSkill, listSkills, readSkill, saveSkill } from '../core/skills.js';
 import { searchSessions } from '../core/session.js';
 import { runSubagent } from './subagent.js';
 import { webFetchTool } from './webtools.js';
@@ -136,6 +136,7 @@ const PLAN_MODE_BLOCKED = new Set([
   'move_file',
   'remember',
   'save_skill',
+  'delete_skill',
 ]);
 
 let customWorkspaceRoot: string | null = null;
@@ -734,7 +735,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
     case 'save_skill': {
       const name = String(call.name ?? '');
       const description = String(call.description ?? '');
-      const instructions = String(call.instructions ?? '');
+      const instructions = String(call.instructions ?? call.content ?? '');
       if (!name || !instructions) {
         return JSON.stringify({ error: 'save_skill: missing "name" or "instructions" field' });
       }
@@ -746,6 +747,50 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
           message: `Skill "${saved.name}" berhasil disimpan ke .ruko/skills/${saved.name}.md`,
           name: saved.name,
           description: saved.description,
+        },
+        null,
+        2,
+      );
+    }
+    case 'delete_skill': {
+      const name = String(call.name ?? '');
+      if (!name.trim()) {
+        return JSON.stringify({ error: 'delete_skill: missing "name" field' });
+      }
+      const skill = readSkill(name, ws);
+      if (!skill) {
+        return JSON.stringify({ error: `delete_skill: skill "${name}" tidak ditemukan` });
+      }
+
+      const config = deps.config ?? DEFAULT_CONFIG;
+      if (config.approvalEnabled && !isYoloMode()) {
+        if (!deps.confirm) {
+          return JSON.stringify({
+            error: `[Persetujuan ditolak: konfirmasi pengguna diperlukan untuk menghapus skill "${name}"]`,
+          });
+        }
+        const preview = skill.instructions.slice(0, 200) + (skill.instructions.length > 200 ? '…' : '');
+        const ok = await deps.confirm(
+          `delete_skill ${name}`,
+          `menghapus skill "${name}" secara permanen:\n---\n${preview}\n---`,
+        );
+        if (!ok) {
+          return JSON.stringify({
+            error: `[Persetujuan ditolak: menghapus skill "${name}"]`,
+          });
+        }
+      }
+
+      const deleted = deleteSkill(name, ws);
+      if (!deleted) {
+        return JSON.stringify({ error: `delete_skill: gagal menghapus skill "${name}"` });
+      }
+      deps.onLog?.(red(`🔴 DeleteSkill(${name})`));
+      return JSON.stringify(
+        {
+          ok: true,
+          message: `Skill "${name}" berhasil dihapus.`,
+          name,
         },
         null,
         2,
@@ -794,14 +839,24 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       if (!query.trim()) {
         return JSON.stringify({ error: 'search_sessions: missing "query" field' });
       }
-      deps.onLog?.(green(`🟢 SearchSessions(${query})`));
-      const results = searchSessions(query);
+      const rawLimit = Number(call.limit);
+      const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? rawLimit : 5;
+      deps.onLog?.(green(`🟢 SearchSessions(${query}${limit !== 5 ? `, limit: ${limit}` : ''})`));
+      const sessionsDir = path.join(ws, '.ruko', 'sessions');
+      const results = searchSessions(query, sessionsDir, limit);
       return JSON.stringify(
         {
           ok: true,
           query,
           count: results.length,
-          results: results.slice(0, 10),
+          results: results.map((r) => ({
+            session_id: r.sessionId,
+            timestamp: r.timestamp,
+            message_count: r.messageCount,
+            title: r.title,
+            role: r.role,
+            snippet: r.snippet,
+          })),
         },
         null,
         2,
