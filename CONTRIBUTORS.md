@@ -43,3 +43,11 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 ## Chat AI (Deep Flow)
 - Kontribusi: Eksperimen animasi terminal Pac-Man 'Thinking...' dan transisi streaming
 - Tanggal: 2026-09-12
+
+## Gemini (Advisory & Review)
+- Kontribusi: Pendampingan teknis arsitektur, strategi eksekusi prompt/role, cross-check hasil audit keamanan & SSRF, rekonsiliasi pengujian, serta perumusan roadmap v1.3.0
+- Tanggal: 2026-09-13
+
+## GLM 5.3 Flash
+- Kontribusi: Testing tools & feedback pengembang>
+- Tanggal: 2026-09-13
