@@ -152,7 +152,14 @@ export class Agent {
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i += 1) {
       // v0.7: user chose "kirim sekarang" — stop before the next request so
       // the interrupted turn ends cleanly instead of starting new work.
-      if (signal?.aborted) return '';
+      if (signal?.aborted) {
+        if (tree.isTreeActive) {
+          tree.finish('Dibatalkan oleh pengguna');
+        } else {
+          process.stdout.write(yellow('\n⚠ Dibatalkan oleh pengguna\n'));
+        }
+        return '';
+      }
       usage.promptChars += messages.reduce((s, m) => s + m.content.length, 0);
       const usePacman = this.config.funAnimations ?? (this.config.mode !== 'pro');
       const spinner = createSpinner('Thinking', { pacman: usePacman });
@@ -171,7 +178,14 @@ export class Agent {
       } catch (err) {
         // v0.7: an interrupted stream rejects with AbortError — that is a
         // clean stop requested by the user, not a provider failure.
-        if (signal?.aborted || isAbortError(err)) return '';
+        if (signal?.aborted || isAbortError(err)) {
+          if (tree.isTreeActive) {
+            tree.finish('Dibatalkan oleh pengguna');
+          } else {
+            process.stdout.write(yellow('\n⚠ Dibatalkan oleh pengguna\n'));
+          }
+          return '';
+        }
         throw err;
       } finally {
         reveal.end();
@@ -211,6 +225,14 @@ export class Agent {
       tree.startStep(desc);
 
       for (const call of calls) {
+        if (signal?.aborted) {
+          if (tree.isTreeActive) {
+            tree.finish('Dibatalkan oleh pengguna');
+          } else {
+            process.stdout.write(yellow('\n⚠ Dibatalkan oleh pengguna\n'));
+          }
+          return '';
+        }
         // §5: Guard mekanis — tolak eksekusi ganda jika tool call berturut-turut persis identik
         const sig = this.getCallSignature(call);
         if (this.lastCallSignature === sig) {
@@ -246,7 +268,14 @@ export class Agent {
           signal,
           llmProvider: this.llmProvider,
         });
-        if (signal?.aborted) return '';
+        if (signal?.aborted) {
+          if (tree.isTreeActive) {
+            tree.finish('Dibatalkan oleh pengguna');
+          } else {
+            process.stdout.write(yellow('\n⚠ Dibatalkan oleh pengguna\n'));
+          }
+          return '';
+        }
         messages.push({
           role: 'tool',
           content: `Result of tool "${call.tool}":\n${result}`,

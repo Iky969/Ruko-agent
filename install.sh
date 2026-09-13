@@ -3,7 +3,7 @@ set -e
 
 REPO="https://github.com/Iky969/Ruko-agent.git"
 INSTALL_DIR="$HOME/.ruko-agent"
-TAG="v1.2.0"
+TAG="${RUKO_VERSION:-main}"
 
 echo "== Ruko Agent Installer =="
 
@@ -25,7 +25,7 @@ if ! command -v git >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Mengambil kode Ruko versi $TAG..."
+echo "Mengambil kode Ruko ($TAG)..."
 rm -rf "$INSTALL_DIR"
 git clone --depth 1 --branch "$TAG" "$REPO" "$INSTALL_DIR"
 

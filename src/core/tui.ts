@@ -554,9 +554,10 @@ export class LineEditor {
     if (this.modal) {
       const modal = this.modal;
       for (const ch of data) {
-        if (ch === '\u0003') {
+        if (ch === '\u0003' || ch === '\u001b') {
           this.modal = null;
           modal.resolve(null);
+          this.render();
           return;
         }
         if (ch === '\r' || ch === '\n') {
@@ -585,9 +586,27 @@ export class LineEditor {
           i += match[0].length;
           continue;
         }
-        // Lone Escape closes the overlay.
-        this.menu = [];
-        this.selected = 0;
+        // Lone Escape:
+        if (this.menu.length > 0) {
+          this.menu = [];
+          this.selected = 0;
+          this.render();
+          i += 1;
+          continue;
+        }
+        // Ambient mode: interrupt/cancel in-flight AI step/turn
+        if (!this.pending && this.ambient) {
+          this.buffer = '';
+          this.cursor = 0;
+          this.eraseRegion();
+          this.ambient.onInterrupt();
+          if (this.ambient) this.render();
+          return;
+        }
+        if (this.pending) {
+          this.cancel();
+          return;
+        }
         i += 1;
         continue;
       }
