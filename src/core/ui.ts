@@ -644,6 +644,14 @@ export function inferStepDescription(
   if (tools.has('delegate')) {
     return 'Mendelegasikan sub-tugas ke subagent terisolasi';
   }
+  if (
+    tools.has('start_process') ||
+    tools.has('stop_process') ||
+    tools.has('read_process_logs') ||
+    tools.has('get_status')
+  ) {
+    return 'Pengelolaan proses latar belakang';
+  }
   return `Langkah ${stepNumber}`;
 }
 

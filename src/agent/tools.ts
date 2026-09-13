@@ -2,13 +2,14 @@ import { chainedSegments, Confirmer, guardedExecute, isYoloMode } from '../core/
 import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
 import { renderFileDiff, splitLines } from '../core/diff.js';
 import { takeSnapshot } from '../core/undo.js';
-import { dim, green, magenta, red, yellow } from '../core/ui.js';
+import { cyan, dim, green, magenta, red, yellow } from '../core/ui.js';
 import { codeSearchTool, globTool, readFileTool } from './filetools.js';
 import { appendMemory } from '../core/memory.js';
 import { listSkills, readSkill, saveSkill } from '../core/skills.js';
 import { searchSessions } from '../core/session.js';
 import { runSubagent } from './subagent.js';
 import { webFetchTool } from './webtools.js';
+import { defaultProcessManager } from './processManager.js';
 import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -127,6 +128,7 @@ export interface ToolDeps {
 /** Tools refused while plan mode is active (read_file stays available). */
 const PLAN_MODE_BLOCKED = new Set([
   'exec',
+  'start_process',
   'write_file',
   'edit_file',
   'patch_file',
@@ -844,6 +846,127 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
           error: `delegate failed: ${err instanceof Error ? err.message : String(err)}`,
         });
       }
+    }
+    case 'start_process': {
+      const command = String(call.command ?? '');
+      if (!command.trim()) {
+        return JSON.stringify({ error: 'start_process: missing "command" field' });
+      }
+
+      const cwdArg = call.cwd ? String(call.cwd) : '';
+      let resolvedCwd: string;
+      try {
+        resolvedCwd = cwdArg ? resolveToolPath(cwdArg, ws) : ws;
+        assertInsideWorkspace(resolvedCwd, ws);
+      } catch (err) {
+        return JSON.stringify({
+          error: `start_process: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+
+      const activeProcesses = defaultProcessManager.getActiveProcesses();
+      if (activeProcesses.length >= 3) {
+        const list = activeProcesses
+          .map((p) => `${p.id} (PID ${p.pid}, cmd: "${p.command}")`)
+          .join(', ');
+        return JSON.stringify({
+          error: `start_process ditolak: batas maksimal 3 proses aktif tercapai. Proses aktif saat ini: ${list}. Silakan gunakan stop_process(<process_id>) untuk menghentikan salah satunya terlebih dahulu.`,
+        });
+      }
+
+      const config = deps.config ?? DEFAULT_CONFIG;
+      if (config.approvalEnabled && !isYoloMode()) {
+        if (!deps.confirm) {
+          return JSON.stringify({
+            error: `[Persetujuan ditolak: konfirmasi pengguna diperlukan untuk menjalankan proses latar belakang "${command}"]`,
+          });
+        }
+        const ok = await deps.confirm(
+          `start_process ${command}`,
+          `menjalankan proses latar belakang "${command}"`,
+        );
+        if (!ok) {
+          return JSON.stringify({
+            error: `[Persetujuan ditolak: menjalankan proses latar belakang "${command}"]`,
+          });
+        }
+      }
+
+      try {
+        const proc = defaultProcessManager.startProcess(command, resolvedCwd);
+        const short = command.length > 50 ? `${command.slice(0, 47)}…` : command;
+        deps.onLog?.(green(`🟢 StartProcess(${proc.id}: ${short})`));
+        return JSON.stringify(
+          {
+            ok: true,
+            process_id: proc.id,
+            pid: proc.pid,
+            command: proc.command,
+            cwd: path.relative(ws, resolvedCwd) || '.',
+            status: proc.status,
+            message: `Proses latar belakang berhasil dijalankan dengan ID "${proc.id}" (PID: ${proc.pid}).`,
+          },
+          null,
+          2,
+        );
+      } catch (err) {
+        return JSON.stringify({
+          error: `start_process: gagal memulai proses: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+    case 'read_process_logs': {
+      const processId = String(call.process_id ?? call.id ?? '');
+      if (!processId) {
+        return JSON.stringify({ error: 'read_process_logs: missing "process_id" field' });
+      }
+      if (!defaultProcessManager.hasProcess(processId)) {
+        return JSON.stringify({
+          error: `read_process_logs: proses dengan ID "${processId}" tidak ditemukan.`,
+        });
+      }
+      deps.onLog?.(cyan(`🔵 ReadLogs(${processId})`));
+      const logs = defaultProcessManager.readProcessLogs(processId) ?? [];
+      return JSON.stringify(
+        {
+          ok: true,
+          process_id: processId,
+          lines: logs.length,
+          logs,
+          output: logs.join('\n'),
+        },
+        null,
+        2,
+      );
+    }
+    case 'get_status': {
+      const processId = String(call.process_id ?? call.id ?? '');
+      if (!processId) {
+        return JSON.stringify({ error: 'get_status: missing "process_id" field' });
+      }
+      const status = defaultProcessManager.getProcessStatus(processId);
+      if (!status) {
+        return JSON.stringify({
+          error: `get_status: proses dengan ID "${processId}" tidak ditemukan.`,
+        });
+      }
+      deps.onLog?.(cyan(`🔵 ProcessStatus(${processId})`));
+      return JSON.stringify(status, null, 2);
+    }
+    case 'stop_process': {
+      const processId = String(call.process_id ?? call.id ?? '');
+      if (!processId) {
+        return JSON.stringify({ error: 'stop_process: missing "process_id" field' });
+      }
+      // CATATAN KEAMANAN (Asimetri Approval Gate):
+      // stop_process TIDAK memerlukan Approval Gate [Y/N] karena menghentikan proses
+      // bersifat non-destruktif terhadap berkas/data pengguna, berbeda dengan start_process
+      // yang berpotensi memiliki efek samping tidak terduga pada sistem.
+      // Asimetri ini disengaja, bukan kelalaian.
+      deps.onLog?.(yellow(`🟡 StopProcess(${processId})`));
+      const timeoutMs = typeof call.timeoutMs === 'number' ? call.timeoutMs : 5000;
+      const result = await defaultProcessManager.stopProcess(processId, timeoutMs);
+      return JSON.stringify(result, null, 2);
     }
     default:
       return JSON.stringify({ error: `unknown tool: ${call.tool}` });

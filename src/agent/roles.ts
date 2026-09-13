@@ -77,7 +77,19 @@ export const TOOL_RULES =
   '```tool\n{"tool": "delete_file", "path": "<file>"}\n```\n' +
   '- To move or rename a file, reply with:\n' +
   '```tool\n{"tool": "move_file", "source": "<source-path>", "target": "<target-path>"}\n```\n' +
-  '- Prefer glob and code_search to discover files and locate code before reading full files; prefer read_file over cat/head/tail; prefer patch_file/edit_file/write_file/delete_file/move_file over shell redirection and rm/mv; use exec for everything else.\n' +
+  '- To run a non-blocking background command (e.g. dev server, build watcher), reply with:\n' +
+  '```tool\n{"tool": "start_process", "command": "<command>", "cwd": "<optional-subdir>"}\n```\n' +
+  '  Spawns a detached process (max 3 concurrent active processes; requires user approval gate).\n' +
+  '- To read recent logs from a background process, reply with:\n' +
+  '```tool\n{"tool": "read_process_logs", "process_id": "<process-id>"}\n```\n' +
+  '  Returns the ring buffer of up to 100 recent lines (stdout/stderr) with automatic credential redaction.\n' +
+  '- To inspect the status of a background process, reply with:\n' +
+  '```tool\n{"tool": "get_status", "process_id": "<process-id>"}\n```\n' +
+  '  Returns deterministic status: "running", "exited", or "stale".\n' +
+  '- To terminate a background process, reply with:\n' +
+  '```tool\n{"tool": "stop_process", "process_id": "<process-id>"}\n```\n' +
+  '  Sends SIGTERM then SIGKILL if needed (non-destructive action, no approval required).\n' +
+  '- Prefer glob and code_search to discover files and locate code before reading full files; prefer read_file over cat/head/tail; prefer patch_file/edit_file/write_file/delete_file/move_file over shell redirection and rm/mv; use start_process for long-running/background services; use exec for everything else.\n' +
   '- After receiving the tool result, either run another tool or answer in plain text.\n' +
   '- Large command output is summarized with [... TRUNCATED ...] markers; work with what remains and re-run a narrower command if needed.\n';
 
@@ -93,7 +105,7 @@ export const BUILT_IN_ROLES: RoleDef[] = [
     name: 'reviewer',
     description: 'Hanya baca + memberi masukan (tidak mengubah file).',
     prompt:
-      'Role: code reviewer. You are READ-ONLY: never call exec/write_file/edit_file/patch_file/delete_file/move_file/remember/save_skill — only read_file, glob, code_search, list_skills, load_skill, web_fetch, and search_sessions are allowed. Give structured feedback: bugs and risks first (with file:line), then improvements, then positives. Suggest concrete fixes as snippets, do not apply them.',
+      'Role: code reviewer. You are READ-ONLY: never call exec/start_process/stop_process/write_file/edit_file/patch_file/delete_file/move_file/remember/save_skill — only read_file, glob, code_search, list_skills, load_skill, web_fetch, search_sessions, read_process_logs, and get_status are allowed. Give structured feedback: bugs and risks first (with file:line), then improvements, then positives. Suggest concrete fixes as snippets, do not apply them.',
   },
   {
     name: 'teacher',
@@ -184,7 +196,7 @@ export interface PromptLayers {
 /** Plan-mode guard as prose — the hard enforcement lives in the CLI code (§4). */
 export function planModeAddendum(): string {
   return (
-    'ACTIVE MODE — PLAN: You may ONLY read and propose. Do not call exec/write_file/edit_file/patch_file/delete_file/move_file/remember/save_skill ' +
+    'ACTIVE MODE — PLAN: You may ONLY read and propose. Do not call exec/start_process/write_file/edit_file/patch_file/delete_file/move_file/remember/save_skill ' +
     '(the CLI blocks them anyway). Output a numbered step plan for user approval; the user runs it after ' +
     'exiting plan mode with /plan off.'
   );

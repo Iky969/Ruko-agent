@@ -6,6 +6,37 @@
 
 ## ✅ Fitur yang Sudah Selesai
 
+### v1.3.0 — Process Management Subsystem (Long-Running Background Process, Credential Redaction, Anti-Zombie Lifecycle Hooks)
+
+- [x] **Subsistem Process Management (`src/agent/processManager.ts`, `src/agent/tools.ts`, `src/agent/roles.ts`, `src/tests/process_manager.test.ts`)**:
+  - **Tool `start_process(command, cwd?)`**:
+    * Menjalankan perintah sebagai detached child process non-blocking via `child_process.spawn()`, mengembalikan ID proses unik (`proc_N`) dan PID sistem.
+    * Wajib melewati Approval Gate `[Y/N]` via hook `confirm` (sama seperti `delete_file` dan `move_file`) karena proses latar belakang berpotensi mengeksekusi aksi destruktif tanpa terlihat langsung oleh pengguna.
+    * Validasi `cwd` wajib berada di dalam batas workspace menggunakan `assertInsideWorkspace()`. Percobaan path traversal ditolak seketika.
+    * Batas maksimal 3 proses aktif bersamaan. Percobaan memulai proses ke-4 ditolak dengan pesan jelas yang mencantumkan seluruh proses yang sedang berjalan dan saran untuk memanggil `stop_process`.
+    * Terdaftar di `PLAN_MODE_BLOCKED` dan otomatis diblokir saat `/plan on` aktif.
+  - **Tool `read_process_logs(process_id)`**:
+    * Membaca ring buffer maksimal 100 baris terbaru dari gabungan stdout dan stderr dengan label sumber (`[stdout]` / `[stderr]`). Baris-baris lama otomatis dibuang (*FIFO eviction*).
+    * Sanitasi redaksi kredensial otomatis (*best-effort*) sebelum teks dikembalikan ke konteks model menggunakan baseline regex:
+      `/(?:api[_-]?key|token|password|secret|authorization)\s*[:=]\s*\S+/gi` → nilai sensitif diganti menjadi `[REDACTED]`.
+    * **Known Limitation**: Pendekatan redaksi kredensial ini adalah *best-effort* pertahanan berlapis (defense-in-depth), bukan jaminan mutlak 100% terhadap token arbitrer (misalnya token tanpa delimiter eksplisit atau format khusus non-standar), serupa dengan batasan TOCTOU pada SSRF guard sebelumnya.
+    * Diizinkan dalam mode plan (`/plan on`) dan peran `reviewer` (bersifat *read-only*).
+  - **Tool `get_status(process_id)`**:
+    * Mengembalikan status deterministik: `'running'` (proses aktif di OS), `'exited'` (proses selesai dengan `exitCode`), atau `'stale'` (proses terdaftar di sesi tapi sudah mati di OS/tidak ditemukan).
+    * Penanganan error eksplisit jika `process_id` tidak dikenal (tidak pernah mengembalikan status kosong atau silent fail).
+  - **Tool `stop_process(process_id)`**:
+    * Menghentikan proses dengan mengirimkan sinyal `SIGTERM` terlebih dahulu. Jika proses belum berhenti dalam timeout 5 detik (dapat dikonfigurasi), sistem mengirimkan sinyal `SIGKILL` paksa.
+    * **Keputusan Asimetri Keamanan Approval Gate (`start_process` vs `stop_process`)**:
+      Berbeda dari `start_process` yang wajib konfirmasi pengguna, `stop_process` TIDAK memerlukan konfirmasi Approval Gate `[Y/N]`. Alasan: Menghentikan proses bersifat non-destruktif terhadap berkas/data pengguna, berbeda dari memulai proses baru yang berpotensi memiliki efek samping tidak terduga. Asimetri ini disengaja, bukan kelalaian.
+  - **Anti-Zombie Lifecycle Cleanup Hooks**:
+    * Mendaftarkan listener pada `process.on('exit')`, `process.on('SIGINT')`, DAN `process.on('SIGTERM')`.
+    * Mengatasi celah di mana terminasi via `kill <pid>` biasa mengirimkan `SIGTERM` (bukan `SIGINT`), sehingga child process tidak tertinggal menjadi zombie di sistem operasi.
+    * Seluruh child process yang masih aktif dijamin dihentikan (`SIGTERM` + `SIGKILL`) sebelum Ruko benar-benar keluar.
+- [x] **Verifikasi & Test Suite**:
+  * 13 unit test komprehensif baru di `src/tests/process_manager.test.ts` untuk `start_process` (approval gate, limit 3 proses, penolakan cwd di luar workspace, blokir plan mode), `read_process_logs` (redaksi kredensial, ring buffer 100 baris), `get_status` (state running/exited/stale, unknown error), `stop_process` (SIGTERM, fallback SIGKILL, tanpa approval gate), dan cleanup hooks.
+  * Total test: **335 passed** (sebelumnya 322 passed), 100% lulus, `npm run typecheck` bersih tanpa error. Ditambah 1 E2E test via `npm run test:e2e` (1 pass, 0 fail).
+  * Versi dinaikkan ke **1.3.0** (`package.json`, `PROGRESS.md`, `README.md`).
+
 ### v1.2.0 — Keamanan Tool Berkas, Guard Anti-Double Execution, Quick Wins (web_fetch/SSRF, list_skills, glob), /context set, Visual TUI, dan Perluasan Approval Gate
 
 - [x] **Poin 1: Keamanan Tool Berkas (`delete_file` & `move_file`)** (`src/agent/tools.ts`, `src/agent/roles.ts`, `src/tests/file_security.test.ts`):
@@ -569,3 +600,9 @@ Browser automation, computer-use, voice/TTS, plugin system, sandbox backend (Doc
 8. **Batasan waktu kerja:** spesifikasi asli membatasi eksekusi ~50 menit; prioritaskan eksekusi cepat dan self-documenting.
 9. **Catatan teknis:** `AgentConfig` ada di `src/types.ts` (default di `DEFAULT_CONFIG`); menambah opsi config = tambah field di interface + loader `src/core/config.ts` + `/config` di `src/agent/commands.ts`.
 10. **Jebakan tooling (sesi v0.4.0):** lapisan secret-redaksi pada pipeline agen menulis `***` literal ke DISK saat `write_file` mengandung pola mirip API key (mis. `apiKey: string` setelah kata key, atau literal `'sk-...'`). Gejala: syntax error TS1110 di file baru. Mitigasi: hindari literal key-like di source; kalau terjebak, tambal via `node -e` di shell (jalur tulis shell tidak ter-mask).
+
+---
+
+## Gemini 3.8 Flash
+- Kontribusi: Subsistem Process Management (`start_process`, `read_process_logs`, `get_status`, `stop_process`) & Anti-Zombie Lifecycle Hooks (v1.3.0)
+- Tanggal: 13 September 2026
