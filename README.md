@@ -14,7 +14,13 @@
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh | bash
 ```
+### Troubleshooting (Termux / Android)
 
+Jika muncul pesan `bash: .../usr/bin/ruko: Permission denied` saat menjalankan perintah `ruko`, berikan izin eksekusi secara manual:
+
+```bash
+chmod +x $PREFIX/bin/ruko
+```
 ---
 
 ## 📑 Daftar Isi
