@@ -1,10 +1,10 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-1.1.1-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-297%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-322%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
@@ -146,9 +146,9 @@ Ruko dirancang dengan pertahanan mendalam (*defense-in-depth*) untuk memastikan 
 ```
 
 1. **Workspace Sandbox (Anti-Path-Traversal)**:
-   Seluruh tool pembacaan dan modifikasi berkas (`read_file`, `write_file`, `edit_file`, `patch_file`, `glob`, `code_search`) divalidasi ketat oleh fungsi `assertInsideWorkspace()`. Percobaan akses ke luar root direktori kerja (seperti `../../etc/passwd` atau `~/.ssh`) diblokir seketika.
+   Seluruh tool pembacaan dan modifikasi berkas (`read_file`, `write_file`, `edit_file`, `patch_file`, `delete_file`, `move_file`, `glob`, `code_search`) divalidasi ketat oleh fungsi `assertInsideWorkspace()`. Percobaan akses ke luar root direktori kerja (seperti `../../etc/passwd` atau `~/.ssh`) diblokir seketika.
 2. **Deterministic Regex Gate (Layer 1)**:
-   Mendeteksi ratusan pola perintah destruktif, rekursif, chain injection (`&&`, `;`, `||`), dan utilitas berbahaya (`find -delete`, `truncate`, `shred`, `wipefs`). Perintah berbahaya kategori `BLOCKED` ditolak mutlak bahkan jika mode persetujuan dinonaktifkan.
+   Mendeteksi ratusan pola perintah destruktif, rekursif, chain injection (`&&`, `;`, `||`), dan utilitas berbahaya (`find -delete`, `truncate`, `shred`, `wipefs`), termasuk seluruh bentuk `rm` (dengan atau tanpa flag). Perintah mutasi berkas dasar pada `exec` (`rm`, `mv`, `truncate`, redirect `>`) yang menargetkan berkas workspace ditolak dan dialihkan ke tool resmi ber-undo. Perintah berbahaya kategori `BLOCKED` ditolak mutlak bahkan jika mode persetujuan dinonaktifkan.
 3. **Guardian LLM Semantic Assessment (Layer 2)**:
    Perintah berlabel `DANGEROUS` dianalisis semantiknya oleh Guardian LLM terisolasi (suhu 0, token terbatas). Jika perintah terbukti aman (misal kalkulasi inline `python3 -c "print(1+1)"`), sistem memberikan auto-allow dengan menampilkan indikator visual `✓ Guardian: aman — <alasan>`.
 4. **Dedicated Audit Trail**:
@@ -161,19 +161,21 @@ Ruko dirancang dengan pertahanan mendalam (*defense-in-depth*) untuk memastikan 
 ## 💡 Fitur Unggulan
 
 ### 1. Eksplorasi Kode Cepat & Efisien
-- **`glob`**: Menemukan berkas berbasis pola pencocokan. Secara otomatis mengabaikan direktori besar (`node_modules`, `.git`, `dist`, `.ruko`, `coverage`) dan berkas biner.
+- **`glob`**: Menemukan berkas berbasis pola pencocokan multi-pattern dan ekspansi kurung kurawal `{a,b}`. Secara otomatis mengabaikan direktori besar (`node_modules`, `.git`, `dist`, `.ruko`, `coverage`) dan berkas biner.
 - **`code_search`**: Mencari teks atau ekspresi reguler (regex) di seluruh berkas proyek, menampilkan baris yang cocok beserta baris konteks di sekitarnya.
+- **`web_fetch`**: Mengambil referensi dokumentasi web publik berbasis teks/HTML/JSON dengan timeout otomatis 10 detik, pembersihan tag HTML, dan pembatasan panjang konten (maks. 5.000 karakter).
 
-### 2. Modifikasi Berkas dengan Diff Visual
+### 2. Modifikasi Berkas dengan Diff Visual & Safety Net
 - **`edit_file` / `write_file`**: Perubahan berkas ditampilkan dengan diff berwarna ala `git diff` (`+` hijau, `-` merah).
 - **`patch_file`**: Operasi *search-and-replace* berbasis teks unik untuk menghemat konsumsi token LLM.
+- **`delete_file` / `move_file`**: Penghapusan dan pemindahan berkas aman dengan konfirmasi persetujuan `[Y/N]` dan pencadangan otomatis ke `.ruko/undo/`.
 - **Undo Journal**: Pembatalan perubahan instan lewat `/undo` tanpa perlu `git stash` atau `git checkout`.
 
 ### 3. Log Summarizer Pintar
 Output terminal yang melebihi batas (default: 1.000 karakter) otomatis dipotong secara proporsional (kepala ~40% dan ekor ~60%) dengan highlight baris galat (*error/warning/exit code*), menjaga konteks percakapan tetap bersih.
 
 ### 4. Context Compression Adaptif
-Ketika panjang percakapan mendekati batas memori, Ruko secara cerdas merangkum percakapan lama menjadi satu ringkasan padat tanpa menghilangkan instruksi penting dan giliran (*turns*) percakapan terakhir.
+Ketika panjang percakapan mendekati batas memori, Ruko secara cerdas merangkum percakapan lama menjadi satu ringkasan padat tanpa menghilangkan instruksi penting dan giliran (*turns*) percakapan terakhir. Batas memori dapat disesuaikan secara dinamis via `/context set <jumlah>`.
 
 ### 5. Multi-Profil Provider
 Simpan beberapa konfigurasi AI di `.ruko/config.json` dan beralih profil dengan cepat:
@@ -192,16 +194,20 @@ Agen menggunakan protokol tool call terstruktur dalam blok kode:
 | Tool | Kategori | Deskripsi & Kegunaan |
 | :--- | :---: | :--- |
 | `exec` | Eksekusi | Menjalankan perintah shell melalui filter *approval gate* dua lapis dan *log summarizer*. |
-| `glob` | Inspeksi | Menemukan daftar berkas berdasarkan pola glob (mengabaikan folder build & biner). |
+| `glob` | Inspeksi | Menemukan daftar berkas berdasarkan pola glob multi-pattern (mengabaikan folder build & biner). |
 | `code_search` | Inspeksi | Pencarian keyword atau regex di seluruh berkas teks dengan baris konteks. |
 | `read_file` | Pembacaan | Membaca isi berkas teks berpaginasi (offset/limit) dan bernomor baris. |
 | `write_file` | Penulisan | Membuat berkas baru di dalam batas workspace. |
 | `edit_file` | Penulisan | Menimpa isi berkas yang sudah ada dengan menampilkan *diff* visual perubahan. |
 | `patch_file` | Penulisan | Mengganti potongan teks unik secara presisi (*search-and-replace* hemat token). |
+| `delete_file` | Manipulasi | Menghapus berkas tunggal secara aman (wajib konfirmasi `[Y/N]` dan snapshot undo otomatis). |
+| `move_file` | Manipulasi | Memindahkan / mengganti nama berkas (wajib konfirmasi `[Y/N]` dan snapshot undo otomatis). |
+| `web_fetch` | Jaringan | Mengambil konten web publik (HTML/JSON/Text) dengan timeout 10 detik dan sanitasi HTML. |
 | `remember` | Memori | Menyimpan fakta proyek/preferensi ke `.ruko/memory.md` lintas sesi. |
 | `search_sessions` | Pencarian | Menemukan kutipan percakapan dari riwayat sesi sebelumnya. |
 | `load_skill` | Skill | Memuat instruksi operasional skill proyek dari `.ruko/skills/`. |
 | `save_skill` | Skill | Menyimpan alur kerja sukses sebagai skill baru yang reusable. |
+| `list_skills` | Skill | Membaca dan menampilkan daftar seluruh nama dan deskripsi skill yang tersimpan. |
 | `delegate` | Delegasi | Menjalankan subagent mandiri dengan context terisolasi. |
 
 ---
@@ -229,7 +235,7 @@ Ketik `/` di terminal untuk memunculkan menu interaktif, atau gunakan perintah b
 | `/profile [alias]` | Beralih profil penyedia LLM (`hemat`, `kuat`, `lokal`). |
 | `/exec <perintah>` | Menjalankan perintah shell langsung dari baris perintah Ruko. |
 | `/history [n]` | Menampilkan *n* pesan riwayat percakapan terakhir. |
-| `/context` | Menampilkan statistik token dan kapasitas memori percakapan. |
+| `/context [set <n>]` | Menampilkan kapasitas memori aktif atau menyetel batas budget karakter baru. |
 | `/memory [clear]` | Menampilkan isi memori persisten atau mereset (`.ruko/memory.md`). |
 | `/usage` | Menampilkan statistik konsumsi karakter dan token sesi. |
 | `/config [set <k> <v> \| setup]` | Menampilkan atau memperbarui konfigurasi sistem. |
@@ -284,7 +290,7 @@ Ruko diuji secara intensif menggunakan test runner bawaan Node.js (`node:test`) 
 # Verifikasi tipe data statis
 npm run typecheck
 
-# Menjalankan 297 unit test anti-regresi
+# Menjalankan 322 unit test anti-regresi
 npm test
 
 # Menjalankan end-to-end (E2E) integration test

@@ -336,3 +336,23 @@ test('adversarial: alternative destructive commands trigger dangerous (H6 gap fi
     assert.equal(detectRisk(cmd, config()).risk, 'dangerous', `Expected DANGEROUS for cmd: ${cmd}`);
   }
 });
+
+test('Point 6: approval gate detects all forms of rm (with or without flags)', () => {
+  for (const cmd of [
+    'rm test1.py',
+    'rm -f test1.py',
+    'rm -v output.log',
+    'sudo rm file.txt',
+    '/bin/rm scratch.py',
+    'rmdir empty_dir',
+    'echo ok && rm test.py',
+  ]) {
+    const verdict = detectRisk(cmd, config());
+    assert.equal(verdict.risk, 'dangerous', `Expected dangerous for: ${cmd}`);
+    assert.match(verdict.reason ?? '', /rm/i);
+  }
+
+  // Ensure false positives are avoided
+  assert.equal(detectRisk('echo rm', config()).risk, 'none');
+  assert.equal(detectRisk('pnpm test', config()).risk, 'none');
+});

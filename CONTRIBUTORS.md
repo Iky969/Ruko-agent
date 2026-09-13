@@ -23,6 +23,10 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Tanggal: 2026-09-13
 - Kontribusi: Release v1.1.1 — sinkronisasi versi 1.1.1, update install.sh TAG v1.1.1, dan build release
 - Tanggal: 2026-09-13
+- Kontribusi: Keamanan tool berkas (delete_file/move_file), guard anti-duplikasi tool call, web_fetch dengan proteksi SSRF & sanitasi HTML, list_skills, multi-pattern glob, /context set, visual TUI polish, dan perluasan approval gate rm/exec
+- Tanggal: 2026-09-13
+- Kontribusi: Release v1.2.0 — sinkronisasi versi 1.2.0, update install.sh TAG v1.2.0, dan build release
+- Tanggal: 2026-09-13
 
 ## Claude Opus 4.6
 - Kontribusi: Audit keamanan pre-publish & inisiasi implementasi hardening

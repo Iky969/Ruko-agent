@@ -53,10 +53,15 @@ export const TOOL_RULES =
   '- To search past conversation histories across saved sessions, reply with:\n' +
   '```tool\n{"tool": "search_sessions", "query": "<keywords>"}\n```\n' +
   '  Returns matching conversation snippets from past sessions.\n' +
+  '- To list available skills, reply with:\n' +
+  '```tool\n{"tool": "list_skills"}\n```\n' +
   '- To load detailed instructions for a specific project skill, reply with:\n' +
   '```tool\n{"tool": "load_skill", "name": "<skill-name>"}\n```\n' +
   '- To save a successful procedure or learned workflow as a reusable skill, reply with:\n' +
   '```tool\n{"tool": "save_skill", "name": "<skill-name>", "description": "<summary>", "instructions": "<markdown instructions>"}\n```\n' +
+  '- To fetch and sanitize content from a web page (HTTP/HTTPS), reply with:\n' +
+  '```tool\n{"tool": "web_fetch", "url": "<https-url>"}\n```\n' +
+  '  Fetches web content (HTML sanitized to clean text, JSON, or plain text; capped at 5k chars). Binds to a 10s timeout.\n' +
   '- To delegate a self-contained sub-task or research query to an isolated subagent, reply with:\n' +
   '```tool\n{"tool": "delegate", "task": "<task description>"}\n```\n' +
   '  Spawns an isolated subagent with its own fresh context and returns the concise result.\n' +
@@ -68,7 +73,11 @@ export const TOOL_RULES =
   '- Only when rewriting most of a file, use:\n' +
   '```tool\n{"tool": "edit_file", "path": "<file>", "content": "<full updated content>"}\n```\n' +
   '  The CLI shows a colored diff of your change to the user.\n' +
-  '- Prefer glob and code_search to discover files and locate code before reading full files; prefer read_file over cat/head/tail; prefer patch_file/edit_file/write_file over shell redirection; use exec for everything else.\n' +
+  '- To delete an existing file, reply with:\n' +
+  '```tool\n{"tool": "delete_file", "path": "<file>"}\n```\n' +
+  '- To move or rename a file, reply with:\n' +
+  '```tool\n{"tool": "move_file", "source": "<source-path>", "target": "<target-path>"}\n```\n' +
+  '- Prefer glob and code_search to discover files and locate code before reading full files; prefer read_file over cat/head/tail; prefer patch_file/edit_file/write_file/delete_file/move_file over shell redirection and rm/mv; use exec for everything else.\n' +
   '- After receiving the tool result, either run another tool or answer in plain text.\n' +
   '- Large command output is summarized with [... TRUNCATED ...] markers; work with what remains and re-run a narrower command if needed.\n';
 
@@ -84,7 +93,7 @@ export const BUILT_IN_ROLES: RoleDef[] = [
     name: 'reviewer',
     description: 'Hanya baca + memberi masukan (tidak mengubah file).',
     prompt:
-      'Role: code reviewer. You are READ-ONLY: never call exec/write_file/edit_file/patch_file/remember/save_skill — only read_file, glob, code_search, load_skill, and search_sessions are allowed. Give structured feedback: bugs and risks first (with file:line), then improvements, then positives. Suggest concrete fixes as snippets, do not apply them.',
+      'Role: code reviewer. You are READ-ONLY: never call exec/write_file/edit_file/patch_file/delete_file/move_file/remember/save_skill — only read_file, glob, code_search, list_skills, load_skill, web_fetch, and search_sessions are allowed. Give structured feedback: bugs and risks first (with file:line), then improvements, then positives. Suggest concrete fixes as snippets, do not apply them.',
   },
   {
     name: 'teacher',
@@ -175,7 +184,7 @@ export interface PromptLayers {
 /** Plan-mode guard as prose — the hard enforcement lives in the CLI code (§4). */
 export function planModeAddendum(): string {
   return (
-    'ACTIVE MODE — PLAN: You may ONLY read and propose. Do not call exec/write_file/edit_file/patch_file/remember/save_skill ' +
+    'ACTIVE MODE — PLAN: You may ONLY read and propose. Do not call exec/write_file/edit_file/patch_file/delete_file/move_file/remember/save_skill ' +
     '(the CLI blocks them anyway). Output a numbered step plan for user approval; the user runs it after ' +
     'exiting plan mode with /plan off.'
   );

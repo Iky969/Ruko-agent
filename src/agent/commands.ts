@@ -361,16 +361,54 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'context',
-    help: 'Statistik konteks (pesan, karakter, budget).',
-    run: (_args, env) => {
-      console.log(
-        renderBox('Context', [
-          `messages: ${env.ctx.size}`,
-          `total chars: ${env.ctx.totalChars} (budget: ${env.config.maxContextChars})`,
-          `log summarizer threshold: ${env.config.maxLogChars} chars`,
-          `exec timeout: ${env.config.execTimeoutMs}ms`,
-        ]),
-      );
+    help: 'Lihat statistik atau ubah budget konteks (/context set <jumlah>).',
+    hint: '[set <jumlah>]',
+    run: (args, env) => {
+      const trimmed = args.trim();
+      if (!trimmed) {
+        console.log(
+          renderBox('Context', [
+            `messages: ${env.ctx.size}`,
+            `total chars: ${env.ctx.totalChars} (budget: ${env.config.maxContextChars})`,
+            `log summarizer threshold: ${env.config.maxLogChars} chars`,
+            `exec timeout: ${env.config.execTimeoutMs}ms`,
+          ]),
+        );
+        return;
+      }
+
+      const match = trimmed.match(/^set(?:\s+(.+))?$/i);
+      if (match) {
+        const valStr = match[1]?.trim();
+        if (!valStr) {
+          console.log('Penggunaan: /context set <jumlah>');
+          return;
+        }
+        let newLimit: number;
+        if (/^\d+[kK]$/.test(valStr)) {
+          newLimit = parseInt(valStr.slice(0, -1), 10) * 1_000;
+        } else {
+          newLimit = Number(valStr.replace(/_/g, ''));
+        }
+
+        if (!Number.isFinite(newLimit) || newLimit <= 0 || !Number.isInteger(newLimit)) {
+          console.log('Error: nilai limit context harus berupa angka positif dalam satuan karakter.');
+          return;
+        }
+
+        if (newLimit < env.ctx.totalChars) {
+          console.log(
+            `Error: nilai baru (${newLimit} karakter) tidak boleh lebih rendah dari jumlah karakter aktif (${env.ctx.totalChars} karakter).`,
+          );
+          return;
+        }
+
+        env.updateConfig({ maxContextChars: newLimit });
+        console.log(green(`✔ Limit context aktif diperbarui menjadi ${newLimit} karakter.`));
+        return;
+      }
+
+      console.log('Penggunaan: /context  |  /context set <jumlah>');
     },
   },
   {

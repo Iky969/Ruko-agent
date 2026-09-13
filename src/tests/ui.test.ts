@@ -8,6 +8,8 @@ import {
   formatK,
   LineGate,
   renderBox,
+  renderApprovalBox,
+  renderDivider,
   truncateVisible,
   RevealFilter,
   stripAnsi,
@@ -259,3 +261,54 @@ test('createSpinner plain mode (pacman: false) renders dot spinner', () => {
     else delete process.env.NO_COLOR;
   }
 });
+
+test('renderDivider generates responsive horizontal line with fallback', () => {
+  const origCols = process.stdout.columns;
+  try {
+    process.stdout.columns = 80;
+    const div80 = renderDivider();
+    assert.equal(stripAnsi(div80).length, 79);
+    assert.ok(div80.includes('─'));
+
+    process.stdout.columns = 50;
+    const div50 = renderDivider();
+    assert.equal(stripAnsi(div50).length, 49);
+
+    // Fallback when columns is undefined
+    delete (process.stdout as any).columns;
+    const divFallback = renderDivider();
+    assert.equal(stripAnsi(divFallback).length, 79);
+  } finally {
+    process.stdout.columns = origCols;
+  }
+});
+
+test('renderApprovalBox renders equal-width rows with warning header and ANSI colors', () => {
+  const origCols = process.stdout.columns;
+  try {
+    process.stdout.columns = 80;
+    const box = renderApprovalBox('rm -rf node_modules', 'menghapus direktori dependensi');
+    const lines = box.split('\n');
+    assert.ok(lines.length >= 6);
+    assert.ok(lines[0].startsWith('┌') && lines[0].endsWith('┐'));
+    assert.ok(lines[1].includes('⚠ KONFIRMASI PERINTAH BERISIKO'));
+    assert.ok(lines[2].startsWith('├') && lines[2].endsWith('┤'));
+    assert.ok(lines[3].includes('Alasan') && lines[3].includes('menghapus direktori dependensi'));
+    assert.ok(lines[4].includes('Perintah') && lines[4].includes('rm -rf node_modules'));
+    assert.ok(lines[lines.length - 1].startsWith('└') && lines[lines.length - 1].endsWith('┘'));
+
+    const widths = new Set(lines.map((l) => visibleLength(l)));
+    assert.equal(widths.size, 1, 'all approval box rows must have identical visible width');
+
+    // Narrow terminal test: adapts width responsively
+    process.stdout.columns = 40;
+    const narrowBox = renderApprovalBox('rm -rf ' + 'x'.repeat(100), 'menghapus file');
+    const narrowLines = narrowBox.split('\n');
+    const narrowWidths = new Set(narrowLines.map((l) => visibleLength(l)));
+    assert.equal(narrowWidths.size, 1, 'all narrow box rows must have identical visible width');
+    assert.ok([...narrowWidths][0] <= 40, 'box width must not exceed terminal columns');
+  } finally {
+    process.stdout.columns = origCols;
+  }
+});
+

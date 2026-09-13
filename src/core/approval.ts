@@ -89,7 +89,7 @@ const BLOCKED_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 
 /** Ask-the-user patterns (dangerous but sometimes legitimate). */
 const DANGEROUS_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/\brm\s+-[a-z]*r[a-z]*f?/i, 'rm -r* (menghapus file secara permanen)'],
+  [/(?:^|[;&|]\s*|\bsudo\s+)(?:(?:\/usr)?\/bin\/)?(rm|rmdir)(?:\s+|$)/i, 'rm (menghapus file secara permanen)'],
   [/\bsudo(\s|$)/i, 'sudo (privilege escalation)'],
   [/\bgit\s+push(\s|$)/i, 'git push (mengubah remote repository)'],
   [/\bgit\s+reset\s+--hard\b/i, 'git reset --hard (menghapus kerja lokal)'],
@@ -120,7 +120,7 @@ const DANGEROUS_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
  * evaluated, so a destructive sub-command cannot hide inside an innocent
  * wrapper to lower its risk level.
  */
-function chainedSegments(command: string): string[] {
+export function chainedSegments(command: string): string[] {
   const parts = command.split(/\s*(?:&&|\|\|?|;)\s*/).map(s => s.trim()).filter(Boolean);
   // Include the full command too — catches patterns that span the join point
   // (e.g. existing DANGEROUS pattern for curl … | sh).

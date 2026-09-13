@@ -6,6 +6,83 @@
 
 ## ✅ Fitur yang Sudah Selesai
 
+### v1.2.0 — Keamanan Tool Berkas, Guard Anti-Double Execution, Quick Wins (web_fetch/SSRF, list_skills, glob), /context set, Visual TUI, dan Perluasan Approval Gate
+
+- [x] **Poin 1: Keamanan Tool Berkas (`delete_file` & `move_file`)** (`src/agent/tools.ts`, `src/agent/roles.ts`, `src/tests/file_security.test.ts`):
+  - Penambahan tool resmi `delete_file` (menghapus berkas tunggal) dan `move_file` (memindahkan / mengubah nama berkas) di `src/agent/tools.ts`.
+  - Penegakan validasi ketat anti-path-traversal via `resolveToolPath()` dan `assertInsideWorkspace()`.
+  - Enforce Approval Gate: kedua tool wajib meminta persetujuan konfirmasi pengguna `[Y/N]` via hook `confirm` sebelum eksekusi berjalan (kecuali mode non-interaktif tanpa persetujuan / YOLO mode). Jika konfirmasi ditolak, eksekusi dibatalkan dengan error aman.
+  - Snapshot cadangan otomatis: sebelum berkas dihapus atau dipindahkan, snapshot keadaan berkas otomatis dicadangkan ke `.ruko/undo/` via `takeSnapshot()` sehingga dapat dipulihkan kapan saja lewat perintah `/undo`.
+  - Proteksi Plan Mode: `delete_file` dan `move_file` didaftarkan ke `PLAN_MODE_BLOCKED` dan otomatis diblokir saat `/plan on` aktif.
+- [x] **Poin 5: Investigasi & Perbaiki Duplikasi Tool Call (Double Execution)** (`src/agent/agent.ts`, `src/tests/agent.test.ts`):
+  - Analisis alur eksekusi tool call berulang: model seperti nemotron dapat mengulang perintah destruktif identik berturut-turut.
+  - Penambahan guard mekanis di level agent (`lastCallSignature` dan `getCallSignature` dengan normalisasi key argumen): jika tool call berurutan memiliki nama tool dan argumen yang persis identik dengan pemanggilan sebelumnya, eksekusi kedua otomatis ditolak/dilewati.
+  - Logging peringatan transparan ke pengguna (`⚠ Perintah identik terdeteksi berulang, dilewati`) dan pengembalian status tool dilewati ke konteks model sehingga model sadar langkah tersebut sudah selesai dan tidak berhalusinasi mengulang perintah yang sama.
+- [x] **Verifikasi & Test Suite**:
+  - 8 unit test baru di `src/tests/file_security.test.ts` untuk `delete_file`, `move_file`, pemulihan `/undo`, penolakan persetujuan, boundary traversal, dan blokir plan mode.
+  - 2 unit test baru di `src/tests/agent.test.ts` untuk pencegahan eksekusi berulang berturut-turut lintas langkah maupun dalam giliran yang sama.
+  - Total test: **305 passed** (sebelumnya 297 passed), 100% lulus, `npm run typecheck` bersih tanpa error.
+
+### Eksekusi feedback.txt — Poin 2: Tooling Tambahan & Quick Wins (`list_skills`, `web_fetch`, Multi-Pattern `glob`)
+
+- [x] **Tool `list_skills`** (`src/agent/tools.ts`, `src/agent/roles.ts`, `src/tests/quickwins.test.ts`):
+  - Membaca direktori `.ruko/skills/` dan mengembalikan daftar nama serta deskripsi seluruh skill proyek secara terstruktur (simetris dengan `load_skill` dan `save_skill`).
+  - Tersedia dan diizinkan dalam plan mode serta peran `reviewer` (read-only inspection).
+- [x] **Tool `web_fetch`, Sanitasi HTML & SSRF Guard** (`src/agent/webtools.ts`, `src/agent/tools.ts`, `src/agent/roles.ts`, `src/tests/quickwins.test.ts`):
+  - Menggunakan API global `fetch` bawaan Node.js tanpa dependensi eksternal (`node:fetch` tidak digunakan).
+  - Timeout 10 detik via `AbortController` terintegrasi dengan signal pembatalan turn (`deps.signal`).
+  - Validasi header `content-type`: memproses `text/html`, `text/plain`, dan `application/json`; jika header tidak ada, otomatis diperlakukan sebagai `text/plain`. Menolak berkas biner/gambar/PDF/audio/video (`application/pdf`, `image/*`, `application/octet-stream`, dll.).
+  - Sanitasi tag HTML cerdas (`sanitizeHtml`): membersihkan tag script, style, noscript, svg, mengonversi elemen blok menjadi baris baru, mendekode entitas HTML, dan memotong konten yang melebihi 5.000 karakter (`MAX_WEB_FETCH_CHARS`) demi efisiensi konsumsi token LLM.
+  - **Audit & Proteksi SSRF Menyeluruh (`checkSsrfSafety`, `isPrivateOrLocalIp`)**:
+    * Validasi URL ketat sebelum HTTP request dikirim: memblokir target hostname/IP loopback (`localhost`, `127.0.0.0/8`, `::1`), rentang IP privat RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local & cloud metadata endpoint (`169.254.0.0/16` termasuk `169.254.169.254` endpoint metadata AWS/GCP/Azure, `fe80::/10`, `fc00::/7`), IPv4-mapped IPv6 (`::ffff:...`), serta protokol non-HTTP/HTTPS (`file://`, `ftp://`, dll.).
+    * Resolusi DNS pre-fetch (`dns.lookup` dari `node:dns/promises`) untuk mendeteksi domain publik yang mengarah ke alamat IP privat/internal (DNS rebinding).
+    * Dokumentasi transparan di komentar kode perihal batasan inheren TOCTOU (*time-of-check to time-of-use*) pada pemanggilan `fetch()` native.
+    * Standarisasi pesan error penolakan: `"web_fetch ditolak: target mengarah ke alamat internal/tidak diizinkan (<alasan>)"`.
+    * Opsi `allowLocalhost` (default `false`) untuk memungkinkan pengujian server mock lokal pada test suite tanpa mengekspos risiko di mode produksi.
+- [x] **Fitur Multi-Pattern & Brace Expansion pada `glob`** (`src/agent/filetools.ts`, `src/tests/quickwins.test.ts`):
+  - Dukungan pencocokan multi-pattern sederhana: pemisahan pola berbasis koma `parseMultiGlobPatterns` (misal: `"*.ts, *.js"`) dan ekspansi kurung kurawal alternatif `{a,b}` (misal: `"*.{ts,js}"` atau `"{src,test}/**/*.ts"`).
+- [x] **Verifikasi & Test Suite**:
+  - 11 unit test di `src/tests/quickwins.test.ts` untuk `list_skills`, sanitasi HTML, validasi tipe konten, fetching server nyata, pembatasan ukuran, timeout, pengujian komprehensif SSRF guard (penolakan target lokal/privat/metadata sebelum request terkirim dan simulasi DNS lookup resolver), serta multi-pattern/braced glob.
+  - Total test: **316 passed** (sebelumnya 305 passed), 100% lulus, `npm run typecheck` bersih tanpa error.
+
+### Eksekusi feedback.txt — Poin 3: Fitur Slash Command `/context set <jumlah>`
+
+- [x] **Slash Command `/context set <jumlah>`** (`src/agent/commands.ts`, `src/tests/commands.test.ts`):
+  - Memperluas command `/context` agar menerima argumen `set <jumlah>` untuk mengubah batas karakter (*char budget*) secara dinamis pada sesi aktif.
+  - Mendukung penulisan angka standar maupun notasi ribuan/k (misal: `50000`, `60k`).
+  - Penegakan validasi ketat: nilai input wajib berupa bilangan bulat positif dan dilarang disetel lebih rendah dari jumlah karakter yang sedang terpakai pada percakapan sesi aktif (`ctx.totalChars`).
+  - Sinkronisasi instan: nilai baru langsung disimpan ke konfigurasi sistem via `env.updateConfig()`, memperbarui limit context aktif, dan langsung terefleksi pada persentase kalkulasi status bar REPL.
+- [x] **Verifikasi & Test Suite**:
+  - 1 unit test komprehensif baru di `src/tests/commands.test.ts` yang menguji inspeksi status, update budget valid, notasi k, penolakan input negatif/non-angka, dan penolakan budget di bawah karakter aktif.
+  - Total test: **317 passed** (sebelumnya 316 passed), 100% lulus, `npm run typecheck` bersih tanpa error.
+
+### Eksekusi feedback.txt — Poin 4: Peningkatan Visual & Responsivitas TUI (`renderDivider`, `renderApprovalBox`, Colored Prompt)
+
+- [x] **Pemisah Responsif Antara Pesan Pengguna dan Respon AI** (`src/core/ui.ts`, `src/core/loop.ts`, `src/tests/ui.test.ts`):
+  - Fungsi `renderDivider()` membuat garis pembatas tipis (`─`) yang responsif terhadap lebar terminal (`process.stdout.columns ?? 80`) dengan batas aman `- 1` kolom untuk mencegah wrap-glitch terminal.
+  - Dipasang pada `runTurn()` di `SystemLoop` agar masukan instruksi pengguna dan respons AI memiliki pemisah visual yang rapi dan tidak menempel rapat.
+- [x] **Panel Peringatan Approval Gate Berwarna & Prompt Berbobot** (`src/core/ui.ts`, `src/core/loop.ts`, `src/tests/ui.test.ts`):
+  - Fungsi `renderApprovalBox()` membungkus konfirmasi aksi berisiko dengan border ANSI kuning (`┌─┐│└─┘`), judul darurat merah tebal (`⚠ KONFIRMASI PERINTAH BERISIKO`), serta perataan lebar kolom otomatis (dinamis antara 36 kolom hingga lebar terminal).
+  - Integrasi hook `makeConfirmer()` di `SystemLoop` memformat prompt konfirmasi dengan penekanan warna kontras: `Jalankan? [Y/N]` dengan 'Y' hijau tebal dan 'N' merah tebal (`bold(green('Y'))` dan `bold(red('N'))`).
+- [x] **Verifikasi & Test Suite**:
+  - 2 unit test baru di `src/tests/ui.test.ts` untuk memverifikasi responsivitas `renderDivider`, toleransi fallback non-TTY, keseragaman lebar baris `renderApprovalBox`, serta adaptasi terhadap layar sempit (40 kolom).
+  - Total test: **319 passed** (sebelumnya 317 passed), 100% lulus, `npm run typecheck` bersih tanpa error.
+
+### Eksekusi feedback.txt — Poin 6: Perluas Cakupan Approval Gate & Proteksi Perintah exec Berisiko
+
+- [x] **Perluasan Deteksi Approval Gate untuk Semua Bentuk `rm`** (`src/core/approval.ts`, `src/tests/approval.test.ts`):
+  - Memperbarui `DANGEROUS_PATTERNS` di `detectRisk()` agar mendeteksi seluruh bentuk `rm` dan `rmdir` (baik dengan flag maupun tanpa flag, seperti `rm test1.py`, `rm -f file.txt`, `/bin/rm file`, `sudo rm file`).
+  - Mencegah celah keamanan di mana `rm` polos tanpa flag sebelumnya lolos sebagai `none` tanpa meminta konfirmasi dari pengguna.
+  - Mengisolasi pencocokan posisi perintah untuk mencegah *false positive* pada perintah aman seperti `echo rm` atau paket seperti `pnpm`.
+- [x] **Guard Jangka Panjang Penolakan Mutasi Berkas Workspace via `exec`** (`src/agent/tools.ts`, `src/tests/file_security.test.ts`):
+  - Fungsi `detectWorkspaceMutationInExec()` menginspeksi setiap segmen perintah pada tool `exec` (`chainedSegments`).
+  - Jika mendeteksi operasi mutasi dasar (`rm`, `mv`, `truncate`) atau redirect pengosongan berkas (`> file`, `: > file`, `cat /dev/null > file`, `echo -n "" > file`) yang menargetkan berkas di dalam batas direktori kerja (*workspace boundary*), eksekusi `exec` otomatis DITOLAK.
+  - Model/pengguna secara eksplisit diarahkan untuk menggunakan tool resmi `delete_file` atau `move_file` yang telah terjamin melewati approval gate dan pencadangan snapshot otomatis ke `.ruko/undo/`.
+- [x] **Verifikasi & Test Suite**:
+  - 1 suite test baru di `src/tests/approval.test.ts` untuk verifikasi klasifikasi `dangerous` pada seluruh bentuk `rm` dan toleransi aman pada `echo rm` dan `pnpm`.
+  - 2 unit test komprehensif baru di `src/tests/file_security.test.ts` untuk menguji deteksi dan penolakan `rm`, `mv`, `truncate`, dan redirect kosong pada `exec`.
+  - Total test: **322 passed** (322 tests, 322 pass, 0 fail), 100% lulus, `npm run typecheck` bersih tanpa error. Ditambah 1 E2E test via `npm run test:e2e` (1 pass, 0 fail).
+
 - [x] Scaffold Node.js + TypeScript (ESM, strict, build ke `dist/`), entry point `src/index.ts`.
 - [x] **System Loop** interaktif (`ruko> `), input diproses serial (promise queue — tidak ada race condition).
 - [x] **Log Summarizer** (`src/core/summarizer.ts`) — potong log > 1000 char: head+tail (rata ke batas baris), marker TRUNCATED, highlights error/warning/exit code.

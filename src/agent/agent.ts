@@ -7,6 +7,7 @@ import {
   LineGate,
   RevealFilter,
   WorkflowTree,
+  yellow,
 } from '../core/ui.js';
 import { AgentConfig, ContextMessage } from '../types.js';
 import { LLMProvider } from './llm.js';
@@ -48,6 +49,8 @@ export class Agent {
   /** Plan mode toggle — enforced at the tool layer, not just in the prompt. */
   planMode = false;
   private callCounts = new Map<string, number>();
+  /** Tracks the most recent executed tool call signature to guard against consecutive duplicates (§5). */
+  private lastCallSignature: string | null = null;
 
   constructor(
     private readonly ctx: Context,
@@ -99,6 +102,7 @@ export class Agent {
   /** Returns the assistant's textual response ('' when nothing to say). */
   async handleInstruction(instruction: string, signal?: AbortSignal): Promise<string> {
     this.callCounts.clear();
+    this.lastCallSignature = null;
     this.lastUsage = null;
     return this.llmProvider.isConfigured
       ? this.runWithLlm(instruction, signal)
@@ -207,6 +211,24 @@ export class Agent {
       tree.startStep(desc);
 
       for (const call of calls) {
+        // §5: Guard mekanis — tolak eksekusi ganda jika tool call berturut-turut persis identik
+        const sig = this.getCallSignature(call);
+        if (this.lastCallSignature === sig) {
+          const warn = 'Perintah identik terdeteksi berulang, dilewati';
+          tree.log(yellow(`⚠ ${warn}`));
+          messages.push({
+            role: 'tool',
+            content: `Result of tool "${call.tool}":\n${JSON.stringify({
+              skipped: true,
+              warning: warn,
+              message: `Tool "${call.tool}" dengan argumen identik baru saja dijalankan pada langkah sebelumnya. Eksekusi kedua dilewati.`,
+            })}`,
+            timestamp: '',
+          });
+          continue;
+        }
+        this.lastCallSignature = sig;
+
         // §5: loop breaker — identical tool call repeated is a stuck model.
         if (this.seenRepeat(call)) {
           tree.finish('Dihentikan karena deteksi loop');
@@ -240,10 +262,20 @@ export class Agent {
     return '[agent] reached max tool iterations without a final answer; stopping.';
   }
 
+  /** Generates a normalized signature for a tool call to detect exact identical duplicates. */
+  private getCallSignature(call: ToolCall): string {
+    const { tool, ...rest } = call;
+    const sortedKeys = Object.keys(rest).sort();
+    const sortedObj: Record<string, unknown> = {};
+    for (const k of sortedKeys) {
+      sortedObj[k] = rest[k];
+    }
+    return `${tool}:${JSON.stringify(sortedObj)}`;
+  }
+
   /** Counts tool+args signatures; true when this call crossed the repeat cap. */
   private seenRepeat(call: ToolCall): boolean {
-    const { tool, ...rest } = call;
-    const sig = `${tool}:${JSON.stringify(rest)}`;
+    const sig = this.getCallSignature(call);
     const n = (this.callCounts.get(sig) ?? 0) + 1;
     this.callCounts.set(sig, n);
     return n > LOOP_REPEAT_LIMIT;

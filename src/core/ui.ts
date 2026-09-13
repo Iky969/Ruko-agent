@@ -172,6 +172,44 @@ export function printBox(title: string, lines: string[]): void {
 }
 
 /**
+ * Renders a thin responsive horizontal divider line across the terminal.
+ * Responsive to terminal width (fallback process.stdout.columns ?? 80).
+ */
+export function renderDivider(char = '─', colorFn: (s: string) => string = dim): string {
+  const cols = process.stdout.columns ?? 80;
+  const width = Math.max(20, cols - 1);
+  return colorFn(char.repeat(width));
+}
+
+/**
+ * Renders a high-visibility ANSI red/yellow bordered box for approval gate confirmations.
+ * Clamped responsively to terminal width (fallback process.stdout.columns ?? 80).
+ */
+export function renderApprovalBox(command: string, reason: string): string {
+  const cols = process.stdout.columns ?? 80;
+  const maxInner = Math.max(16, cols - 4);
+  const headerText = '⚠ KONFIRMASI PERINTAH BERISIKO';
+  const reasonText = `Alasan  : ${reason}`;
+  const cmdText = `Perintah: ${command}`;
+  const needed = Math.max(visibleLength(headerText), visibleLength(reasonText), visibleLength(cmdText)) + 4;
+  const inner = Math.min(Math.max(needed, 36), maxInner);
+
+  const fit = (t: string): string => truncateVisible(t, inner - 2);
+
+  const border = (s: string) => yellow(s);
+  const alertHeader = bold(red(headerText));
+
+  const top = border(`┌${'─'.repeat(inner)}┐`);
+  const headerRow = `${border('│')} ${padVisible(alertHeader, inner - 2)} ${border('│')}`;
+  const sep = border(`├${'─'.repeat(inner)}┤`);
+  const reasonRow = `${border('│')} ${padVisible(fit(`${bold('Alasan  :')} ${yellow(reason)}`), inner - 2)} ${border('│')}`;
+  const cmdRow = `${border('│')} ${padVisible(fit(`${bold('Perintah:')} ${cyan(command)}`), inner - 2)} ${border('│')}`;
+  const bottom = border(`└${'─'.repeat(inner)}┘`);
+
+  return [top, headerRow, sep, reasonRow, cmdRow, bottom].join('\n');
+}
+
+/**
  * In-place redraw helper for ANIMATED multi-row blocks (splash aquarium).
  * `draw()` prints the block on the first call and rewinds + overwrites it on
  * every later call, so frames update in place instead of stacking. `clear()`

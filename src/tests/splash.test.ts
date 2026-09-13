@@ -55,8 +55,8 @@ test('splash box fits a narrow terminal without wrapping (v0.6.1 stacking bug)',
 
 test('splash separates model and provider into two distinct lines without hyphen separator', () => {
   const separatedInfo: SplashInfo = {
-    title: 'Ruko-agent 1.1.1',
-    version: 'version 1.1.1 ',
+    title: 'Ruko-agent 1.2.0',
+    version: 'version 1.2.0 ',
     tagline: '"Masuk Ruko..."',
     model: 'claude-3-5-sonnet-20241022',
     provider: 'anthropic',

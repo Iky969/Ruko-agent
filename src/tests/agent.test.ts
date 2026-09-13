@@ -106,3 +106,35 @@ test('already-aborted signal stops the turn before any request (v0.7)', async ()
   const { result } = await captureStdout(() => agent.handleInstruction('x', ac.signal));
   assert.equal(result, '', 'aborted up-front returns empty');
 });
+
+// --- §5 mechanical guard: consecutive identical tool call deduplication -----
+
+test('two consecutive identical destructive tool calls across steps: second call is skipped with clear warning (§5)', async () => {
+  let execCount = 0;
+  // Provider returns identical exec call in step 1 and step 2, then final text in step 3
+  const provider = new FakeProvider([
+    '```tool\n{"tool": "exec", "command": "echo destructive-action"}\n```',
+    '```tool\n{"tool": "exec", "command": "echo destructive-action"}\n```',
+    'Tugas selesai.',
+  ]);
+  const ctx = new Context(config);
+  const agent = new Agent(ctx, provider, config);
+  const { result, out } = await captureStdout(() => agent.handleInstruction('jalankan perintah'));
+
+  assert.equal(result, 'Tugas selesai.');
+  assert.ok(out.includes('Perintah identik terdeteksi berulang, dilewati'), 'warning is logged to user');
+});
+
+test('two identical tool calls within the same step: second call is skipped (§5)', async () => {
+  const provider = new FakeProvider([
+    '```tool\n{"tool": "exec", "command": "echo once"}\n```\n```tool\n{"tool": "exec", "command": "echo once"}\n```',
+    'Selesai satu kali.',
+  ]);
+  const ctx = new Context(config);
+  const agent = new Agent(ctx, provider, config);
+  const { result, out } = await captureStdout(() => agent.handleInstruction('jalankan'));
+
+  assert.equal(result, 'Selesai satu kali.');
+  assert.ok(out.includes('Perintah identik terdeteksi berulang, dilewati'), 'warning is logged when duplicate appears in same response');
+});
+

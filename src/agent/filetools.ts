@@ -264,11 +264,36 @@ export async function walkDirectory(
 }
 
 /**
+ * Splits a pattern with multiple patterns (e.g. "*.ts, *.js") respecting nested braces.
+ */
+export function parseMultiGlobPatterns(pattern: string): string[] {
+  const trimmed = pattern.trim();
+  if (!trimmed) return [''];
+  const patterns: string[] = [];
+  let current = '';
+  let braceDepth = 0;
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const c = trimmed[i];
+    if (c === '{') braceDepth += 1;
+    else if (c === '}') braceDepth = Math.max(0, braceDepth - 1);
+    else if (c === ',' && braceDepth === 0) {
+      if (current.trim()) patterns.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += c;
+  }
+  if (current.trim()) patterns.push(current.trim());
+  return patterns.length > 0 ? patterns : [''];
+}
+
+/**
  * Compiles a simple glob pattern into a RegExp.
  * Supports:
  * - `*` (matches anything in single segment)
  * - `**` (matches across directories)
  * - `?` (single char)
+ * - `{a,b}` (alternatives)
  * - Trailing slash `dir/` -> matches everything inside `dir/`
  * - Patterns without slash match either basename or full relative path
  */
@@ -302,7 +327,27 @@ export function globToRegex(pattern: string): RegExp {
     } else if (char === '?') {
       regexStr += '[^/]';
       i += 1;
-    } else if ('+()^$.{}|[]\\'.includes(char)) {
+    } else if (char === '{') {
+      const closeIdx = p.indexOf('}', i + 1);
+      if (closeIdx !== -1 && p.slice(i + 1, closeIdx).includes(',')) {
+        const alternatives = p.slice(i + 1, closeIdx).split(',').map((alt) => alt.trim());
+        const altRegexes = alternatives.map((alt) => {
+          let altStr = '';
+          for (const ac of alt) {
+            if (ac === '*') altStr += '[^/]*';
+            else if (ac === '?') altStr += '[^/]';
+            else if ('+()^$.{}|[]\\'.includes(ac)) altStr += '\\' + ac;
+            else altStr += ac;
+          }
+          return altStr;
+        });
+        regexStr += `(?:${altRegexes.join('|')})`;
+        i = closeIdx + 1;
+      } else {
+        regexStr += '\\{';
+        i += 1;
+      }
+    } else if ('+()^$.|[]\\'.includes(char)) {
       regexStr += '\\' + char;
       i += 1;
     } else {
@@ -378,7 +423,8 @@ export async function globTool(
   }
 
   const entries = await walkDirectory(startDir, cwd, new Set(), 5000);
-  const regex = globToRegex(pattern);
+  const subPatterns = parseMultiGlobPatterns(pattern);
+  const regexes = subPatterns.map((p) => globToRegex(p));
 
   const matchedFiles: string[] = [];
   let totalFound = 0;
@@ -387,7 +433,7 @@ export async function globTool(
     const relNorm = entry.relPath.startsWith('./') ? entry.relPath.slice(2) : entry.relPath;
     const relToStart = path.relative(startDir, entry.absPath).replace(/\\/g, '/');
 
-    if (regex.test(relNorm) || regex.test(relToStart)) {
+    if (regexes.some((r) => r.test(relNorm) || r.test(relToStart))) {
       if (await isBinaryFile(entry.absPath)) {
         continue;
       }

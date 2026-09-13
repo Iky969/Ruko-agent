@@ -8,7 +8,21 @@ import { AgentConfig } from '../types.js';
 import { Context } from './context.js';
 import { saveSession } from './session.js';
 import { createLineEditor, LineEditor, MenuItem } from './tui.js';
-import { buildStatusBar, cyan, dim, formatTerminalMarkdown, promptGlyph, renderBox, stripAnsi, yellow } from './ui.js';
+import {
+  bold,
+  buildStatusBar,
+  cyan,
+  dim,
+  formatTerminalMarkdown,
+  green,
+  promptGlyph,
+  red,
+  renderApprovalBox,
+  renderBox,
+  renderDivider,
+  stripAnsi,
+  yellow,
+} from './ui.js';
 import { playSplash, SplashInfo } from './splash.js';
 import { checkMemoryWarning, initMemoryFile } from './memory.js';
 import { appendHistory, defaultHistoryPath, loadHistory } from './history.js';
@@ -216,16 +230,16 @@ export class SystemLoop {
   /** Approval prompt hook (auto-denies when not a TTY). */
   private makeConfirmer(): Confirmer {
     return async (command, reason) => {
-      const heading = `⚠ Perintah berisiko (${reason})`;
-      const detail = `  ${command}`;
+      const box = renderApprovalBox(command, reason);
+      const promptStr = `  Jalankan? [${bold(green('Y'))}/${bold(red('N'))}] `;
       if (this.editor) {
-        for (const line of [heading, detail]) process.stdout.write(`${line}\n`);
-        const answer = await this.editor.readLine({ prompt: `${yellow('  Jalankan? [y/N] ')}` });
+        process.stdout.write(`${box}\n`);
+        const answer = await this.editor.readLine({ prompt: promptStr });
         return answer !== null && /^(y|yes|ya)$/i.test(answer.trim());
       }
       if (!process.stdin.isTTY || !this.rl) return false;
       return new Promise((resolve) => {
-        this.rl?.question(`${heading}\n${detail}\n  Jalankan? [y/N] `, (answer) => {
+        this.rl?.question(`${box}\n${promptStr}`, (answer) => {
           resolve(/^(y|yes|ya)$/i.test(answer.trim()));
         });
       });
@@ -316,6 +330,7 @@ export class SystemLoop {
    */
   private async runTurn(input: string): Promise<void> {
     this.ctx.add('user', input);
+    console.log(renderDivider());
     this.busy = true;
     this.turnAbort = new AbortController();
     this.editor?.startAmbient({

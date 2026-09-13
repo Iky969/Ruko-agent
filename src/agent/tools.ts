@@ -1,14 +1,15 @@
-import { Confirmer, guardedExecute } from '../core/approval.js';
+import { chainedSegments, Confirmer, guardedExecute, isYoloMode } from '../core/approval.js';
 import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
 import { renderFileDiff, splitLines } from '../core/diff.js';
 import { takeSnapshot } from '../core/undo.js';
 import { dim, green, magenta, red, yellow } from '../core/ui.js';
 import { codeSearchTool, globTool, readFileTool } from './filetools.js';
 import { appendMemory } from '../core/memory.js';
-import { readSkill, saveSkill } from '../core/skills.js';
+import { listSkills, readSkill, saveSkill } from '../core/skills.js';
 import { searchSessions } from '../core/session.js';
 import { runSubagent } from './subagent.js';
-import { existsSync } from 'node:fs';
+import { webFetchTool } from './webtools.js';
+import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -124,7 +125,16 @@ export interface ToolDeps {
 }
 
 /** Tools refused while plan mode is active (read_file stays available). */
-const PLAN_MODE_BLOCKED = new Set(['exec', 'write_file', 'edit_file', 'patch_file', 'remember', 'save_skill']);
+const PLAN_MODE_BLOCKED = new Set([
+  'exec',
+  'write_file',
+  'edit_file',
+  'patch_file',
+  'delete_file',
+  'move_file',
+  'remember',
+  'save_skill',
+]);
 
 let customWorkspaceRoot: string | null = null;
 
@@ -198,6 +208,138 @@ async function writeWithDiff(
   );
 }
 
+export interface WorkspaceMutationCheck {
+  blocked: boolean;
+  toolAdvice?: string;
+  message?: string;
+}
+
+/**
+ * Checks if a target path is located inside the workspace boundary.
+ */
+export function isPathInsideWorkspace(targetPath: string, workspaceRoot: string = getWorkspaceRoot()): boolean {
+  try {
+    const cwd = path.resolve(workspaceRoot);
+    const clean = targetPath.replace(/^['"]|['"]$/g, '').trim();
+    if (!clean) return false;
+    const abs = path.isAbsolute(clean) ? path.resolve(clean) : path.resolve(cwd, clean);
+    const cwdPrefix = cwd.endsWith(path.sep) ? cwd : cwd + path.sep;
+    return abs === cwd || abs.startsWith(cwdPrefix);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Helper to extract non-flag arguments from a command string.
+ */
+function extractCommandArgs(argStr: string): string[] {
+  const tokens: string[] = [];
+  const re = /[^\s"']+|"([^"]*)"|'([^']*)'/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(argStr)) !== null) {
+    tokens.push(m[1] ?? m[2] ?? m[0]);
+  }
+  return tokens;
+}
+
+/**
+ * Point 6: Detects if a shell command in exec is attempting basic file mutation operations
+ * ('rm', 'mv', 'truncate', or empty redirect '> file') on files inside the workspace.
+ * When detected, execution is refused and directed to official tools ('delete_file'/'move_file')
+ * which enforce approval gates and automatic undo snapshots (.ruko/undo/).
+ */
+export function detectWorkspaceMutationInExec(
+  command: string,
+  workspaceRoot: string = getWorkspaceRoot(),
+): WorkspaceMutationCheck {
+  const segments = chainedSegments(command);
+
+  for (const seg of segments) {
+    const s = seg.trim().replace(/^sudo\s+/, '');
+
+    // 1. Empty redirect (e.g. `> file`, `: > file`, `true > file`, `cat /dev/null > file`, `cp /dev/null file`, `echo -n "" > file`)
+    const redirectPatterns = [
+      /^(?::|true)?\s*>\s*(\S+)/,
+      /^cat\s+\/dev\/null\s*>\s*(\S+)/,
+      /^cp\s+\/dev\/null\s+(\S+)/,
+      /^(?:echo\s+-[a-z]*n[a-z]*\s*["']{2}|printf\s+["']{2})\s*>\s*(\S+)/,
+    ];
+    for (const pat of redirectPatterns) {
+      const match = s.match(pat);
+      if (match) {
+        const target = match[1];
+        if (isPathInsideWorkspace(target, workspaceRoot)) {
+          return {
+            blocked: true,
+            toolAdvice: 'write_file / edit_file',
+            message: `exec ditolak: Perintah redirect kosong ('>') mendeteksi target di dalam workspace ("${target}"). Gunakan tool resmi 'write_file' atau 'edit_file' yang memiliki pencadangan otomatis (.ruko/undo/).`,
+          };
+        }
+      }
+    }
+
+    // 2. rm / rmdir
+    const rmMatch = s.match(/^(?:(?:\/usr)?\/bin\/)?(?:rm|rmdir)(?:\s+|$)(.*)/i);
+    if (rmMatch) {
+      const args = extractCommandArgs(rmMatch[1] ?? '');
+      const targets = args.filter((arg) => !arg.startsWith('-'));
+      for (const target of targets) {
+        if (isPathInsideWorkspace(target, workspaceRoot)) {
+          return {
+            blocked: true,
+            toolAdvice: 'delete_file',
+            message: `exec ditolak: Perintah dasar 'rm' terdeteksi pada path workspace ("${target}"). Gunakan tool resmi 'delete_file' yang sudah wajib approval gate dan backup otomatis (.ruko/undo/).`,
+          };
+        }
+      }
+    }
+
+    // 3. mv
+    const mvMatch = s.match(/^(?:(?:\/usr)?\/bin\/)?mv(?:\s+|$)(.*)/i);
+    if (mvMatch) {
+      const args = extractCommandArgs(mvMatch[1] ?? '');
+      const targets = args.filter((arg) => !arg.startsWith('-'));
+      for (const target of targets) {
+        if (isPathInsideWorkspace(target, workspaceRoot)) {
+          return {
+            blocked: true,
+            toolAdvice: 'move_file',
+            message: `exec ditolak: Perintah dasar 'mv' terdeteksi pada path workspace ("${target}"). Gunakan tool resmi 'move_file' yang sudah wajib approval gate dan backup otomatis (.ruko/undo/).`,
+          };
+        }
+      }
+    }
+
+    // 4. truncate
+    const truncMatch = s.match(/^(?:(?:\/usr)?\/bin\/)?truncate(?:\s+|$)(.*)/i);
+    if (truncMatch) {
+      const args = extractCommandArgs(truncMatch[1] ?? '');
+      const targets: string[] = [];
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (a === '-s' || a === '--size' || a === '-c' || a === '--no-create') {
+          if (a === '-s' || a === '--size') i++; // skip size argument
+          continue;
+        }
+        if (a.startsWith('-')) continue;
+        targets.push(a);
+      }
+      for (const target of targets) {
+        if (isPathInsideWorkspace(target, workspaceRoot)) {
+          return {
+            blocked: true,
+            toolAdvice: 'write_file / edit_file',
+            message: `exec ditolak: Perintah dasar 'truncate' terdeteksi pada path workspace ("${target}"). Gunakan tool resmi 'write_file' atau 'edit_file' yang memiliki pencadangan otomatis (.ruko/undo/).`,
+          };
+        }
+      }
+    }
+  }
+
+  return { blocked: false };
+}
+
 /** Executes a parsed tool call; the result is char-capped before re-entering context. */
 export async function runToolCall(call: ToolCall, deps: ToolDeps = {}): Promise<string> {
   // §6: plan mode is a CODE guarantee, not a prompt request.
@@ -219,6 +361,15 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       if (!command) {
         return JSON.stringify({ error: 'exec: missing "command" field' });
       }
+
+      const mutationCheck = detectWorkspaceMutationInExec(command, ws);
+      if (mutationCheck.blocked) {
+        deps.onLog?.(yellow(`⚠ Exec ditolak: gunakan tool resmi ${mutationCheck.toolAdvice}`));
+        return JSON.stringify({
+          error: mutationCheck.message,
+        });
+      }
+
       const config = deps.config ?? DEFAULT_CONFIG;
       const short = command.length > 60 ? `${command.slice(0, 57)}…` : command;
       deps.onLog?.(green(`🟢 Bash(${short})`));
@@ -367,6 +518,171 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         });
       }
     }
+    case 'delete_file': {
+      const file = String(call.path ?? call.file ?? '');
+      if (!file) {
+        return JSON.stringify({ error: 'delete_file: missing "path" field' });
+      }
+      let abs: string;
+      let rel: string;
+      try {
+        abs = resolveToolPath(file, ws);
+        rel = path.relative(ws, abs) || file;
+      } catch (err) {
+        return JSON.stringify({
+          error: `delete_file: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      if (!existsSync(abs)) {
+        return JSON.stringify({ error: `delete_file: file tidak ditemukan: ${rel}` });
+      }
+      try {
+        const stat = statSync(abs);
+        if (stat.isDirectory()) {
+          return JSON.stringify({ error: `delete_file: path "${rel}" adalah direktori, bukan file.` });
+        }
+      } catch (err) {
+        return JSON.stringify({
+          error: `delete_file: gagal memeriksa file: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+
+      const config = deps.config ?? DEFAULT_CONFIG;
+      if (config.approvalEnabled && !isYoloMode()) {
+        if (!deps.confirm) {
+          return JSON.stringify({
+            error: `[Persetujuan ditolak: konfirmasi pengguna diperlukan untuk menghapus "${rel}"]`,
+          });
+        }
+        const ok = await deps.confirm(`delete_file ${rel}`, `menghapus file "${rel}" secara permanen`);
+        if (!ok) {
+          return JSON.stringify({
+            error: `[Persetujuan ditolak: menghapus file "${rel}"]`,
+          });
+        }
+      }
+
+      try {
+        takeSnapshot(abs);
+      } catch (err) {
+        return JSON.stringify({
+          error: `delete_file: gagal membuat snapshot undo: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+
+      try {
+        unlinkSync(abs);
+        deps.onLog?.(red(`🔴 Delete(${rel})`));
+        return JSON.stringify(
+          {
+            ok: true,
+            path: rel,
+            message: `File "${rel}" berhasil dihapus (snapshot undo disimpan).`,
+          },
+          null,
+          2,
+        );
+      } catch (err) {
+        return JSON.stringify({
+          error: `delete_file: gagal menghapus file: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+    case 'move_file': {
+      const source = String(call.source ?? call.from ?? call.path ?? '');
+      const target = String(call.target ?? call.to ?? call.destination ?? '');
+      if (!source) {
+        return JSON.stringify({ error: 'move_file: missing "source" field' });
+      }
+      if (!target) {
+        return JSON.stringify({ error: 'move_file: missing "target" field' });
+      }
+      let sourceAbs: string;
+      let sourceRel: string;
+      let targetAbs: string;
+      let targetRel: string;
+      try {
+        sourceAbs = resolveToolPath(source, ws);
+        sourceRel = path.relative(ws, sourceAbs) || source;
+      } catch (err) {
+        return JSON.stringify({
+          error: `move_file: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      try {
+        targetAbs = resolveToolPath(target, ws);
+        targetRel = path.relative(ws, targetAbs) || target;
+      } catch (err) {
+        return JSON.stringify({
+          error: `move_file: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      if (!existsSync(sourceAbs)) {
+        return JSON.stringify({ error: `move_file: file sumber tidak ditemukan: ${sourceRel}` });
+      }
+      try {
+        const stat = statSync(sourceAbs);
+        if (stat.isDirectory()) {
+          return JSON.stringify({ error: `move_file: source "${sourceRel}" adalah direktori, bukan file.` });
+        }
+      } catch (err) {
+        return JSON.stringify({
+          error: `move_file: gagal memeriksa file sumber: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+
+      const config = deps.config ?? DEFAULT_CONFIG;
+      if (config.approvalEnabled && !isYoloMode()) {
+        if (!deps.confirm) {
+          return JSON.stringify({
+            error: `[Persetujuan ditolak: konfirmasi pengguna diperlukan untuk memindahkan "${sourceRel}" ke "${targetRel}"]`,
+          });
+        }
+        const ok = await deps.confirm(
+          `move_file ${sourceRel} -> ${targetRel}`,
+          `memindahkan/mengubah nama file "${sourceRel}" ke "${targetRel}"`,
+        );
+        if (!ok) {
+          return JSON.stringify({
+            error: `[Persetujuan ditolak: memindahkan file "${sourceRel}" ke "${targetRel}"]`,
+          });
+        }
+      }
+
+      try {
+        takeSnapshot(sourceAbs);
+        takeSnapshot(targetAbs);
+      } catch (err) {
+        return JSON.stringify({
+          error: `move_file: gagal membuat snapshot undo: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+
+      try {
+        mkdirSync(path.dirname(targetAbs), { recursive: true });
+        try {
+          renameSync(sourceAbs, targetAbs);
+        } catch {
+          copyFileSync(sourceAbs, targetAbs);
+          unlinkSync(sourceAbs);
+        }
+        deps.onLog?.(green(`🟢 Move(${sourceRel} -> ${targetRel})`));
+        return JSON.stringify(
+          {
+            ok: true,
+            source: sourceRel,
+            target: targetRel,
+            message: `File "${sourceRel}" berhasil dipindahkan ke "${targetRel}" (snapshot undo disimpan).`,
+          },
+          null,
+          2,
+        );
+      } catch (err) {
+        return JSON.stringify({
+          error: `move_file: gagal memindahkan file: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
     case 'remember': {
       const content = typeof call.content === 'string' ? call.content : null;
       if (!content || !content.trim()) {
@@ -428,6 +744,44 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
           message: `Skill "${saved.name}" berhasil disimpan ke .ruko/skills/${saved.name}.md`,
           name: saved.name,
           description: saved.description,
+        },
+        null,
+        2,
+      );
+    }
+    case 'list_skills': {
+      deps.onLog?.(green('🟢 Skills()'));
+      const skills = listSkills(ws);
+      return JSON.stringify(
+        {
+          ok: true,
+          count: skills.length,
+          skills: skills.map((s) => ({
+            name: s.name,
+            description: s.description,
+          })),
+        },
+        null,
+        2,
+      );
+    }
+    case 'web_fetch': {
+      const url = String(call.url ?? call.link ?? '');
+      if (!url) {
+        return JSON.stringify({ error: 'web_fetch: missing "url" field' });
+      }
+      deps.onLog?.(green(`🟢 Fetch(${url.length > 50 ? url.slice(0, 47) + '…' : url})`));
+      const res = await webFetchTool(url, { signal: deps.signal });
+      if (!res.ok) {
+        return JSON.stringify({ ok: false, error: res.text, status: res.status });
+      }
+      return JSON.stringify(
+        {
+          ok: true,
+          status: res.status,
+          contentType: res.contentType,
+          truncated: res.truncated,
+          content: res.text,
         },
         null,
         2,
