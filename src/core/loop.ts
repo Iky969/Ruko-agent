@@ -70,7 +70,8 @@ export class SystemLoop {
       title: `Ruko-agent ${packageVersion()}`,
       version: `version ${packageVersion()} `,
       tagline: '"Masuk Ruko..."',
-      modelLine: `model: ${model} ──── provider: ${provider}`,
+      model,
+      provider,
       hint: 'Ketik / untuk daftar perintah, Ctrl+C untuk keluar.',
     };
     await playSplash(info);

@@ -38,8 +38,12 @@ export interface SplashInfo {
   version: string;
   /** Centre tagline shown while the splash animates. */
   tagline: string;
-  /** Info line, e.g. `model: x ──── provider: y`. */
-  modelLine: string;
+  /** Model name or formatted line, e.g. `claude-3-5-sonnet-20241022`. */
+  model?: string;
+  /** Provider name, e.g. `anthropic`. */
+  provider?: string;
+  /** Legacy single-line format: `model: x ──── provider: y`. */
+  modelLine?: string;
   /** Footer hint line. */
   hint: string;
 }
@@ -63,11 +67,20 @@ export function splashWidth(): number {
  */
 export function renderSplashLines(info: SplashInfo, width = splashWidth()): string[] {
   const inner = Math.max(10, width - 2);
-  const header = truncateVisible(
-    padVisible(` ${info.title}`, inner - info.version.length - 1) + info.version + ' ',
-    inner,
-  );
-  const top = `┌${header}┐`;
+
+  let headerText = '';
+  const titleWithSpace = ` ${info.title}`;
+  const versionWithSpace = `${info.version} `;
+  const needed = visibleLength(titleWithSpace) + visibleLength(versionWithSpace);
+  if (inner >= needed) {
+    headerText = padVisible(titleWithSpace, inner - visibleLength(versionWithSpace)) + versionWithSpace;
+  } else if (inner >= visibleLength(titleWithSpace) + 1) {
+    headerText = padVisible(titleWithSpace, inner);
+  } else {
+    headerText = truncateVisible(titleWithSpace, inner);
+  }
+
+  const top = `┌${headerText}┐`;
   const blank = `│${' '.repeat(inner)}│`;
   const centre = (text: string): string => {
     const t = truncateVisible(text, inner);
@@ -75,16 +88,41 @@ export function renderSplashLines(info: SplashInfo, width = splashWidth()): stri
     return `│${' '.repeat(pad)}${padVisible(t, inner - pad)}│`;
   };
   const bottom = `└${'─'.repeat(inner)}┘`;
-  return [
+
+  let modelStr = info.model ? (info.model.startsWith('model:') ? info.model : `model: ${info.model}`) : '';
+  let providerStr = info.provider ? (info.provider.startsWith('provider:') ? info.provider : `provider: ${info.provider}`) : '';
+
+  if (!modelStr && !providerStr && info.modelLine) {
+    const splitMatch = info.modelLine.match(/^(.*?)\s+[─\-—]{2,}\s+(.*?)$/i);
+    if (splitMatch) {
+      const p1 = splitMatch[1].trim();
+      const p2 = splitMatch[2].trim();
+      modelStr = p1.startsWith('model:') ? p1 : `model: ${p1}`;
+      providerStr = p2.startsWith('provider:') ? p2 : `provider: ${p2}`;
+    } else {
+      modelStr = info.modelLine;
+    }
+  }
+
+  const lines: string[] = [
     top,
     blank,
     centre(info.tagline),
     blank,
-    centre(info.modelLine),
-    blank,
-    centre(info.hint),
-    bottom,
   ];
+
+  if (modelStr) {
+    lines.push(centre(modelStr));
+  }
+  if (providerStr) {
+    lines.push(centre(providerStr));
+  }
+
+  lines.push(blank);
+  lines.push(centre(info.hint));
+  lines.push(bottom);
+
+  return lines;
 }
 
 /** True when the animated splash may run in this environment. */
@@ -179,21 +217,20 @@ function framed(width: number, header: string, bottom: string, scene: string[][]
  * `terminalWidth()-1`, so the rewind math can never break.
  */
 export async function playSplash(info: SplashInfo): Promise<string[]> {
-  const lines = renderSplashLines(info);
+  const width = splashWidth();
+  const textLines = renderSplashLines(info, width);
   if (!splashAnimatable()) {
-    console.log(lines.join('\n'));
-    return lines;
+    console.log(textLines.join('\n'));
+    return textLines;
   }
 
   const SCENE_MS = 1800; // aquarium swims before the text arrives
   const REVEAL_MS = 900; // left-to-right text sweep
   const FRAME_MS = 110; // same cadence as anim.js
 
-  const width = splashWidth();
   const inner = width - 2;
-  const header = padVisible(` ${info.title}`, inner - info.version.length - 1) + info.version + ' ';
-  const bottom = `└${'─'.repeat(inner)}┘`;
-  const textLines = renderSplashLines(info, width);
+  const header = textLines[0].slice(1, -1);
+  const bottom = textLines[textLines.length - 1];
   const textPlain = textLines.map(stripAnsi);
 
   const block = createInPlaceBlock();
@@ -220,5 +257,5 @@ export async function playSplash(info: SplashInfo): Promise<string[]> {
   block.clear();
   process.stdout.write('\u001b[?25h');
   console.log(textLines.join('\n'));
-  return lines;
+  return textLines;
 }

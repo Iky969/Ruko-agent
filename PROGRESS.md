@@ -53,7 +53,7 @@
   - Opsi CLI baru: `--model <name>`, `--provider <name>`, `--base-url <url>`, `--api-key <key>`, `--env-file <path>`.
 - [x] **#2 Provider LLM Lain (Anthropic & Google Gemini)** (`src/agent/llm.ts`):
   - Interface `LLMProvider` diperluas dengan `AnthropicProvider` (mendukung Claude Messages API `/v1/messages`, `x-api-key`, header `anthropic-version: 2023-06-01`, streaming SSE native `content_block_delta`).
-  - Implementasi `GeminiProvider` (mendukung Generative Language API Google Gemini, streaming SSE native `candidates.parts.text`, query parameter key atau header `x-goog-api-key`).
+  - Implementasi `GeminiProvider` (mendukung Generative Language API Google Gemini, streaming SSE native `candidates.parts.text`, header HTTP `x-goog-api-key`, sanitasi baseUrl berkuotasi/fallback aman, dan masking token pada pesan error).
   - Auto-routing dan resolver di `createProvider()` berbasis config `provider`, base URL domain, atau environment variable aktif.
 - [x] **#3 (#11) Persistensi History REPL** (`src/core/history.ts`, `src/core/tui.ts`, `src/core/loop.ts`):
   - Menyimpan riwayat masukan terminal ke `.ruko/history` dengan izin berkas owner-only `0o600`.
@@ -71,7 +71,7 @@
   - Tool `search_sessions` dan `/sessions search <query>` untuk pencarian kata kunci lintas sesi riwayat percakapan.
 - [x] **#7 Unit Test & Status Pengujian**:
   - Unit test baru ditambahkan di `src/tests/` (`dotenv.test.ts`, `providers.test.ts`, `history.test.ts`, `session_search.test.ts`, `skills.test.ts`, `e2e.test.ts`).
-  - Total test: **288 test hijau** (sebelumnya 273), 0 failures, `npm run typecheck` 100% bersih.
+  - Total test: **295 test hijau** (sebelumnya 273), 0 failures, `npm run typecheck` 100% bersih.
   - Versi dinaikkan ke **1.1.0** (`package.json`, `package-lock.json`, `README.md`, `PROGRESS.md`).
 
 ### UI/UX Cosmetic Polish & Workflow Step Indicator (Standard Modern TUI)
@@ -90,13 +90,13 @@
     * Selesai kerja: `└─ ✓ [Selesai] Semua langkah tuntas`
     * Ralat/gagal: `│  ✖ [Gagal] <pesan>`
   - Fungsi `inferStepDescription` menghasilkan deskripsi langkah kontekstual (inspeksi berkas, modifikasi kode, eksekusi shell, atau memori persisten).
-- [x] **#3 Clean Status, Spacing, & Ergonomi TUI** (`src/core/ui.ts`, `src/core/loop.ts`):
+- [x] **#3 Clean Status, Spacing, & Ergonomi TUI** (`src/core/ui.ts`, `src/core/loop.ts`, `src/core/splash.ts`):
   - Pembersihan total animasi spinner Pac-Man via `\r\x1b[2K\r` pada `createSpinner.stop()` agar tidak meninggalkan residu karakter apa pun.
   - Penambahan 1 baris jeda kosong (`\n`) setelah alur respons selesai sebelum prompt input kembali muncul.
+  - Pemisahan tampilan model dan provider menjadi 2 baris terpisah pada banner splash box REPL (`model: <name>` dan `provider: <name>`), mencegah pemotongan teks pada terminal sempit/mobile (>= 40 kolom) dengan border dan padding responsif.
   - Mempertahankan prinsip *zero runtime dependency* (100% native string manipulation & ANSI escape sequences).
 - [x] **#4 Unit Test Komprehensif**:
-  - 6 unit test baru di `src/tests/tui_workflow.test.ts`.
-  - Total test: **273 test hijau** (sebelumnya 267), 0 failures, `npm run typecheck` bersih.
+  - Total test: **297 test hijau**, 0 failures, `npm run typecheck` bersih.
 
 ### Persistent Memory (Eksekusi feedback.txt — Obsidian-style Persistent Notes)
 

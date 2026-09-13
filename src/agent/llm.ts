@@ -89,11 +89,50 @@ export interface ConnectionResult {
 }
 
 /**
+ * Redacts secrets (API keys, query token params, auth headers) from text or URLs.
+ */
+export function sanitizeSensitiveText(text: string, secretKey?: string): string {
+  if (!text) return text;
+  let sanitized = text;
+  if (secretKey && secretKey.trim().length > 0) {
+    const raw = secretKey.trim();
+    sanitized = sanitized.split(raw).join('••••••••');
+    const encoded = encodeURIComponent(raw);
+    if (encoded !== raw) {
+      sanitized = sanitized.split(encoded).join('••••••••');
+    }
+  }
+  return sanitized
+    .replace(/([?&](?:key|api_key|token)=)[^&\s"'`]+/gi, '$1••••••••')
+    .replace(/(x-goog-api-key|x-api-key|authorization)\s*[:=]\s*([^\s"'`]+)/gi, '$1: ••••••••');
+}
+
+/**
+ * Ensures Error instances do not carry unredacted credentials in their message or stack.
+ */
+export function sanitizeError(err: unknown, secretKey?: string): Error {
+  if (err instanceof Error) {
+    const cleanMsg = sanitizeSensitiveText(err.message, secretKey);
+    if (cleanMsg !== err.message) {
+      const sanitizedErr = new Error(cleanMsg);
+      sanitizedErr.name = err.name;
+      if (err.stack) {
+        sanitizedErr.stack = sanitizeSensitiveText(err.stack, secretKey);
+      }
+      return sanitizedErr;
+    }
+    return err;
+  }
+  return new Error(sanitizeSensitiveText(String(err), secretKey));
+}
+
+/**
  * Translates raw transport/HTTP failures into beginner-proof explanations
  * with the fix command inline (§2: "pesan error yang menerjemahkan").
  */
 export function explainProviderError(err: unknown): string {
-  const text = err instanceof Error ? err.message : String(err);
+  const rawText = err instanceof Error ? err.message : String(err);
+  const text = sanitizeSensitiveText(rawText);
   const status = text.match(/\b(400|401|403|404|429|500|502|503)\b/)?.[1];
   switch (status) {
     case '400':
@@ -328,6 +367,23 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   }
 }
 
+export const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
+
+/**
+ * Sanitizes an Anthropic base URL: strips quotes, trims whitespace,
+ * removes trailing slashes, and defaults to https://api.anthropic.com/v1.
+ */
+export function sanitizeAnthropicBaseUrl(url?: string | null): string {
+  if (!url) return DEFAULT_ANTHROPIC_BASE_URL;
+  const unquoted = url.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+  if (!unquoted) return DEFAULT_ANTHROPIC_BASE_URL;
+  const clean = unquoted.replace(/\/+$/, '');
+  if (clean === 'https://api.anthropic.com') {
+    return `${clean}/v1`;
+  }
+  return clean;
+}
+
 /**
  * Anthropic Claude provider (messages API format).
  */
@@ -340,7 +396,8 @@ export class AnthropicProvider implements LLMProvider {
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     this.apiKey = cfg.apiKey || process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY || '';
-    this.baseUrl = (cfg.baseUrl || process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1').replace(/\/+$/, '');
+    const rawBase = cfg.baseUrl || process.env.ANTHROPIC_BASE_URL || '';
+    this.baseUrl = sanitizeAnthropicBaseUrl(rawBase);
     this.currentModel = cfg.model || process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022';
     this.retry = retry;
   }
@@ -359,7 +416,9 @@ export class AnthropicProvider implements LLMProvider {
 
   setCredentials(apiKey: string, baseUrl: string): void {
     if (apiKey.trim()) this.apiKey = apiKey.trim();
-    if (baseUrl.trim()) this.baseUrl = baseUrl.trim().replace(/\/+$/, '');
+    if (baseUrl !== undefined) {
+      this.baseUrl = sanitizeAnthropicBaseUrl(baseUrl);
+    }
   }
 
   private authHeaders(): Record<string, string> {
@@ -368,6 +427,13 @@ export class AnthropicProvider implements LLMProvider {
       'x-api-key': this.apiKey,
       'anthropic-version': '2023-06-01',
     };
+  }
+
+  private buildEndpointUrl(endpoint = '/messages'): string {
+    const cleanBase = sanitizeAnthropicBaseUrl(this.baseUrl);
+    if (cleanBase.endsWith('/messages')) return cleanBase;
+    const cleanEndpoint = endpoint.replace(/^\/+/, '');
+    return `${cleanBase}/${cleanEndpoint}`;
   }
 
   private async requestWithRetry(url: string, init: RequestInit): Promise<Response> {
@@ -391,7 +457,8 @@ export class AnthropicProvider implements LLMProvider {
       return { ok: false, message: 'Anthropic API key belum diatur — set ANTHROPIC_API_KEY atau jalankan /login.' };
     }
     try {
-      const response = await fetch(`${this.baseUrl}/messages`, {
+      const url = this.buildEndpointUrl('/messages');
+      const response = await fetch(url, {
         method: 'POST',
         headers: this.authHeaders(),
         body: JSON.stringify({
@@ -403,11 +470,12 @@ export class AnthropicProvider implements LLMProvider {
       });
       if (!response.ok) {
         const body = await response.text();
-        throw new Error(`Anthropic API error ${response.status}: ${body.slice(0, 200)}`);
+        throw new Error(`Anthropic API error ${response.status}: ${sanitizeSensitiveText(body.slice(0, 200), this.apiKey)}`);
       }
       return { ok: true, message: this.currentModel };
     } catch (err) {
-      return { ok: false, message: explainProviderError(err) };
+      const sanitized = sanitizeError(err, this.apiKey);
+      return { ok: false, message: explainProviderError(sanitized) };
     }
   }
 
@@ -455,24 +523,35 @@ export class AnthropicProvider implements LLMProvider {
       payload.system = systemParts.join('\n\n');
     }
 
-    const response = await this.requestWithRetry(`${this.baseUrl}/messages`, {
-      method: 'POST',
-      headers: this.authHeaders(),
-      body: JSON.stringify(payload),
-      signal: options?.signal,
-    });
+    const url = this.buildEndpointUrl('/messages');
+
+    let response: Response;
+    try {
+      response = await this.requestWithRetry(url, {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify(payload),
+        signal: options?.signal,
+      });
+    } catch (err) {
+      throw sanitizeError(err, this.apiKey);
+    }
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`Anthropic API error ${response.status}: ${body.slice(0, 500)}`);
+      throw new Error(`Anthropic API error ${response.status}: ${sanitizeSensitiveText(body.slice(0, 500), this.apiKey)}`);
     }
 
     const contentType = response.headers.get('content-type') ?? '';
     if (!contentType.includes('text/event-stream') || !response.body) {
-      const data = (await response.json()) as { content?: Array<{ type?: string; text?: string }> };
-      const text = data.content?.map((c) => c.text ?? '').join('') ?? '';
-      if (text) options?.onToken?.(text);
-      return text;
+      try {
+        const data = (await response.json()) as { content?: Array<{ type?: string; text?: string }> };
+        const text = data.content?.map((c) => c.text ?? '').join('') ?? '';
+        if (text) options?.onToken?.(text);
+        return text;
+      } catch (err) {
+        throw sanitizeError(err, this.apiKey);
+      }
     }
 
     let full = '';
@@ -482,32 +561,61 @@ export class AnthropicProvider implements LLMProvider {
       for (const line of event.split(/\r?\n/)) {
         if (!line.startsWith('data:')) continue;
         const payloadStr = line.slice(5).trim();
-        if (!payloadStr) continue;
+        if (!payloadStr || payloadStr === '[DONE]') continue;
         try {
           const parsed = JSON.parse(payloadStr) as {
             type?: string;
+            error?: { type?: string; message?: string };
             delta?: { type?: string; text?: string };
+            content_block?: { type?: string; text?: string };
           };
+          if (parsed.type === 'error' && parsed.error?.message) {
+            throw new Error(`Anthropic stream error: ${parsed.error.message}`);
+          }
           if (parsed.delta?.text) {
             full += parsed.delta.text;
             options?.onToken?.(parsed.delta.text);
+          } else if (parsed.type === 'content_block_start' && parsed.content_block?.text) {
+            full += parsed.content_block.text;
+            options?.onToken?.(parsed.content_block.text);
           }
-        } catch {
-          // ignore malformed frame
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('Anthropic stream error:')) {
+            throw err;
+          }
+          // ignore malformed frame or ping
         }
       }
     };
 
-    for await (const raw of response.body as AsyncIterable<Uint8Array>) {
-      pending += decoder.decode(raw, { stream: true });
-      const events = pending.split(/\r?\n\r?\n/);
-      pending = events.pop() ?? '';
-      for (const event of events) consumeEvent(event);
+    try {
+      for await (const raw of response.body as AsyncIterable<Uint8Array>) {
+        pending += decoder.decode(raw, { stream: true });
+        const events = pending.split(/\r?\n\r?\n/);
+        pending = events.pop() ?? '';
+        for (const event of events) consumeEvent(event);
+      }
+      pending += decoder.decode();
+      if (pending.trim()) consumeEvent(pending);
+    } catch (err) {
+      throw sanitizeError(err, this.apiKey);
     }
-    pending += decoder.decode();
-    if (pending.trim()) consumeEvent(pending);
+
     return full;
   }
+}
+
+export const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+
+/**
+ * Sanitizes a Gemini base URL: strips surrounding quotes, trims whitespace,
+ * removes trailing slashes, and falls back to Google Generative Language API endpoint.
+ */
+export function sanitizeGeminiBaseUrl(url?: string | null): string {
+  if (!url) return DEFAULT_GEMINI_BASE_URL;
+  const unquoted = url.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+  if (!unquoted) return DEFAULT_GEMINI_BASE_URL;
+  return unquoted.replace(/\/+$/, '');
 }
 
 /**
@@ -522,7 +630,8 @@ export class GeminiProvider implements LLMProvider {
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     this.apiKey = cfg.apiKey || process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY || '';
-    this.baseUrl = (cfg.baseUrl || process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '');
+    const rawBase = cfg.baseUrl || process.env.GEMINI_BASE_URL || '';
+    this.baseUrl = sanitizeGeminiBaseUrl(rawBase);
     this.currentModel = cfg.model || process.env.GEMINI_MODEL || 'gemini-1.5-flash';
     this.retry = retry;
   }
@@ -541,7 +650,9 @@ export class GeminiProvider implements LLMProvider {
 
   setCredentials(apiKey: string, baseUrl: string): void {
     if (apiKey.trim()) this.apiKey = apiKey.trim();
-    if (baseUrl.trim()) this.baseUrl = baseUrl.trim().replace(/\/+$/, '');
+    if (baseUrl !== undefined) {
+      this.baseUrl = sanitizeGeminiBaseUrl(baseUrl);
+    }
   }
 
   private authHeaders(): Record<string, string> {
@@ -549,6 +660,17 @@ export class GeminiProvider implements LLMProvider {
       'Content-Type': 'application/json',
       'x-goog-api-key': this.apiKey,
     };
+  }
+
+  private buildEndpointUrl(endpoint: string, queryParams?: Record<string, string>): string {
+    const cleanBase = sanitizeGeminiBaseUrl(this.baseUrl);
+    const cleanEndpoint = endpoint.replace(/^\/+/, '');
+    const fullUrl = `${cleanBase}/${cleanEndpoint}`;
+    if (!queryParams || Object.keys(queryParams).length === 0) {
+      return fullUrl;
+    }
+    const searchParams = new URLSearchParams(queryParams);
+    return `${fullUrl}?${searchParams.toString()}`;
   }
 
   private async requestWithRetry(url: string, init: RequestInit): Promise<Response> {
@@ -572,7 +694,7 @@ export class GeminiProvider implements LLMProvider {
       return { ok: false, message: 'Gemini API key belum diatur — set GEMINI_API_KEY atau jalankan /login.' };
     }
     try {
-      const url = `${this.baseUrl}/models/${this.currentModel}:generateContent?key=${encodeURIComponent(this.apiKey)}`;
+      const url = this.buildEndpointUrl(`/models/${this.currentModel}:generateContent`);
       const response = await fetch(url, {
         method: 'POST',
         headers: this.authHeaders(),
@@ -584,11 +706,12 @@ export class GeminiProvider implements LLMProvider {
       });
       if (!response.ok) {
         const body = await response.text();
-        throw new Error(`Gemini API error ${response.status}: ${body.slice(0, 200)}`);
+        throw new Error(`Gemini API error ${response.status}: ${sanitizeSensitiveText(body.slice(0, 200), this.apiKey)}`);
       }
       return { ok: true, message: this.currentModel };
     } catch (err) {
-      return { ok: false, message: explainProviderError(err) };
+      const sanitized = sanitizeError(err, this.apiKey);
+      return { ok: false, message: explainProviderError(sanitized) };
     }
   }
 
@@ -639,18 +762,23 @@ export class GeminiProvider implements LLMProvider {
     }
 
     const modelName = options?.model ?? this.currentModel;
-    const url = `${this.baseUrl}/models/${modelName}:streamGenerateContent?key=${encodeURIComponent(this.apiKey)}&alt=sse`;
+    const url = this.buildEndpointUrl(`/models/${modelName}:streamGenerateContent`, { alt: 'sse' });
 
-    const response = await this.requestWithRetry(url, {
-      method: 'POST',
-      headers: this.authHeaders(),
-      body: JSON.stringify(payload),
-      signal: options?.signal,
-    });
+    let response: Response;
+    try {
+      response = await this.requestWithRetry(url, {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify(payload),
+        signal: options?.signal,
+      });
+    } catch (err) {
+      throw sanitizeError(err, this.apiKey);
+    }
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`Gemini API error ${response.status}: ${body.slice(0, 500)}`);
+      throw new Error(`Gemini API error ${response.status}: ${sanitizeSensitiveText(body.slice(0, 500), this.apiKey)}`);
     }
 
     let full = '';
@@ -676,7 +804,24 @@ export class GeminiProvider implements LLMProvider {
       }
     };
 
-    if (response.body) {
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!contentType.includes('text/event-stream') || !response.body) {
+      try {
+        const data = (await response.json()) as {
+          candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+        };
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+        if (text) {
+          full = text;
+          options?.onToken?.(text);
+        }
+        return full;
+      } catch (err) {
+        throw sanitizeError(err, this.apiKey);
+      }
+    }
+
+    try {
       for await (const raw of response.body as AsyncIterable<Uint8Array>) {
         pending += decoder.decode(raw, { stream: true });
         const events = pending.split(/\r?\n\r?\n/);
@@ -685,15 +830,8 @@ export class GeminiProvider implements LLMProvider {
       }
       pending += decoder.decode();
       if (pending.trim()) consumeEvent(pending);
-    } else {
-      const data = (await response.json()) as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-      };
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-      if (text) {
-        full = text;
-        options?.onToken?.(text);
-      }
+    } catch (err) {
+      throw sanitizeError(err, this.apiKey);
     }
 
     return full;
@@ -706,11 +844,12 @@ export function createProvider(
   retry: RetryOptions = {},
 ): LLMProvider {
   const provider = (config.provider || '').toLowerCase();
-  const baseUrl = (config.baseUrl || '').toLowerCase();
-  if (provider === 'anthropic' || baseUrl.includes('anthropic.com')) {
+  const rawBase = (config.baseUrl || '').toLowerCase().replace(/^["'`]+|["'`]+$/g, '').trim();
+  const model = (config.model || '').toLowerCase();
+  if (provider === 'anthropic' || rawBase.includes('anthropic.com') || model.startsWith('claude-')) {
     return new AnthropicProvider(config, retry);
   }
-  if (provider === 'gemini' || baseUrl.includes('googleapis.com')) {
+  if (provider === 'gemini' || rawBase.includes('googleapis.com') || (!rawBase && model.startsWith('gemini-'))) {
     return new GeminiProvider(config, retry);
   }
   return new OpenAiCompatibleProvider(config, retry);

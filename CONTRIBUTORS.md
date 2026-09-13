@@ -17,6 +17,10 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Tanggal: 2026-09-13
 - Kontribusi: Release v1.1.0 — update installer script TAG, full repository version synchronization, dan test suite verification
 - Tanggal: 2026-09-13
+- Kontribusi: Security fix kredensial & URL GeminiProvider (header auth x-goog-api-key, baseUrl quotes sanitization, dan error masking)
+- Tanggal: 2026-09-13
+- Kontribusi: Pemisahan tampilan model dan provider 2 baris pada banner splash REPL & optimasi layar sempit (>= 40 kolom)
+- Tanggal: 2026-09-13
 
 ## Claude Opus 4.6
 - Kontribusi: Audit keamanan pre-publish & inisiasi implementasi hardening
