@@ -42,3 +42,16 @@ npm install -g .
 echo ""
 echo "Instalasi selesai!"
 echo "Masuk ke direktori proyek Anda lalu ketik: ruko"
+
+# Pastikan dist index dan biner global diberi izin eksekusi
+chmod +x dist/index.js 2>/dev/null || true
+
+# Pasang secara global
+npm install -g .
+
+# Amankan izin biner global di Termux maupun Linux biasa
+if [ -n "$PREFIX" ] && [ -f "$PREFIX/bin/ruko" ]; then
+  chmod +x "$PREFIX/bin/ruko"
+elif [ -f "/usr/local/bin/ruko" ]; then
+  chmod +x "/usr/local/bin/ruko"
+fi
