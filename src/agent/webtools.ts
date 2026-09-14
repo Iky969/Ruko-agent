@@ -1,29 +1,56 @@
 import { isIP } from 'node:net';
 import { lookup } from 'node:dns/promises';
+import http from 'node:http';
+import https from 'node:https';
 
 /**
  * Web fetch and HTML sanitization tool for Ruko Agent.
  *
  * Requirements:
- *  - Zero external dependencies: uses built-in global fetch without importing node:fetch.
+ *  - Zero external dependencies: uses built-in node:http and node:https with Native IP Pinning.
  *  - 10-second timeout via AbortController.
  *  - Validates content-type: processes text/html, text/plain, or application/json.
  *    If content-type is missing, treats as text/plain.
  *    Rejects binary/image/pdf files.
- *  - SSRF protection: blocks loopback, private IPv4/IPv6, cloud metadata (169.254.169.254),
- *    non-http/https protocols, and performs DNS resolution validation.
+ *  - SSRF protection & Native IP Pinning: blocks loopback, private IPv4/IPv6, cloud metadata (169.254.169.254),
+ *    non-http/https protocols, and pins TCP socket to the verified IP at EVERY hop (eliminates DNS rebinding).
  *  - Sanitizes HTML tags to clean readable text.
  *  - Caps responses at 5,000 characters for token efficiency.
  */
 
 export const MAX_WEB_FETCH_CHARS = 5_000;
 export const DEFAULT_FETCH_TIMEOUT_MS = 10_000;
+export const MAX_FETCH_REDIRECTS = 5;
+
+export interface PinnedRequestOptions {
+  pinnedIp: string;
+  ipFamily: 4 | 6;
+  timeoutMs: number;
+  signal?: AbortSignal;
+  headers: Record<string, string>;
+}
+
+export interface PinnedResponse {
+  status: number;
+  statusText?: string;
+  headers: Record<string, string | string[] | undefined>;
+  text: string;
+}
+
+export type TransportFn = (
+  url: URL,
+  options: PinnedRequestOptions,
+) => Promise<PinnedResponse>;
 
 export interface WebFetchOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Internal test-only override to permit loopback in test harnesses. Default: false. */
   allowLocalhost?: boolean;
+  /** Custom DNS lookup function (for testing). */
+  lookupFn?: typeof lookup;
+  /** Custom transport request function (for testing). Default: pinnedHttpFetch. */
+  transportFn?: TransportFn;
 }
 
 export interface WebFetchResult {
@@ -246,10 +273,22 @@ export interface SsrfCheckOptions {
  * In scenarios with TTL=0 and adversarial multi-homed DNS servers, full defense requires
  * a custom network dispatcher or outbound proxy that pins the socket IP.
  */
+export interface SsrfCheckResult {
+  safe: boolean;
+  reason?: string;
+  pinnedIp?: string;
+  ipFamily?: 4 | 6;
+}
+
+/**
+ * Validates a parsed URL against SSRF vulnerabilities and resolves its safe pinned IP.
+ * Checks protocol, internal hostnames, private/loopback/link-local IP addresses,
+ * and performs DNS lookup with active double-check resolution.
+ */
 export async function checkSsrfSafety(
   parsed: URL,
   opts: SsrfCheckOptions = {},
-): Promise<{ safe: boolean; reason?: string }> {
+): Promise<SsrfCheckResult> {
   // 1. Protocol check: strictly http: and https: only
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     return {
@@ -273,7 +312,12 @@ export async function checkSsrfSafety(
     cleanHost === '::';
 
   if (opts.allowLocalhost && isLoopbackHost) {
-    return { safe: true };
+    const isV6 = cleanHost === '::1' || cleanHost === '::';
+    return {
+      safe: true,
+      pinnedIp: isV6 ? '::1' : '127.0.0.1',
+      ipFamily: isV6 ? 6 : 4,
+    };
   }
 
   // 2. Known internal hostnames and TLDs
@@ -300,7 +344,7 @@ export async function checkSsrfSafety(
         reason: `target mengarah ke alamat IP lokal/privat ("${cleanHost}")`,
       };
     }
-    return { safe: true };
+    return { safe: true, pinnedIp: cleanHost, ipFamily: ipVersion as 4 | 6 };
   }
 
   // 4. DNS resolution check (catches domains resolving to internal IPs)
@@ -324,14 +368,143 @@ export async function checkSsrfSafety(
         };
       }
     }
+
+    // Active DNS rebinding check: consecutive query to catch TTL=0 flapping or alternating records
+    try {
+      const secondCheck = await lookupFn(cleanHost, { all: true });
+      if (secondCheck && Array.isArray(secondCheck)) {
+        for (const addr of secondCheck) {
+          if (opts.allowLocalhost && (addr.address === '127.0.0.1' || addr.address === '::1')) {
+            continue;
+          }
+          if (isPrivateOrLocalIp(addr.address)) {
+            return {
+              safe: false,
+              reason: `resolusi DNS host "${cleanHost}" terdeteksi aktif rebinding ke IP internal/privat (${addr.address})`,
+            };
+          }
+        }
+      }
+    } catch {
+      // abaikan error lookup kedua jika lookup primer sukses
+    }
+
+    const primary = addresses[0];
+    return {
+      safe: true,
+      pinnedIp: primary.address,
+      ipFamily: primary.family === 6 ? 6 : 4,
+    };
   } catch (err) {
     return {
       safe: false,
       reason: `resolusi DNS gagal untuk "${cleanHost}": ${err instanceof Error ? err.message : String(err)}`,
     };
   }
+}
 
-  return { safe: true };
+/**
+ * Executes an HTTP/HTTPS GET request pinned to a pre-validated IP address via custom socket lookup.
+ * Guaranteed zero secondary DNS query by the runtime/OS, completely eliminating DNS rebinding TOCTOU.
+ */
+export function pinnedHttpFetch(
+  targetUrl: URL,
+  options: PinnedRequestOptions,
+): Promise<PinnedResponse> {
+  return new Promise((resolve, reject) => {
+    const isHttps = targetUrl.protocol === 'https:';
+    const client = isHttps ? https : http;
+    const defaultPort = isHttps ? 443 : 80;
+    const port = targetUrl.port ? parseInt(targetUrl.port, 10) : defaultPort;
+
+    const req = client.request({
+      protocol: targetUrl.protocol,
+      hostname: targetUrl.hostname,
+      port,
+      path: targetUrl.pathname + targetUrl.search,
+      method: 'GET',
+      headers: {
+        Host: targetUrl.host,
+        ...options.headers,
+      },
+      // Native IP Pinning: connect socket directly to pre-verified safe IP without DNS query
+      lookup: (_hostname, lookupOpts, cb) => {
+        const callback = typeof lookupOpts === 'function' ? lookupOpts : cb;
+        const opts = typeof lookupOpts === 'object' && lookupOpts !== null ? lookupOpts : {};
+        if (opts.all) {
+          callback(null, [{ address: options.pinnedIp, family: options.ipFamily }]);
+        } else {
+          callback(null, options.pinnedIp, options.ipFamily);
+        }
+      },
+    });
+
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    if (options.timeoutMs > 0) {
+      timeoutTimer = setTimeout(() => {
+        req.destroy(new Error(`web_fetch timeout (${options.timeoutMs / 1000} detik terlampaui).`));
+      }, options.timeoutMs);
+    }
+
+    const onAbort = () => {
+      req.destroy(new Error('web_fetch dibatalkan (turn interrupted).'));
+    };
+    if (options.signal) {
+      if (options.signal.aborted) {
+        onAbort();
+        return;
+      }
+      options.signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    let finished = false;
+    const cleanup = () => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (options.signal) options.signal.removeEventListener('abort', onAbort);
+    };
+
+    req.on('error', (err) => {
+      cleanup();
+      if (!finished) {
+        finished = true;
+        reject(err);
+      }
+    });
+
+    req.on('response', (res) => {
+      const chunks: Buffer[] = [];
+      let totalBytes = 0;
+      const maxStreamBytes = MAX_WEB_FETCH_CHARS * 8;
+
+      res.on('data', (chunk: Buffer) => {
+        if (totalBytes < maxStreamBytes) {
+          chunks.push(chunk);
+          totalBytes += chunk.length;
+        } else {
+          res.destroy();
+        }
+      });
+
+      const onEnd = () => {
+        cleanup();
+        if (!finished) {
+          finished = true;
+          const body = Buffer.concat(chunks).toString('utf8');
+          resolve({
+            status: res.statusCode ?? 200,
+            statusText: res.statusMessage,
+            headers: res.headers,
+            text: body,
+          });
+        }
+      };
+
+      res.on('end', onEnd);
+      res.on('close', onEnd);
+    });
+
+    req.end();
+  });
 }
 
 export async function webFetchTool(
@@ -350,15 +523,6 @@ export async function webFetchTool(
     return { ok: false, text: `web_fetch: URL tidak valid "${rawUrl}"` };
   }
 
-  // SSRF guard: validate protocol, private/loopback/link-local IP, cloud metadata, and DNS
-  const ssrf = await checkSsrfSafety(parsed, { allowLocalhost: opts.allowLocalhost });
-  if (!ssrf.safe) {
-    return {
-      ok: false,
-      text: `web_fetch ditolak: target mengarah ke alamat internal/tidak diizinkan (${ssrf.reason}).`,
-    };
-  }
-
   const timeoutMs = opts.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -366,16 +530,98 @@ export async function webFetchTool(
   const onParentAbort = () => controller.abort();
   opts.signal?.addEventListener('abort', onParentAbort);
 
-  try {
-    const res = await fetch(parsed.href, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Ruko-Agent/1.1 (zero-dependency CLI coding agent)',
-        Accept: 'text/html, text/plain, application/json;q=0.9, */*;q=0.1',
-      },
-    });
+  const transport = opts.transportFn ?? pinnedHttpFetch;
 
-    const ctHeader = res.headers.get('content-type');
+  try {
+    let currentUrl = parsed;
+    let redirectCount = 0;
+    const visitedUrls = new Set<string>([currentUrl.href]);
+    let res: PinnedResponse;
+
+    while (true) {
+      // 1. SSRF Guard & IP Pinning on EVERY hop (initial request and all redirect hops)
+      const ssrf = await checkSsrfSafety(currentUrl, {
+        allowLocalhost: opts.allowLocalhost,
+        lookupFn: opts.lookupFn,
+      });
+      if (!ssrf.safe) {
+        if (redirectCount > 0) {
+          return {
+            ok: false,
+            status: 302,
+            text: `web_fetch ditolak: redirect mengarah ke alamat internal/tidak diizinkan (${ssrf.reason}).`,
+          };
+        }
+        return {
+          ok: false,
+          text: `web_fetch ditolak: target mengarah ke alamat internal/tidak diizinkan (${ssrf.reason}).`,
+        };
+      }
+
+      // 2. Transport execution pinned to the verified safe IP
+      res = await transport(currentUrl, {
+        pinnedIp: ssrf.pinnedIp!,
+        ipFamily: ssrf.ipFamily ?? 4,
+        timeoutMs,
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Ruko-Agent/1.7 (zero-dependency CLI coding agent)',
+          Accept: 'text/html, text/plain, application/json;q=0.9, */*;q=0.1',
+        },
+      });
+
+      // 3. Handle HTTP redirects (301, 302, 303, 307, 308)
+      if ([301, 302, 303, 307, 308].includes(res.status)) {
+        const rawLoc = res.headers['location'];
+        const locationHeader = Array.isArray(rawLoc) ? rawLoc[0] : rawLoc;
+        if (!locationHeader) {
+          return {
+            ok: false,
+            status: res.status,
+            text: `web_fetch gagal: HTTP ${res.status} redirect tanpa header Location.`,
+          };
+        }
+
+        redirectCount++;
+        if (redirectCount > MAX_FETCH_REDIRECTS) {
+          return {
+            ok: false,
+            status: res.status,
+            text: `web_fetch ditolak: batas maksimal ${MAX_FETCH_REDIRECTS} redirect terlampaui (indikasi loop).`,
+          };
+        }
+
+        let nextUrl: URL;
+        try {
+          nextUrl = new URL(locationHeader, currentUrl.href);
+        } catch {
+          return {
+            ok: false,
+            status: res.status,
+            text: `web_fetch gagal: header redirect Location tidak valid "${locationHeader}".`,
+          };
+        }
+
+        if (visitedUrls.has(nextUrl.href)) {
+          return {
+            ok: false,
+            status: res.status,
+            text: `web_fetch ditolak: siklus redirect terdeteksi ke "${nextUrl.href}".`,
+          };
+        }
+        visitedUrls.add(nextUrl.href);
+
+        // Advance to nextUrl — the while loop will immediately evaluate checkSsrfSafety
+        // on nextUrl, re-resolve DNS, enforce SSRF guard, pin the new IP, and connect!
+        currentUrl = nextUrl;
+        continue;
+      }
+
+      break;
+    }
+
+    const rawCt = res.headers['content-type'];
+    const ctHeader = (Array.isArray(rawCt) ? rawCt[0] : rawCt) || null;
     const ctCheck = isAllowedContentType(ctHeader);
     if (!ctCheck.allowed) {
       return {
@@ -386,16 +632,16 @@ export async function webFetchTool(
       };
     }
 
-    if (!res.ok) {
+    if (res.status < 200 || res.status >= 300) {
       return {
         ok: false,
         status: res.status,
         contentType: ctHeader ?? undefined,
-        text: `web_fetch gagal: HTTP ${res.status} ${res.statusText}`,
+        text: `web_fetch gagal: HTTP ${res.status} ${res.statusText ?? ''}`.trim(),
       };
     }
 
-    const rawBody = await res.text();
+    const rawBody = res.text;
     const effectiveCt = (ctHeader || 'text/plain').toLowerCase();
     const isHtml = effectiveCt.includes('text/html') || /<html\b[^>]*>/i.test(rawBody);
 
@@ -424,9 +670,16 @@ export async function webFetchTool(
         text: `web_fetch timeout (${timeoutMs / 1000} detik terlampaui). Permintaan dibatalkan.`,
       };
     }
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (errMsg.includes('timeout')) {
+      return {
+        ok: false,
+        text: `web_fetch timeout (${timeoutMs / 1000} detik terlampaui). Permintaan dibatalkan.`,
+      };
+    }
     return {
       ok: false,
-      text: `web_fetch error jaringan: ${err instanceof Error ? err.message : String(err)}`,
+      text: `web_fetch error jaringan: ${errMsg}`,
     };
   } finally {
     clearTimeout(timer);

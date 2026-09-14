@@ -66,6 +66,7 @@ export class Agent {
     private readonly config: AgentConfig,
     confirm?: Confirmer | null,
     private readonly workspaceRoot?: string,
+    public readonly subagentDepth: number = 0,
   ) {
     this.confirm = confirm ?? null;
   }
@@ -327,6 +328,7 @@ export class Agent {
           signal,
           llmProvider: this.llmProvider,
           workspaceRoot: this.workspaceRoot,
+          subagentDepth: this.subagentDepth,
         });
         if (signal?.aborted) {
           if (tree.isTreeActive) {

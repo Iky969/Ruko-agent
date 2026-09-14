@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 
 /**
  * Skills System for Ruko Agent.
@@ -86,16 +86,30 @@ export function listSkills(workspaceRoot: string = process.cwd()): SkillDef[] {
   return skills.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+export function sanitizeSkillName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '-');
+}
+
 /** Reads a specific skill by name. */
 export function readSkill(name: string, workspaceRoot: string = process.cwd()): SkillDef | null {
-  const clean = name.trim().toLowerCase();
+  const safeName = sanitizeSkillName(name);
+  if (!safeName) return null;
   const dir = defaultSkillsDir(workspaceRoot);
+  const canonicalDir = resolve(dir);
+  const prefix = canonicalDir.endsWith(sep) ? canonicalDir : canonicalDir + sep;
 
-  const directFile = join(dir, `${clean}.md`);
+  const directFile = join(dir, `${safeName}.md`);
+  const canonicalDirect = resolve(directFile);
+  if (!canonicalDirect.startsWith(prefix) && canonicalDirect !== canonicalDir) {
+    return null;
+  }
   if (existsSync(directFile)) {
     try {
       const raw = readFileSync(directFile, 'utf8');
-      const parsed = parseSkillContent(raw, clean);
+      const parsed = parseSkillContent(raw, safeName);
       parsed.filePath = directFile;
       return parsed;
     } catch {
@@ -103,11 +117,15 @@ export function readSkill(name: string, workspaceRoot: string = process.cwd()): 
     }
   }
 
-  const nestedFile = join(dir, clean, 'SKILL.md');
+  const nestedFile = join(dir, safeName, 'SKILL.md');
+  const canonicalNested = resolve(nestedFile);
+  if (!canonicalNested.startsWith(prefix) && canonicalNested !== canonicalDir) {
+    return null;
+  }
   if (existsSync(nestedFile)) {
     try {
       const raw = readFileSync(nestedFile, 'utf8');
-      const parsed = parseSkillContent(raw, clean);
+      const parsed = parseSkillContent(raw, safeName);
       parsed.filePath = nestedFile;
       return parsed;
     } catch {
@@ -117,7 +135,7 @@ export function readSkill(name: string, workspaceRoot: string = process.cwd()): 
 
   // Case-insensitive search across listed skills
   const all = listSkills(workspaceRoot);
-  return all.find((s) => s.name.toLowerCase() === clean) ?? null;
+  return all.find((s) => s.name.toLowerCase() === safeName) ?? null;
 }
 
 /** Saves or updates a skill in `.ruko/skills/<name>.md`. */
@@ -130,10 +148,7 @@ export function saveSkill(
   const dir = defaultSkillsDir(workspaceRoot);
   mkdirSync(dir, { recursive: true });
 
-  const safeName = name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, '-');
+  const safeName = sanitizeSkillName(name);
   const filePath = join(dir, `${safeName}.md`);
 
   const content = [
@@ -165,11 +180,19 @@ export function deleteSkill(name: string, workspaceRoot: string = process.cwd())
   const skill = readSkill(name, workspaceRoot);
   if (!skill || !skill.filePath) return false;
 
+  const dir = defaultSkillsDir(workspaceRoot);
+  const canonicalDir = resolve(dir);
+  const prefix = canonicalDir.endsWith(sep) ? canonicalDir : canonicalDir + sep;
+  const canonicalFile = resolve(skill.filePath);
+  if (!canonicalFile.startsWith(prefix) && canonicalFile !== canonicalDir) {
+    return false;
+  }
+
   try {
     rmSync(skill.filePath, { force: true });
-    const dir = defaultSkillsDir(workspaceRoot);
     const parent = dirname(skill.filePath);
-    if (parent !== dir && existsSync(parent)) {
+    const canonicalParent = resolve(parent);
+    if (parent !== dir && existsSync(parent) && (canonicalParent.startsWith(prefix) || canonicalParent === canonicalDir)) {
       try {
         rmSync(parent, { recursive: true, force: true });
       } catch {

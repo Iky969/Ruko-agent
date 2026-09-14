@@ -1,5 +1,5 @@
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { ContextMessage } from '../types.js';
 
 /**
@@ -31,7 +31,16 @@ export function saveSession(
 ): Session {
   mkdirSync(dir, { recursive: true });
   const now = new Date().toISOString();
-  const sessionId = id ?? now.replace(/[:.]/g, '-');
+  let sessionId: string;
+  if (id !== undefined && id !== null) {
+    const trimmed = id.trim();
+    if (!trimmed || !/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+      throw new Error(`saveSession ditolak: sessionId "${id}" tidak valid atau mengandung karakter traversal/ilegal.`);
+    }
+    sessionId = trimmed;
+  } else {
+    sessionId = now.replace(/[:.]/g, '-');
+  }
   const session: Session = {
     id: sessionId,
     title: inferTitle(messages),
@@ -41,9 +50,15 @@ export function saveSession(
     messages,
   };
   const filePath = join(dir, `${sessionId}.json`);
-  writeFileSync(filePath, `${JSON.stringify(session, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  const canonicalDir = resolve(dir);
+  const prefix = canonicalDir.endsWith(sep) ? canonicalDir : canonicalDir + sep;
+  const canonicalFile = resolve(filePath);
+  if (!canonicalFile.startsWith(prefix) && canonicalFile !== canonicalDir) {
+    throw new Error(`saveSession ditolak: sessionId "${id}" berada di luar direktori sesi.`);
+  }
+  writeFileSync(canonicalFile, `${JSON.stringify(session, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   try {
-    chmodSync(filePath, 0o600); // M4: enforce owner-only permissions on session transcripts
+    chmodSync(canonicalFile, 0o600); // M4: enforce owner-only permissions on session transcripts
   } catch {
     // Best-effort on filesystems without POSIX permissions
   }
@@ -74,7 +89,17 @@ export function listSessions(dir = defaultSessionDir()): SessionMeta[] {
 /** Loads a session by id, or null when missing/corrupt. */
 export function loadSession(id: string, dir = defaultSessionDir()): Session | null {
   try {
-    const raw = readFileSync(join(dir, `${id}.json`), 'utf8');
+    if (!id || typeof id !== 'string') return null;
+    const cleanId = id.trim();
+    if (!cleanId || !/^[a-zA-Z0-9_-]+$/.test(cleanId)) return null;
+    const filePath = join(dir, `${cleanId}.json`);
+    const canonicalDir = resolve(dir);
+    const prefix = canonicalDir.endsWith(sep) ? canonicalDir : canonicalDir + sep;
+    const canonicalFile = resolve(filePath);
+    if (!canonicalFile.startsWith(prefix) && canonicalFile !== canonicalDir) {
+      return null;
+    }
+    const raw = readFileSync(canonicalFile, 'utf8');
     return JSON.parse(raw) as Session;
   } catch {
     return null;
@@ -193,8 +218,23 @@ export function exportSessionTrajectory(
   sessionId?: string,
 ): ExportResult {
   mkdirSync(dir, { recursive: true });
-  const id = sessionId ?? new Date().toISOString().replace(/[:.]/g, '-');
+  let id: string;
+  if (sessionId !== undefined && sessionId !== null) {
+    const trimmed = sessionId.trim();
+    if (!trimmed || !/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+      throw new Error(`exportSessionTrajectory ditolak: sessionId "${sessionId}" tidak valid atau mengandung karakter traversal/ilegal.`);
+    }
+    id = trimmed;
+  } else {
+    id = new Date().toISOString().replace(/[:.]/g, '-');
+  }
   const filePath = join(dir, `${id}.${format}`);
+  const canonicalDir = resolve(dir);
+  const prefix = canonicalDir.endsWith(sep) ? canonicalDir : canonicalDir + sep;
+  const canonicalFile = resolve(filePath);
+  if (!canonicalFile.startsWith(prefix) && canonicalFile !== canonicalDir) {
+    throw new Error(`exportSessionTrajectory ditolak: sessionId "${sessionId}" berada di luar direktori ekspor.`);
+  }
 
   let content = '';
   if (format === 'jsonl') {

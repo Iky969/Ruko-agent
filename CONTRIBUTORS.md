@@ -33,6 +33,7 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Tanggal: 2026-09-14
 - Kontribusi: Release v1.6.1 — Preservasi utuh assistant message (teks + tool call), deduplikasi pesan user pada state loop, dan penyempurnaan guard anti-duplikasi tool call berurutan
 - Tanggal: 2026-09-14
+- Kontribusi: Release v1.7.0 — Universal Tool Security Hardening, Symlink Sandboxing, Native IP-Pinning Transport Layer & Eliminasi Total DNS Rebinding, Strict Session/Skills Traversal Guards, Undo Snapshot Permissions 0600, Subagent Recursion Guard, UI WorkflowTree Step Enrichment, and 13 Adversarial Test Cases
 - Kontribusi: Perbaikan popup command "/" di Termux mobile (seleksi Enter saat scroll highlight & responsivitas status bar layar sempit)
 - Tanggal: 2026-09-14
 - Kontribusi: Pelaporan total match code_search saat terkena limit cap & pesan suppressed matches

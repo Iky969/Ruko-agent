@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isSensitivePath } from './tools.js';
+import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isPathInsideWorkspace, isSensitivePath } from './tools.js';
 
 /** Default number of lines a `read_file` call returns when not asked for. */
 export const DEFAULT_READ_LIMIT = 200;
@@ -231,6 +231,7 @@ export async function walkDirectory(
         if (IGNORED_DIRS.has(entry.name) || isSensitivePath(fullPath, cwd)) continue;
         try {
           const real = await fs.realpath(fullPath);
+          if (!isPathInsideWorkspace(real, cwd)) continue;
           if (visitedDirs.has(real) || isSensitivePath(real, cwd)) continue;
           visitedDirs.add(real);
           queue.push(fullPath);
@@ -241,6 +242,7 @@ export async function walkDirectory(
       } else if (entry.isSymbolicLink()) {
         try {
           const real = await fs.realpath(fullPath);
+          if (!isPathInsideWorkspace(real, cwd)) continue;
           const stat = await fs.stat(real);
           if (stat.isDirectory()) {
             if (IGNORED_DIRS.has(entry.name) || isSensitivePath(fullPath, cwd) || isSensitivePath(real, cwd)) continue;

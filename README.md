@@ -1,10 +1,10 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-1.6.2-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.7.0-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-409%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-381%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
@@ -158,6 +158,9 @@ Ruko dirancang dengan pertahanan mendalam (*defense-in-depth*) untuk memastikan 
    - **Pencegahan Dump Environment**: Fungsi `isSensitiveEnvCommand()` mendeteksi dan menolak upaya pembocoran kredensial via environment (`printenv`, `env`, ekspansi `$<NAMA>` atau `${<NAMA>}` yang cocok dengan pola token/secret/password/key), sembari tetap mengizinkan variabel biasa non-sensitif (`$PATH`, `$HOME`) untuk menghindari *overblocking*.
    - **Cakupan Universal Subagent**: Seluruh proteksi ditegakkan di level protokol eksekusi tool (`runToolCall`), menjamin subagent (`delegate`) tunduk pada kebijakan keamanan yang sama persis dengan agen utama tanpa celah isolasi.
    - Penolakan URL HTTP *cleartext* untuk server remote (mencegah eksfiltrasi token), penyamaran cerdas API key pada perintah `/config`, dan penegakan izin berkas `0o600` pada seluruh berkas konfigurasi dan sesi.
+6. **Batasan Keamanan yang Diketahui (Known Security Limitations)**:
+   - **Filesystem TOCTOU (Time-of-Check to Time-of-Use)**: Meskipun mutasi berkas menolak penulisan menembus symbolic link via `lstatSync().isSymbolicLink()` dan `assertInsideWorkspace()`, secara POSIX standar tetap terdapat *micro-window* teoretis jika ada proses konkuren eksternal di tingkat OS yang melakukan pertukaran berkas (*symlink swap*) persis di antara verifikasi boundary dan pemanggilan I/O kernel (`fs.writeFile`/`fs.readFile`).
+   - **Eliminasi Celah DNS Rebinding**: Seluruh potensi eksploitasi DNS Rebinding TOCTOU telah ditutup tuntas dengan mengimplementasikan transport `node:http` & `node:https` berbasis **Native IP-Pinning** yang mengunci socket TCP ke IP yang telah divalidasi aman pada setiap hop redirect.
 
 ---
 

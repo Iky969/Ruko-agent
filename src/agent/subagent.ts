@@ -21,6 +21,8 @@ export interface SubagentOptions {
   workspaceRoot?: string;
   /** Plan mode inheritance. */
   planMode?: boolean;
+  /** Delegation nesting depth. */
+  depth?: number;
 }
 
 export interface SubagentDeps {
@@ -44,7 +46,14 @@ export async function runSubagent(
   };
 
   const subCtx = new Context(subConfig);
-  const subAgent = new Agent(subCtx, deps.llmProvider, subConfig, deps.confirm, options.workspaceRoot);
+  const subAgent = new Agent(
+    subCtx,
+    deps.llmProvider,
+    subConfig,
+    deps.confirm,
+    options.workspaceRoot,
+    options.depth ?? 1,
+  );
   if (options.planMode) {
     subAgent.planMode = true;
   }

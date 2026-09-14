@@ -41,12 +41,14 @@ let seq = 0;
 
 /** Stores the current content of `abs` BEFORE it changes; returns the snapshot. */
 export function takeSnapshot(abs: string, dir = defaultUndoDir()): UndoSnapshot {
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   const existed = existsSync(abs) && statSync(abs).isFile();
   const id = `${Date.now()}-${(seq += 1)}`;
   const snapshot: UndoSnapshot = { id, abs, existed };
-  writeFileSync(join(dir, `${id}.content`), existed ? readFileSync(abs) : Buffer.alloc(0));
-  writeFileSync(join(dir, `${id}.meta.json`), `${JSON.stringify(snapshot)}\n`, 'utf8');
+  const contentPath = join(dir, `${id}.content`);
+  const metaPath = join(dir, `${id}.meta.json`);
+  writeFileSync(contentPath, existed ? readFileSync(abs) : Buffer.alloc(0), { mode: 0o600 });
+  writeFileSync(metaPath, `${JSON.stringify(snapshot)}\n`, { encoding: 'utf8', mode: 0o600 });
   prune(dir);
   return snapshot;
 }
