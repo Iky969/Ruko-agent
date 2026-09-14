@@ -211,4 +211,71 @@ test('tool call and tool result schema contains valid tool_call_id and tool_call
   assert.equal(toolMsg?.name, 'exec', 'tool name must match tool executed');
 });
 
+test('reproduksi gejala: teks asisten dan tool call identik berulang pada giliran berturut-turut', async () => {
+  const provider = new RecordingProvider([
+    'Saya periksa dulu kodenya...\n```tool\n{"tool": "read_file", "path": "a.txt"}\n```',
+    'Saya periksa dulu kodenya...\n```tool\n{"tool": "read_file", "path": "a.txt"}\n```',
+    'Pemeriksaan selesai.',
+  ]);
+  const ctx = new Context(config);
+  const agent = new Agent(ctx, provider, config);
+  const { result, out } = await captureStdout(() => agent.handleInstruction('periksa file a.txt'));
+
+  assert.equal(result, 'Pemeriksaan selesai.');
+  assert.equal(provider.receivedMessages.length, 3, 'tiga giliran chat dipanggil');
+  assert.ok(out.includes('Perintah identik terdeteksi berulang, dilewati'), 'guard mendeteksi tool call kedua berulang');
+
+  // Inspeksi message history pada giliran 2: assistant message harus utuh (teks + tool call)
+  const secondCallMsgs = provider.receivedMessages[1];
+  const assistantMsg = secondCallMsgs.find((m) => m.role === 'assistant');
+  assert.ok(assistantMsg, 'assistant message harus ada di context');
+  assert.ok(assistantMsg?.content.includes('Saya periksa dulu kodenya...'), 'teks asisten tersimpan');
+  assert.ok(assistantMsg?.content.includes('```tool'), 'blok tool call dipertahankan secara utuh');
+  assert.ok(Array.isArray(assistantMsg?.tool_calls), 'tool_calls metadata tetap ada');
+
+  // Inspeksi pesan tool hasil giliran kedua: menginformasikan hasil sudah ada di konteks
+  const thirdCallMsgs = provider.receivedMessages[2];
+  const skippedToolMsg = thirdCallMsgs[thirdCallMsgs.length - 1];
+  assert.equal(skippedToolMsg.role, 'tool');
+  assert.ok(skippedToolMsg.content.includes('sudah ada di konteks percakapan di atas'));
+});
+
+test('two consecutive different tool calls across steps are both executed without deduplication blocking', async () => {
+  const provider = new RecordingProvider([
+    '```tool\n{"tool": "read_file", "path": "a.txt"}\n```',
+    '```tool\n{"tool": "read_file", "path": "b.txt"}\n```',
+    'Kedua file sudah dibaca.',
+  ]);
+  const ctx = new Context(config);
+  const agent = new Agent(ctx, provider, config);
+  const { result, out } = await captureStdout(() => agent.handleInstruction('baca file a dan b'));
+
+  assert.equal(result, 'Kedua file sudah dibaca.');
+  assert.ok(
+    !out.includes('Perintah identik terdeteksi berulang, dilewati'),
+    'tool call berbeda tidak boleh diblokir oleh guard deduplikasi',
+  );
+  assert.equal(provider.receivedMessages.length, 3);
+
+  // Pastikan kedua tool result masuk ke riwayat pada giliran ke-3
+  const thirdCallMsgs = provider.receivedMessages[2];
+  const toolResults = thirdCallMsgs.filter((m) => m.role === 'tool');
+  assert.equal(toolResults.length, 2, 'kedua tool dieksekusi secara berurutan');
+});
+
+test('user message is not duplicated in prompt history when context already has it', async () => {
+  const ctx = new Context(config);
+  ctx.add('user', 'baca kode');
+  const provider = new RecordingProvider(['Tuntas.']);
+  const agent = new Agent(ctx, provider, config);
+  await captureStdout(() => agent.handleInstruction('baca kode'));
+
+  assert.equal(provider.receivedMessages.length, 1);
+  const userMsgs = provider.receivedMessages[0].filter((m) => m.role === 'user');
+  assert.equal(userMsgs.length, 1, 'pesan user tidak boleh duplikat');
+  assert.equal(userMsgs[0].content, 'baca kode');
+});
+
+
+
 

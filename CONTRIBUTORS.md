@@ -31,6 +31,8 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Tanggal: 2026-09-13
 - Kontribusi: Anti-flickering TUI (dirty-checking & in-place tail updates), indikator proses latar belakang di status bar, stream ingestion hardening SSE, normalisasi skema tool result (tool_call_id), dan penanganan empty content model setelah eksekusi tool
 - Tanggal: 2026-09-14
+- Kontribusi: Release v1.6.1 — Preservasi utuh assistant message (teks + tool call), deduplikasi pesan user pada state loop, dan penyempurnaan guard anti-duplikasi tool call berurutan
+- Tanggal: 2026-09-14
 
 ## Claude Opus 4.6
 - Kontribusi: Audit keamanan pre-publish & inisiasi implementasi hardening

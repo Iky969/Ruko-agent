@@ -153,10 +153,14 @@ export class Agent {
   /** LLM mode: agent loop with tool calls, streaming the visible reply. */
   private async runWithLlm(instruction: string, signal?: AbortSignal): Promise<string> {
     const history = this.ctx.window(this.config.maxContextChars);
+    const last = history[history.length - 1];
+    const userAlreadyInHistory = Boolean(
+      last && last.role === 'user' && last.content === instruction
+    );
     const messages: ContextMessage[] = [
       { role: 'system', content: this.systemPrompt(), timestamp: '' },
       ...history,
-      { role: 'user', content: instruction, timestamp: '' },
+      ...(userAlreadyInHistory ? [] : [{ role: 'user' as const, content: instruction, timestamp: '' }]),
     ];
     const usage: TurnUsage = { promptChars: 0, completionChars: 0 };
     this.lastUsage = usage;
@@ -248,7 +252,7 @@ export class Agent {
 
       // Text streamed before a tool call needs a line break before the logs.
       if (iterStreamed) process.stdout.write('\n');
-      const text = stripToolBlocks(raw);
+      const assistantContent = raw.trim();
       const toolCalls = calls.map((c, idx) => ({
         id: (typeof c.id === 'string' && c.id.trim())
           ? c.id.trim()
@@ -261,7 +265,7 @@ export class Agent {
       }));
       messages.push({
         role: 'assistant',
-        content: text,
+        content: assistantContent,
         timestamp: new Date().toISOString(),
         tool_calls: toolCalls,
       });
@@ -296,7 +300,7 @@ export class Agent {
             content: `Result of tool "${call.tool}":\n${JSON.stringify({
               skipped: true,
               warning: warn,
-              message: `Tool "${call.tool}" dengan argumen identik baru saja dijalankan pada langkah sebelumnya. Eksekusi kedua dilewati.`,
+              message: `Tool "${call.tool}" dengan argumen identik baru saja dijalankan pada langkah sebelumnya dan hasilnya sudah ada di konteks percakapan di atas. Eksekusi kedua dilewati; silakan lanjutkan dengan menganalisis hasil yang sudah ada atau jalankan aksi berikutnya.`,
             })}`,
             timestamp: new Date().toISOString(),
             tool_call_id: toolCallId,

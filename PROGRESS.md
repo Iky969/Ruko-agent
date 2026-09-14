@@ -6,6 +6,27 @@
 
 ## 📦 Riwayat Rilis & Status Fitur (Changelog)
 
+### v1.6.1 (14 September 2026) — Preservasi Utuh Pesan Asisten, State Loop Turn Deduplication, & Robust Tool Loop Guard
+
+#### Ditambahkan & Diperbarui
+- **Preservasi Utuh Pesan Asisten & Pencegahan Pengulangan Tool Identik (`src/agent/agent.ts`)**:
+  * **Gejala Bug**: Model mengirim teks asisten identik dua kali berturut-turut, dan setelah menjalankan tool (seperti `read_file`), model mengulang teks yang sama DAN memanggil tool yang sama persis untuk kedua kalinya.
+  * **Hasil Investigasi & Reproduksi**: Berhasil direproduksi pada `src/tests/agent.test.ts` menggunakan `RecordingProvider`. Ditemukan bahwa root cause merupakan kombinasi dua faktor:
+    1. Respons asisten yang memicu tool call dipangkas oleh `stripToolBlocks(raw)` sehingga `content` kehilangan blok pemanggilan tool Markdown. Karena provider (terutama Anthropic/Gemini serta OpenAI-compatible yang tidak menyertakan payload `tools`) mengandalkan `content` teks, model mengira pemanggilan tool belum dilakukan dan mengulang kembali dari awal.
+    2. Duplikasi pesan pengguna (`user`) pada setiap giliran REPL karena `this.ctx.add('user', input)` di `loop.ts` ditambahkan ulang oleh `runWithLlm` di `agent.ts`.
+  * **Keputusan Arsitektur Guard Deduplikasi (Reuse vs Mekanisme Baru)**:
+    - Guard `lastCallSignature` (v1.2.0) telah berada di level dispatcher loop agen (`Agent` di `src/agent/agent.ts`) dan mencakup seluruh tool calls, bukan terkunci pada `processManager.ts`.
+    - Diputuskan untuk **me-reuse dan memperkaya guard terpusat yang sudah ada** alih-alih membuat mekanisme baru yang redundan.
+    - Pesan diagnostik `skipped: true` diperjelas agar model mengetahui bahwa hasil tool call yang sama sudah tersedia di konteks riwayat sebelumnya dan mengarahkannya untuk melanjutkan analisis tanpa memanggil ulang.
+  * **Ringkasan Fix Akhir**:
+    1. Menyimpan respons model secara UTUH (`assistantContent = raw.trim()`) pada `role: 'assistant'` bersama metadata `tool_calls` ternormalisasi.
+    2. Memeriksa tail `history` pada `runWithLlm` agar tidak menambahkan duplikat pesan `user` jika konteks sudah mencatat pesan user yang sama, tanpa mengubah sedikit pun logika windowing `maxContextChars` pada `src/core/context.ts`.
+    3. Menambahkan unit test baru untuk memverifikasi preservasi utuh pesan asisten, deduplikasi pesan user, serta memastikan dua tool call *berbeda* berurutan (`read_file("a.txt")` lalu `read_file("b.txt")`) tetap dieksekusi normal tanpa overblocking.
+  * **Rangkaian Pengujian**:
+    - Total pengujian meningkat menjadi **368 passed** (100% lulus, 0 gagal).
+
+---
+
 ### v1.6.0 (14 September 2026) — Anti-Flickering TUI, Status Bar Process Indicator, SSE Stream Hardening, & Robust Tool Loop Handling
 
 #### Ditambahkan & Diperbarui
@@ -31,7 +52,7 @@
   * Menyediakan pemformatan responsif untuk terminal layar sempit (>= 40 kolom) dengan bentuk ringkas `⚙️ 2 proc`.
 - **Rangkaian Pengujian & Penambahan Unit Test**:
   * Menambahkan uji unit di `src/tests/ui.test.ts` (formatProcessSummary & responsive narrow status bar), `src/tests/tui.test.ts` (anti-flickering in-place tail updates), `src/tests/llm.test.ts` (SSE partial chunk stream hardening & finish_reason), dan `src/tests/agent.test.ts` (penanganan empty content model & validasi skema tool_call_id).
-  * Total pengujian meningkat menjadi **365 passed** (100% lulus, 0 gagal).
+  * Total pengujian: 365 passed (100% lulus, 0 gagal).
 
 ---
 
@@ -210,7 +231,7 @@ Catatan batasan arsitektural yang disadari:
 
 1. **Verifikasi Baseline**:
    - Jalankan `npm run typecheck` (harus 0 error).
-   - Jalankan `npm test` (harus **365 passed**, 0 fail).
+   - Jalankan `npm test` (harus **368 passed**, 0 fail).
    - E2E test: `npm run test:e2e` (1 passed).
 2. **Struktur Direktori Proyek**:
    - `src/core/`: Infrastruktur murni Node.js (loop, approval, executor, summarizer, undo, context, session, config, wizard, ui, skills).
