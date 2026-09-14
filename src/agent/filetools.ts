@@ -490,11 +490,191 @@ export async function globTool(
   };
 }
 
+export interface ListDirOptions {
+  /** Maximum number of entries to return (default 200). */
+  limit?: number;
+  /** Whether to show hidden files/folders (starting with .) (default true, except sensitive paths). */
+  showHidden?: boolean;
+}
+
+export interface DirEntryInfo {
+  name: string;
+  type: 'file' | 'directory' | 'symlink' | 'other';
+  size?: number;
+}
+
+export interface ListDirResult {
+  ok: boolean;
+  text: string;
+  entries: DirEntryInfo[];
+  totalEntries: number;
+  truncated: boolean;
+}
+
+function formatFileSize(bytes?: number): string {
+  if (typeof bytes !== 'number' || Number.isNaN(bytes)) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Lists the direct contents of a directory (files and subdirectories) without glob traversal.
+ * Respects workspace sandbox boundary and automatically filters out sensitive files.
+ */
+export async function listDirTool(
+  dirPath: string = '.',
+  opts: ListDirOptions = {},
+  cwd: string = getWorkspaceRoot(),
+): Promise<ListDirResult> {
+  const limit = clampInt(opts.limit, 1, 1000, 200);
+  const showHidden = opts.showHidden ?? true;
+
+  let absDir: string;
+  try {
+    absDir = path.resolve(cwd, dirPath || '.');
+    assertInsideWorkspace(absDir, cwd);
+    assertNotSensitivePath(absDir, cwd);
+  } catch (err) {
+    return {
+      ok: false,
+      text: err instanceof Error ? err.message : String(err),
+      entries: [],
+      totalEntries: 0,
+      truncated: false,
+    };
+  }
+
+  let stat;
+  try {
+    stat = await fs.stat(absDir);
+  } catch (err) {
+    return {
+      ok: false,
+      text: `list_dir: direktori '${dirPath}' tidak ditemukan: ${errorMessage(err)}`,
+      entries: [],
+      totalEntries: 0,
+      truncated: false,
+    };
+  }
+
+  if (!stat.isDirectory()) {
+    return {
+      ok: false,
+      text: `list_dir: '${dirPath}' adalah file, bukan direktori.`,
+      entries: [],
+      totalEntries: 0,
+      truncated: false,
+    };
+  }
+
+  let dirEntries;
+  try {
+    dirEntries = await fs.readdir(absDir, { withFileTypes: true });
+  } catch (err) {
+    return {
+      ok: false,
+      text: `list_dir: gagal membaca direktori '${dirPath}': ${errorMessage(err)}`,
+      entries: [],
+      totalEntries: 0,
+      truncated: false,
+    };
+  }
+
+  const rawItems: DirEntryInfo[] = [];
+
+  for (const entry of dirEntries) {
+    if (!showHidden && entry.name.startsWith('.')) {
+      continue;
+    }
+    const fullPath = path.join(absDir, entry.name);
+    if (isSensitivePath(fullPath, cwd)) {
+      continue;
+    }
+
+    let type: 'file' | 'directory' | 'symlink' | 'other' = 'other';
+    let size: number | undefined;
+
+    if (entry.isDirectory()) {
+      type = 'directory';
+    } else if (entry.isFile()) {
+      type = 'file';
+      try {
+        const fileStat = await fs.stat(fullPath);
+        size = fileStat.size;
+      } catch {
+        // ignore error
+      }
+    } else if (entry.isSymbolicLink()) {
+      type = 'symlink';
+    }
+
+    rawItems.push({
+      name: entry.name,
+      type,
+      size,
+    });
+  }
+
+  // Sort: directories first, then alphabetical (case-insensitive)
+  rawItems.sort((a, b) => {
+    if (a.type === 'directory' && b.type !== 'directory') return -1;
+    if (a.type !== 'directory' && b.type === 'directory') return 1;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  });
+
+  const totalEntries = rawItems.length;
+  const truncated = totalEntries > limit;
+  const displayed = rawItems.slice(0, limit);
+
+  const relDisplay = path.relative(cwd, absDir).replace(/\\/g, '/') || '.';
+
+  if (totalEntries === 0) {
+    return {
+      ok: true,
+      text: `Direktori '${relDisplay}' kosong.`,
+      entries: [],
+      totalEntries: 0,
+      truncated: false,
+    };
+  }
+
+  const lines: string[] = [];
+  for (const item of displayed) {
+    if (item.type === 'directory') {
+      lines.push(`[DIR]  ${item.name}/`);
+    } else if (item.type === 'file') {
+      const sizeStr = item.size !== undefined ? ` (${formatFileSize(item.size)})` : '';
+      lines.push(`[FILE] ${item.name}${sizeStr}`);
+    } else if (item.type === 'symlink') {
+      lines.push(`[LINK] ${item.name}`);
+    } else {
+      lines.push(`[OTHER] ${item.name}`);
+    }
+  }
+
+  const header = truncated
+    ? `Direktori: ${relDisplay} (${totalEntries} entri, menampilkan ${displayed.length} entri pertama — hasil terpotong):`
+    : `Direktori: ${relDisplay} (${totalEntries} entri):`;
+
+  const footer = truncated
+    ? `\n[... Hasil dibatasi ${limit} entri — gunakan limit lebih besar jika diperlukan ...]`
+    : '';
+
+  return {
+    ok: true,
+    text: `${header}\n${lines.join('\n')}${footer}`,
+    entries: displayed,
+    totalEntries,
+    truncated,
+  };
+}
+
 export interface CodeSearchOptions {
   /** Target directory or file to search, relative to cwd (default "."). */
   path?: string;
-  /** File extension filter (e.g. "ts", ".ts", "ts,js"). */
-  extension?: string;
+  /** File extension filter (e.g. "ts", ".ts", "ts,js", [".ts", ".tsx"]). */
+  extension?: string | string[];
   /** Treat query as regular expression (default false). */
   isRegex?: boolean;
   /** Case-sensitive match (default false). */
@@ -511,6 +691,27 @@ export interface CodeSearchResult {
   totalMatches: number;
   totalFiles: number;
   truncated: boolean;
+}
+
+/**
+ * Normalizes an extension filter (string, comma-separated string, or array) into a Set of lowercase extensions without leading dot.
+ */
+export function parseExtensionFilter(ext: unknown): Set<string> | null {
+  if (!ext) return null;
+  const rawList: string[] = [];
+  if (Array.isArray(ext)) {
+    for (const item of ext) {
+      if (typeof item === 'string') {
+        rawList.push(...item.split(','));
+      }
+    }
+  } else if (typeof ext === 'string') {
+    rawList.push(...ext.split(','));
+  }
+  const parts = rawList
+    .map((e) => e.trim().toLowerCase().replace(/^\./, ''))
+    .filter(Boolean);
+  return parts.length > 0 ? new Set(parts) : null;
 }
 
 /**
@@ -532,16 +733,7 @@ export async function codeSearchTool(
     };
   }
 
-  let allowedExts: Set<string> | null = null;
-  if (opts.extension && typeof opts.extension === 'string') {
-    const parts = opts.extension
-      .split(',')
-      .map((e) => e.trim().toLowerCase().replace(/^\./, ''))
-      .filter(Boolean);
-    if (parts.length > 0) {
-      allowedExts = new Set(parts);
-    }
-  }
+  const allowedExts = parseExtensionFilter(opts.extension);
 
   let flags = 'g';
   if (!opts.caseSensitive) flags += 'i';
@@ -636,15 +828,11 @@ export async function codeSearchTool(
 
   let totalMatches = 0;
   let displayedMatches = 0;
+  let matchedFilesCount = 0;
   const fileOutputs: string[] = [];
   let truncated = false;
 
   for (const candidate of candidateFiles) {
-    if (displayedMatches >= limit) {
-      truncated = true;
-      break;
-    }
-
     let content: string;
     try {
       content = await fs.readFile(candidate.absPath, 'utf8');
@@ -667,44 +855,50 @@ export async function codeSearchTool(
     if (matchIndices.length === 0) continue;
 
     totalMatches += matchIndices.length;
-    const remainingQuota = limit - displayedMatches;
-    const matchesToDisplay = matchIndices.slice(0, remainingQuota);
-    displayedMatches += matchesToDisplay.length;
+    matchedFilesCount += 1;
 
-    if (matchIndices.length > remainingQuota) {
+    if (displayedMatches < limit) {
+      const remainingQuota = limit - displayedMatches;
+      const matchesToDisplay = matchIndices.slice(0, remainingQuota);
+      displayedMatches += matchesToDisplay.length;
+
+      if (matchIndices.length > remainingQuota) {
+        truncated = true;
+      }
+
+      const matchSet = new Set(matchesToDisplay);
+      interface Range {
+        start: number;
+        end: number;
+      }
+      const ranges: Range[] = [];
+      for (const idx of matchesToDisplay) {
+        const start = Math.max(0, idx - contextLines);
+        const end = Math.min(lines.length - 1, idx + contextLines);
+        if (ranges.length > 0 && start <= ranges[ranges.length - 1].end + 1) {
+          ranges[ranges.length - 1].end = Math.max(ranges[ranges.length - 1].end, end);
+        } else {
+          ranges.push({ start, end });
+        }
+      }
+
+      const fileBlocks: string[] = [];
+      for (const range of ranges) {
+        const blockLines: string[] = [];
+        for (let lineNum = range.start; lineNum <= range.end; lineNum += 1) {
+          const isMatch = matchSet.has(lineNum);
+          const prefix = isMatch ? '> ' : '  ';
+          const rawLine = lines[lineNum];
+          const clipped = rawLine.length > MAX_LINE_CHARS ? `${rawLine.slice(0, MAX_LINE_CHARS)}…` : rawLine;
+          blockLines.push(`${prefix}${String(lineNum + 1).padStart(4)}| ${clipped}`);
+        }
+        fileBlocks.push(blockLines.join('\n'));
+      }
+
+      fileOutputs.push(`${candidate.relPath}:\n${fileBlocks.join('\n  ---\n')}`);
+    } else {
       truncated = true;
     }
-
-    const matchSet = new Set(matchesToDisplay);
-    interface Range {
-      start: number;
-      end: number;
-    }
-    const ranges: Range[] = [];
-    for (const idx of matchesToDisplay) {
-      const start = Math.max(0, idx - contextLines);
-      const end = Math.min(lines.length - 1, idx + contextLines);
-      if (ranges.length > 0 && start <= ranges[ranges.length - 1].end + 1) {
-        ranges[ranges.length - 1].end = Math.max(ranges[ranges.length - 1].end, end);
-      } else {
-        ranges.push({ start, end });
-      }
-    }
-
-    const fileBlocks: string[] = [];
-    for (const range of ranges) {
-      const blockLines: string[] = [];
-      for (let lineNum = range.start; lineNum <= range.end; lineNum += 1) {
-        const isMatch = matchSet.has(lineNum);
-        const prefix = isMatch ? '> ' : '  ';
-        const rawLine = lines[lineNum];
-        const clipped = rawLine.length > MAX_LINE_CHARS ? `${rawLine.slice(0, MAX_LINE_CHARS)}…` : rawLine;
-        blockLines.push(`${prefix}${String(lineNum + 1).padStart(4)}| ${clipped}`);
-      }
-      fileBlocks.push(blockLines.join('\n'));
-    }
-
-    fileOutputs.push(`${candidate.relPath}:\n${fileBlocks.join('\n  ---\n')}`);
   }
 
   if (totalMatches === 0) {
@@ -717,19 +911,20 @@ export async function codeSearchTool(
     };
   }
 
+  const suppressed = totalMatches - displayedMatches;
   const header = truncated
-    ? `Menemukan ${totalMatches >= limit ? `${limit}+` : totalMatches} kecocokan di ${fileOutputs.length} file untuk "${query}" (menampilkan ${displayedMatches} kecocokan pertama — hasil terpotong):`
-    : `Menemukan ${totalMatches} kecocokan di ${fileOutputs.length} file untuk "${query}":`;
+    ? `Menemukan ${totalMatches} kecocokan di ${matchedFilesCount} file untuk "${query}" (menampilkan ${displayedMatches} kecocokan pertama — hasil terpotong):`
+    : `Menemukan ${totalMatches} kecocokan di ${matchedFilesCount} file untuk "${query}":`;
 
   const footer = truncated
-    ? `\n[... Hasil dibatasi ${limit} kecocokan pertama — persempit query, target path, atau extension ...]`
+    ? `\n[... Hasil dibatasi ${limit} kecocokan pertama — ${suppressed} more matches suppressed, persempit query, target path, atau extension ...]`
     : '';
 
   return {
     ok: true,
     text: `${header}\n\n${fileOutputs.join('\n\n')}${footer}`,
     totalMatches,
-    totalFiles: fileOutputs.length,
+    totalFiles: matchedFilesCount,
     truncated,
   };
 }

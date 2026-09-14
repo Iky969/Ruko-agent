@@ -34,7 +34,22 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Kontribusi: Release v1.6.1 — Preservasi utuh assistant message (teks + tool call), deduplikasi pesan user pada state loop, dan penyempurnaan guard anti-duplikasi tool call berurutan
 - Tanggal: 2026-09-14
 - Kontribusi: Release v1.7.0 — Universal Tool Security Hardening, Symlink Sandboxing, Native IP-Pinning Transport Layer & Eliminasi Total DNS Rebinding, Strict Session/Skills Traversal Guards, Undo Snapshot Permissions 0600, Subagent Recursion Guard, UI WorkflowTree Step Enrichment, and 13 Adversarial Test Cases
-
+- Kontribusi: Perbaikan popup command "/" di Termux mobile (seleksi Enter saat scroll highlight & responsivitas status bar layar sempit)
+- Tanggal: 2026-09-14
+- Kontribusi: Pelaporan total match code_search saat terkena limit cap & pesan suppressed matches
+- Tanggal: 2026-09-14
+- Kontribusi: Tool revert_file & rollback berkas fleksibel (snapshot .ruko/undo & fallback git checkout), integrasi perintah /undo [path], dan guard plan mode
+- Tanggal: 2026-09-14
+- Kontribusi: Sanitasi & mitigasi prompt injection pada memory.md (deteksi instruksi imperatif ke model, penolakan saat disimpan, dan netralisasi otomatis ke konteks pasif)
+- Tanggal: 2026-09-14
+- Kontribusi: Peningkatan timeout default exec ke 120s, dukungan parameter timeout kustom per-panggilan tool, dan notifikasi timeout informatif
+- Tanggal: 2026-09-14
+- Kontribusi: Dukungan array dan string comma-separated untuk parameter extension pada code_search
+- Tanggal: 2026-09-14
+- Kontribusi: Tool list_dir untuk inspeksi langsung isi direktori tanpa glob traversal, proteksi berkas sensitif, dan integrasi peran reviewer
+- Tanggal: 2026-09-14
+- Kontribusi: Release v1.6.2 — Full repository version synchronization, rilis 7 perbaikan feedback.txt, dan verifikasi test suite (409 tests)
+- Tanggal: 2026-09-14
 
 ## Claude Opus 4.6
 - Kontribusi: Audit keamanan pre-publish & inisiasi implementasi hardening

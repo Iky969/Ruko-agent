@@ -134,7 +134,7 @@ export class SystemLoop {
       // render-loop bug, after splash and the beginner guide).
       const line = await this.editor!.readLine({
         prompt: promptGlyph(),
-        statusLine: () => this.statusBarLine(),
+        statusLine: (w?: number) => this.statusBarLine(w),
         placeholder: PROMPT_HINT,
         getMenu: (buffer) => this.slashMenuItems(buffer),
         // Enter on a lone "/" just closes the overlay — nothing is echoed
@@ -178,8 +178,9 @@ export class SystemLoop {
   }
 
   /** Dark-green status bar, refreshed before every input (§3/§8). */
-  private statusBarLine(): string {
+  private statusBarLine(width?: number): string {
     return buildStatusBar({
+      width,
       model: this.agent.llm.model,
       usedChars: this.ctx.totalChars,
       budgetChars: this.config.maxContextChars,
@@ -337,7 +338,7 @@ export class SystemLoop {
     this.turnAbort = new AbortController();
     this.editor?.startAmbient({
       prompt: promptGlyph(),
-      statusLine: () => this.statusBarLine(),
+      statusLine: (w?: number) => this.statusBarLine(w),
       placeholder: 'AI sedang bekerja — ketik tetap bisa, Enter untuk antre…',
       getMenu: (buffer) => this.slashMenuItems(buffer),
       onSubmit: (line) => {

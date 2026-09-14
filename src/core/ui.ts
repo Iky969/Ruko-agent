@@ -101,7 +101,9 @@ export function padVisible(text: string, width: number): string {
 
 /** Usable terminal width (fallback 80 when stdout is not a TTY). */
 export function terminalWidth(): number {
-  return Math.max(20, process.stdout.columns ?? 80);
+  const envCols = process.env.COLUMNS ? parseInt(process.env.COLUMNS, 10) : NaN;
+  const cols = process.stdout.columns ?? (Number.isFinite(envCols) && envCols > 0 ? envCols : undefined) ?? 80;
+  return Math.max(20, cols);
 }
 
 /**
@@ -299,38 +301,105 @@ export function formatProcessSummary(
 /** `⚡ [model] | ctx 41% (12.3k/30k) · ↑3.2k ↓800 | / perintah` dark-green bar. */
 export function buildStatusBar(input: StatusBarInput): string {
   const w = input.width ?? terminalWidth();
+  const targetWidth = Math.max(16, w - 1);
   const isNarrow = w < 60;
   const isVeryNarrow = w < 48;
 
   const pct = input.budgetChars > 0
     ? Math.min(100, Math.round((input.usedChars / input.budgetChars) * 100))
     : 0;
-  const plan = input.planMode ? '⏸ PLAN · ' : '';
-  const busy = input.busy ? '⏳ AI bekerja · ' : '';
-  const role = input.role && input.role !== 'default' ? ` · ${input.role}` : '';
-  const turn = input.turn
-    ? ` · ↑${formatK(input.turn.promptChars)} ↓${formatK(input.turn.completionChars)}`
-    : '';
-  const waiting = input.pending && input.pending > 0 ? ` · ⏳ ${input.pending} menunggu ` : '';
 
   const procCount = input.activeProcesses?.length ?? 0;
-  let procStr = '';
+
+  if (!isNarrow) {
+    const plan = input.planMode ? '⏸ PLAN · ' : '';
+    const busy = input.busy ? '⏳ AI bekerja · ' : '';
+    const role = input.role && input.role !== 'default' ? ` · ${input.role}` : '';
+    const turn = input.turn
+      ? ` · ↑${formatK(input.turn.promptChars)} ↓${formatK(input.turn.completionChars)}`
+      : '';
+    const waiting = input.pending && input.pending > 0 ? ` · ⏳ ${input.pending} menunggu ` : '';
+    const detailCtx = ` (${formatK(input.usedChars)}/${formatK(input.budgetChars)})`;
+    const hint = ' | / perintah · Ctrl+C batal ';
+
+    let procStr = '';
+    if (procCount > 0) {
+      const summary = formatProcessSummary(input.activeProcesses, isVeryNarrow);
+      procStr = ` | ⚙️ ${summary}`;
+    }
+
+    // Try full string first
+    const full = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}ctx ${pct}%${detailCtx}${turn}${hint}${waiting}`;
+    if (visibleLength(full) <= targetWidth) {
+      return onDarkGreen(full);
+    }
+    // Drop hint
+    const noHint = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}ctx ${pct}%${detailCtx}${turn}${waiting ? waiting : ' '}`;
+    if (visibleLength(noHint) <= targetWidth) {
+      return onDarkGreen(noHint);
+    }
+    // Drop turn stats
+    const noTurn = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}ctx ${pct}%${detailCtx}${waiting ? waiting : ' '}`;
+    if (visibleLength(noTurn) <= targetWidth) {
+      return onDarkGreen(noTurn);
+    }
+    // Drop detailCtx
+    const noDetail = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}ctx ${pct}%${waiting ? waiting : ' '}`;
+    if (visibleLength(noDetail) <= targetWidth) {
+      return onDarkGreen(noDetail);
+    }
+  }
+
+  // Narrow terminal responsive layout (< 60, e.g. Termux mobile):
+  const busyNarrow = input.busy ? (isVeryNarrow ? '⏳ ' : '⏳ AI bekerja · ') : '';
+  const planNarrow = input.planMode ? (isVeryNarrow ? '⏸ ' : '⏸ PLAN · ') : '';
+  const waitNarrow = input.pending && input.pending > 0
+    ? (isVeryNarrow ? ` ⏳${input.pending}` : ` · ⏳ ${input.pending} menunggu `)
+    : '';
+
+  const right = `${busyNarrow}${planNarrow}ctx ${pct}%${waitNarrow ? waitNarrow : ' '}`;
+
+  let proc = '';
   if (procCount > 0) {
-    const summary = formatProcessSummary(input.activeProcesses, isVeryNarrow);
-    procStr = ` | ⚙️ ${summary}`;
+    if (w >= 48) {
+      proc = ` | ⚙️ ${formatProcessSummary(input.activeProcesses, true)}`;
+    } else if (w >= 38) {
+      proc = ` | ⚙️ ${procCount} proc`;
+    } else {
+      proc = ` | ⚙️${procCount}`;
+    }
   }
 
-  if (isNarrow) {
-    // Narrow terminal responsive layout (>= 40 columns):
-    // e.g. " ⚡ [glm-5.3-flash] | ⚙️ 2 proc | ctx 20% "
-    return onDarkGreen(
-      ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}ctx ${pct}%${waiting ? waiting : ' '}`,
-    );
+  let role = (w >= 50 && input.role && input.role !== 'default') ? ` · ${input.role}` : '';
+  const prefix = ' ⚡ [';
+  const suffix = ']';
+  const sep = ' | ';
+
+  let fixedLen = visibleLength(prefix) + visibleLength(role) + visibleLength(suffix) + visibleLength(proc) + visibleLength(sep) + visibleLength(right);
+
+  if (fixedLen + visibleLength(input.model) > targetWidth && role) {
+    role = '';
+    fixedLen = visibleLength(prefix) + visibleLength(suffix) + visibleLength(proc) + visibleLength(sep) + visibleLength(right);
   }
 
-  return onDarkGreen(
-    ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}ctx ${pct}% (${formatK(input.usedChars)}/${formatK(input.budgetChars)})${turn} | / perintah · Ctrl+C batal ${waiting}`,
-  );
+  let modelText = input.model;
+  const availForModel = targetWidth - fixedLen;
+  if (availForModel < visibleLength(modelText)) {
+    if (availForModel >= 7) {
+      modelText = modelText.slice(0, availForModel - 1) + '…';
+    } else if (procCount > 0 && proc) {
+      proc = ` | ⚙️${procCount}`;
+      fixedLen = visibleLength(prefix) + visibleLength(suffix) + visibleLength(proc) + visibleLength(sep) + visibleLength(right);
+      const newAvail = targetWidth - fixedLen;
+      if (newAvail < visibleLength(modelText)) {
+        modelText = newAvail >= 4 ? modelText.slice(0, newAvail - 1) + '…' : modelText.slice(0, Math.max(1, newAvail));
+      }
+    } else {
+      modelText = availForModel >= 4 ? modelText.slice(0, availForModel - 1) + '…' : modelText.slice(0, Math.max(1, availForModel));
+    }
+  }
+
+  return onDarkGreen(`${prefix}${modelText}${role}${suffix}${proc}${sep}${right}`);
 }
 
 /**
@@ -670,13 +739,19 @@ export function inferStepDescription(
   stepNumber: number,
 ): string {
   const tools = new Set(calls.map((c) => c.tool));
-  if (tools.has('read_file') || tools.has('glob') || tools.has('code_search')) {
-    if (tools.has('write_file') || tools.has('edit_file') || tools.has('patch_file')) {
+  if (
+    tools.has('read_file') ||
+    tools.has('glob') ||
+    tools.has('code_search') ||
+    tools.has('list_dir') ||
+    tools.has('list_directory')
+  ) {
+    if (tools.has('write_file') || tools.has('edit_file') || tools.has('patch_file') || tools.has('revert_file')) {
       return 'Pemeriksaan dan modifikasi berkas proyek';
     }
     return 'Membaca konfigurasi & struktur berkas';
   }
-  if (tools.has('write_file') || tools.has('edit_file') || tools.has('patch_file')) {
+  if (tools.has('write_file') || tools.has('edit_file') || tools.has('patch_file') || tools.has('revert_file')) {
     return 'Modifikasi berkas proyek';
   }
   if (tools.has('exec')) {

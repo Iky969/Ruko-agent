@@ -1,11 +1,11 @@
 import { Confirmer, guardedExecute } from '../core/approval.js';
-import { join, relative as relativeFromCwd } from 'node:path';
+import { join, relative as relativeFromCwd, resolve as resolvePath } from 'node:path';
 import { Context } from '../core/context.js';
 import { saveConfig } from '../core/config.js';
 import { execute } from '../core/executor.js';
 import { promptSetup, SetupResult } from '../core/wizard.js';
 import { bold, cyan, dim, formatK, green, renderBox, red, yellow } from '../core/ui.js';
-import { listSnapshots, undoLast } from '../core/undo.js';
+import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
 import { getWorkspaceRoot } from './tools.js';
@@ -220,8 +220,27 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'undo',
-    help: 'Batalkan perubahan file terakhir (snapshot .ruko/undo).',
-    run: (_args, env) => {
+    help: 'Batalkan perubahan file (snapshot .ruko/undo atau git rollback).',
+    hint: '[path-file]',
+    run: (args, _env) => {
+      const target = args.trim();
+      if (target) {
+        const ws = getWorkspaceRoot();
+        const abs = resolvePath(ws, target);
+        const result = revertFile(abs, { workspaceRoot: ws });
+        if (!result.ok) {
+          console.log(`(gagal membatalkan perubahan "${target}": ${result.error})`);
+          return;
+        }
+        console.log(
+          result.source === 'git'
+            ? `↩ File dikembalikan ke versi git (git checkout): ${shortPath(result.restored!)}`
+            : result.action === 'restored'
+              ? `↩ File dikembalikan ke kondisi sebelum edit (snapshot): ${shortPath(result.restored!)}`
+              : `↩ File baru hasil edit dihapus (snapshot): ${shortPath(result.restored!)}`,
+        );
+        return;
+      }
       const result = undoLast();
       if (!result) {
         console.log('(tidak ada perubahan file yang bisa dibatalkan)');

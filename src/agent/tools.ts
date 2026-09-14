@@ -1,9 +1,10 @@
 import { chainedSegments, Confirmer, detectRisk, guardedExecute, isYoloMode } from '../core/approval.js';
 import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
+import { DEFAULT_TIMEOUT_MS } from '../core/executor.js';
 import { renderFileDiff, splitLines } from '../core/diff.js';
-import { takeSnapshot } from '../core/undo.js';
+import { revertFile, takeSnapshot } from '../core/undo.js';
 import { cyan, dim, green, magenta, red, yellow } from '../core/ui.js';
-import { codeSearchTool, globTool, readFileTool } from './filetools.js';
+import { codeSearchTool, globTool, listDirTool, readFileTool } from './filetools.js';
 import { appendMemory } from '../core/memory.js';
 import { deleteSkill, listSkills, readSkill, saveSkill } from '../core/skills.js';
 import { searchSessions } from '../core/session.js';
@@ -18,15 +19,16 @@ import path from 'node:path';
  * Hard cap (§5: batasi output tool) applied to every tool result before it
  * re-enters the model context: head + tail, middle folded with a marker.
  */
-export const TOOL_RESULT_CHAR_LIMIT = 8_000;
+export const MAX_TOOL_OUTPUT_CHARS = 8_000;
+export const TOOL_RESULT_CHAR_LIMIT = MAX_TOOL_OUTPUT_CHARS;
 
-export function capToolResult(text: string, maxChars = TOOL_RESULT_CHAR_LIMIT): string {
-  if (text.length <= maxChars) return text;
-  const keep = Math.floor((maxChars - 80) / 2);
-  return (
-    `${text.slice(0, keep)}\n[... TRUNCATED ${text.length - 2 * keep} chars — persempit filter/offset ...]\n` +
-    text.slice(text.length - keep)
-  );
+export function capToolResult(text: string, max = MAX_TOOL_OUTPUT_CHARS): string {
+  if (text.length <= max) return text;
+  const keep = Math.floor((max - 200) / 2);
+  const head = text.slice(0, keep);
+  const tail = text.slice(-keep);
+  const dropped = text.length - head.length - tail.length;
+  return `${head}\n\n[... TRUNCATED — ${dropped} chars folded; sesuaikan query/perintah ...]\n\n${tail}`;
 }
 
 /**
@@ -138,6 +140,7 @@ const PLAN_MODE_BLOCKED = new Set([
   'patch_file',
   'delete_file',
   'move_file',
+  'revert_file',
   'remember',
   'save_skill',
   'delete_skill',
@@ -705,6 +708,24 @@ export function detectSensitiveFileAccessInExec(
   return { blocked: false };
 }
 
+/**
+ * Resolves the effective execution timeout in ms for an exec tool call.
+ * Supports timeoutMs, timeout_ms, and timeout (number or numeric string).
+ * Values <= 600 without 'Ms' suffix are interpreted as seconds.
+ */
+export function resolveExecTimeout(call: Record<string, any>, fallbackMs: number = DEFAULT_TIMEOUT_MS): number {
+  const raw = call.timeoutMs ?? call.timeout_ms ?? call.timeout;
+  if (raw != null) {
+    const num = typeof raw === 'number' ? raw : parseFloat(String(raw));
+    if (Number.isFinite(num) && num > 0) {
+      const isSecondsParam = !('timeoutMs' in call) && !('timeout_ms' in call) && num <= 600;
+      const ms = Math.round(isSecondsParam ? num * 1000 : num);
+      return Math.min(Math.max(ms, 100), 3_600_000);
+    }
+  }
+  return fallbackMs;
+}
+
 /** Executes a parsed tool call; the result is char-capped before re-entering context. */
 export async function runToolCall(call: ToolCall, deps: ToolDeps = {}): Promise<string> {
   // §6: plan mode is a CODE guarantee, not a prompt request.
@@ -748,12 +769,16 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       }
 
       const config = deps.config ?? DEFAULT_CONFIG;
+      const defaultTimeout = config.execTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+      const timeoutMs = resolveExecTimeout(call, defaultTimeout);
+      const isCustomTimeout = timeoutMs !== defaultTimeout;
       const short = command.length > 60 ? `${command.slice(0, 57)}…` : command;
-      deps.onLog?.(green(`🟢 Bash(${short})`));
+      const timeoutBadge = isCustomTimeout ? dim(` [${Math.round(timeoutMs / 1000)}s]`) : '';
+      deps.onLog?.(green(`🟢 Bash(${short})${timeoutBadge}`));
       const result = await guardedExecute(
         command,
         {
-          timeoutMs: typeof call.timeoutMs === 'number' ? call.timeoutMs : undefined,
+          timeoutMs,
           confirm: deps.confirm ?? null,
           signal: deps.signal,
           llmProvider: deps.llmProvider,
@@ -808,6 +833,25 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         ? result.text
         : JSON.stringify({ error: result.text });
     }
+    case 'list_dir':
+    case 'list_directory': {
+      const targetPath = typeof call.path === 'string'
+        ? call.path
+        : (typeof call.dir === 'string' ? call.dir : (typeof call.directory === 'string' ? call.directory : '.'));
+      try {
+        assertNotSensitivePath(targetPath, ws);
+      } catch (err) {
+        return JSON.stringify({ error: `list_dir: ${err instanceof Error ? err.message : String(err)}` });
+      }
+      deps.onLog?.(green(`🟢 ListDir(${targetPath})`));
+      const result = await listDirTool(targetPath, {
+        limit: typeof call.limit === 'number' ? call.limit : undefined,
+        showHidden: typeof call.showHidden === 'boolean' ? call.showHidden : undefined,
+      }, ws);
+      return result.ok
+        ? result.text
+        : JSON.stringify({ error: result.text });
+    }
     case 'code_search': {
       const query = String(call.query ?? call.keyword ?? call.pattern ?? '');
       if (!query) {
@@ -816,9 +860,10 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       const searchPath = typeof call.path === 'string'
         ? call.path
         : (typeof call.dir === 'string' ? call.dir : '.');
-      const ext = typeof call.extension === 'string'
-        ? call.extension
-        : (typeof call.ext === 'string' ? call.ext : undefined);
+      const rawExt = call.extension ?? call.extensions ?? call.ext;
+      const ext = (typeof rawExt === 'string' || Array.isArray(rawExt))
+        ? (rawExt as string | string[])
+        : undefined;
       deps.onLog?.(green(`🟢 Search(${query})`));
       const result = await codeSearchTool(query, {
         path: searchPath,
@@ -1064,6 +1109,65 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
           error: `move_file: gagal memindahkan file: ${err instanceof Error ? err.message : String(err)}`,
         });
       }
+    }
+    case 'revert_file': {
+      const file = String(call.path ?? call.file ?? call.target ?? '');
+      if (!file) {
+        return JSON.stringify({ error: 'revert_file: missing "path" field' });
+      }
+      let abs: string;
+      let rel: string;
+      try {
+        abs = resolveToolPath(file, ws);
+        rel = path.relative(ws, abs) || file;
+      } catch (err) {
+        return JSON.stringify({
+          error: `revert_file: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+
+      const config = deps.config ?? DEFAULT_CONFIG;
+      if (config.approvalEnabled && !isYoloMode()) {
+        if (!deps.confirm) {
+          return JSON.stringify({
+            error: `[Persetujuan ditolak: konfirmasi pengguna diperlukan untuk mengembalikan file "${rel}"]`,
+          });
+        }
+        const ok = await deps.confirm(
+          `revert_file ${rel}`,
+          `mengembalikan file "${rel}" ke kondisi sebelumnya (undo/git rollback)`,
+        );
+        if (!ok) {
+          return JSON.stringify({
+            error: `[Persetujuan ditolak: revert file "${rel}"]`,
+          });
+        }
+      }
+
+      const modeArg = call.mode === 'git' || call.mode === 'snapshot' ? call.mode : 'auto';
+      const result = revertFile(abs, {
+        workspaceRoot: ws,
+        mode: modeArg,
+      });
+
+      if (!result.ok) {
+        return JSON.stringify({
+          error: `revert_file: ${result.error}`,
+        });
+      }
+
+      deps.onLog?.(yellow(`↩ Revert(${rel})`));
+      return JSON.stringify(
+        {
+          ok: true,
+          path: rel,
+          action: result.action,
+          source: result.source,
+          message: result.message,
+        },
+        null,
+        2,
+      );
     }
     case 'remember': {
       const content = typeof call.content === 'string' ? call.content : null;
