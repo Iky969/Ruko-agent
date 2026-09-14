@@ -183,6 +183,36 @@ test('codeSearchTool filters by extension', async () => {
   assert.match(r.text, /docs\/readme\.md/);
 });
 
+test('codeSearchTool supports comma-separated string extensions', async () => {
+  const r = await codeSearchTool('helper', { extension: '.ts, .md' }, tmpDir);
+  assert.equal(r.ok, true);
+  assert.equal(r.totalFiles, 4);
+  assert.match(r.text, /docs\/readme\.md/);
+  assert.match(r.text, /src\/index\.ts/);
+
+  const rNoDots = await codeSearchTool('helper', { extension: 'ts,md' }, tmpDir);
+  assert.equal(rNoDots.ok, true);
+  assert.equal(rNoDots.totalFiles, 4);
+});
+
+test('codeSearchTool supports array of extensions', async () => {
+  const r = await codeSearchTool('helper', { extension: ['ts', 'md'] }, tmpDir);
+  assert.equal(r.ok, true);
+  assert.equal(r.totalFiles, 4);
+
+  const rWithDots = await codeSearchTool('helper', { extension: ['.ts', '.md'] }, tmpDir);
+  assert.equal(rWithDots.ok, true);
+  assert.equal(rWithDots.totalFiles, 4);
+
+  const rMixed = await codeSearchTool('helper', { extension: ['ts, js', '.md'] }, tmpDir);
+  assert.equal(rMixed.ok, true);
+  assert.equal(rMixed.totalFiles, 4);
+
+  const rNonMatching = await codeSearchTool('helper', { extension: ['json', '.txt'] }, tmpDir);
+  assert.equal(rNonMatching.ok, true);
+  assert.equal(rNonMatching.totalMatches, 0);
+});
+
 test('codeSearchTool searches a specific file path', async () => {
   const r = await codeSearchTool('helper', { path: 'src/utils/helper.ts' }, tmpDir);
   assert.equal(r.ok, true);
@@ -196,6 +226,17 @@ test('codeSearchTool respects limit cap and truncates cleanly', async () => {
   assert.equal(r.truncated, true);
   assert.match(r.text, /hasil terpotong/);
   assert.match(r.text, /\[\.\.\. Hasil dibatasi 1 kecocokan/);
+  assert.match(r.text, /more matches suppressed, persempit query/);
+});
+
+test('codeSearchTool reports total matches and suppressed count when hitting limit', async () => {
+  const r = await codeSearchTool('helper', { limit: 1 }, tmpDir);
+  assert.equal(r.ok, true);
+  assert.equal(r.truncated, true);
+  assert.ok(r.totalMatches > 1, 'totalMatches should count all occurrences even when capped');
+  const suppressed = r.totalMatches - 1;
+  assert.match(r.text, new RegExp(`${suppressed} more matches suppressed, persempit query`));
+  assert.match(r.text, new RegExp(`Menemukan ${r.totalMatches} kecocokan`));
 });
 
 test('codeSearchTool reports error on missing or empty query', async () => {
@@ -243,6 +284,37 @@ test('runToolCall dispatches code_search call', async () => {
   assert.equal(calls.length, 1);
   const out = await runToolCall(calls[0]);
   assert.match(out, /Menemukan \d+ kecocokan/);
+});
+
+test('runToolCall dispatches code_search with array and comma-separated extension', async () => {
+  const outComma = await runToolCall({
+    tool: 'code_search',
+    query: 'helper',
+    path: tmpDir,
+    extension: '.ts, .md',
+  });
+  assert.match(outComma, /Menemukan \d+ kecocokan/);
+  assert.match(outComma, /docs\/readme\.md/);
+  assert.match(outComma, /src\/index\.ts/);
+
+  const outArray = await runToolCall({
+    tool: 'code_search',
+    query: 'helper',
+    path: tmpDir,
+    extension: ['.ts', '.md'],
+  });
+  assert.match(outArray, /Menemukan \d+ kecocokan/);
+  assert.match(outArray, /docs\/readme\.md/);
+  assert.match(outArray, /src\/index\.ts/);
+
+  const outExtensionsAlias = await runToolCall({
+    tool: 'code_search',
+    query: 'helper',
+    path: tmpDir,
+    extensions: ['md'],
+  });
+  assert.match(outExtensionsAlias, /docs\/readme\.md/);
+  assert.ok(!outExtensionsAlias.includes('src/index.ts'));
 });
 
 test('runToolCall reports code_search missing query', async () => {

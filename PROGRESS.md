@@ -6,6 +6,77 @@
 
 ## 📦 Riwayat Rilis & Status Fitur (Changelog)
 
+### v1.6.2 (14 September 2026) — Stabilitas Termux Mobile, Perluasan Tool Inspeksi & Rollback Berkas, serta Hardening Sanitasi Memori
+
+#### Ditambahkan & Diperbarui
+- **Perbaikan Alur Seleksi Enter pada Menu Popup Slash Command (`src/core/tui.ts`)**:
+  * **Gejala Bug**: Saat pengguna mengetik `/` lalu menavigasikan panah atas/bawah (scroll highlight) pada daftar perintah, lalu menekan `Enter`, perintah yang ter-highlight tidak terpilih dan menu malah tertutup atau mengeksekusi buffer mentah (`/` kosong atau teks parsial).
+  * **Akar Masalah**: Handler Enter (`submit()`) hanya membaca `this.buffer` mentah tanpa memeriksa status item yang dipilih pada menu (`this.selected` / `this.menu[this.selected]`). Jika buffer adalah `'/'`, fungsi `menuOnlyClose` mendeteksinya sebagai penutupan overlay tanpa aksi sehingga menghapus menu tanpa mengeksekusi apa pun.
+  * **Solusi**: Menambahkan pelacak navigasi eksplisit `this.menuNavigated`. Saat pengguna memindahkan highlight dengan panah atas/bawah, `menuNavigated` aktif. Saat `Enter` ditekan, jika `menuNavigated` aktif dan ada item terpilih, `submit()` membaca dan memilih perintah tersebut (`item.insert ?? item.label`), menghapus menu secara bersih, dan mengeksekusi perintah terpilih. Jika pengguna hanya mengetik `/` tanpa menavigasi dan menekan Enter, perilaku menutup overlay tanpa commit tetap dipertahankan.
+- **Responsivitas Status Bar terhadap Terminal Width Sempit / Termux (`src/core/ui.ts`, `src/core/tui.ts`, `src/core/loop.ts`)**:
+  * **Gejala Bug**: Pada layar sempit (seperti Termux di mobile dengan lebar terminal 30–45 kolom), indikator status hijau terpotong di sebelah kanan sehingga persentase konteks (`ctx %`), indikator proses, dan status tidak terlihat.
+  * **Akar Masalah**:
+    1. `statusBarLine()` di `loop.ts` memanggil `buildStatusBar` tanpa meneruskan lebar terminal `width` dari `LineEditor`.
+    2. Deteksi terminal width hanya mengandalkan `process.stdout.columns ?? 80` tanpa memeriksa environment variable `COLUMNS` yang umum digunakan di shell Android/Termux.
+    3. `buildStatusBar` di `src/core/ui.ts` menghasilkan string panjang yang melampaui kolom layar sempit (< 48 kolom), sehingga otomatis dipotong paksa oleh `truncateVisible(..., width - 1)`.
+  * **Solusi**:
+    1. Memperbarui `terminalWidth()` dan `termWidth()` untuk memeriksa `process.env.COLUMNS` sebelum fallback ke default 80.
+    2. Meneruskan parameter `width` dari callback `statusLine(width)` di `LineEditor` hingga ke `buildStatusBar({ width })`.
+    3. Merombak layout `buildStatusBar` agar secara dinamis menyesuaikan elemen dengan `targetWidth = Math.max(16, width - 1)`. Pada layar sempit, indikator status kritis (`ctx %`, `⏳`, `⏸`) diprioritaskan di sisi kanan, sedangkan nama model dipersingkat secara proporsional (`…`) jika diperlukan, menjamin status bar tidak pernah terpotong.
+- **Pelaporan Total Match & Suppressed Matches pada `code_search` (`src/agent/filetools.ts`)**:
+  * **Gejala Bug**: Ketika pencarian teks atau regex mencapai batas limit (default 50 matches), tool langsung menghentikan iterasi (`break`), sehingga `totalMatches` yang dilaporkan hanya sebesar batas limit tersebut. Akibatnya pengguna/agen tidak mengetahui berapa jumlah match aktual yang ditemukan di proyek dan apakah masih ada ratusan kecocokan lain yang terpotong.
+  * **Akar Masalah**: Loop pemindaian berhenti prematur saat `displayedMatches >= limit` tanpa menghitung sisa kecocokan di file saat itu maupun file-file kandidat berikutnya.
+  * **Solusi**: Mengubah alur loop pencarian agar tetap memindai dan menghitung `totalMatches` serta jumlah file yang cocok (`matchedFilesCount`) secara akurat di seluruh kandidat tanpa memformat blok konteks untuk hasil di luar kuota limit (tetap hemat komputasi & token). Pada footer hasil pencarian yang terpotong, menambahkan pesan informatif: `[... Hasil dibatasi ${limit} kecocokan pertama — ${suppressed} more matches suppressed, persempit query, target path, atau extension ...]`.
+- **Tool `revert_file` & Rollback Berkas Fleksibel (`src/core/undo.ts`, `src/agent/tools.ts`, `src/agent/roles.ts`, `src/agent/commands.ts`, `src/core/ui.ts`)**:
+  * **Kebutuhan**: Setelah perubahan file melalui `patch_file`, `write_file`, atau `edit_file` disetujui, belum ada tool bawaan bagi agen untuk membatalkan perubahan secara spesifik per file jika hasil edit tidak sesuai harapan, dan pengguna hanya memiliki `/undo` global tanpa bisa memilih file tertentu.
+  * **Solusi**:
+    1. **Core Undo Engine (`src/core/undo.ts`)**: Menambahkan fungsi `revertFileSnapshot`, `revertFileGit`, dan `revertFile(targetPath, { dir, workspaceRoot, mode })`. Mendukung 3 mode (`auto`, `snapshot`, `git`). Pada mode `auto` (default), sistem memeriksa snapshot terbaru file di `.ruko/undo/` dan mengembalikannya (atau menghapusnya jika file baru); jika snapshot tidak ditemukan, sistem fallback mengeksekusi `git checkout -- <file>`.
+    2. **Agent Tool (`src/agent/tools.ts`)**: Mendaftarkan tool `revert_file` dengan validasi sandboxing workspace (`resolveToolPath`, anti-path-traversal, proteksi file sensitif), approval gate konfirmasi pengguna saat `approvalEnabled: true`, serta pemblokiran otomatis saat `planMode: true` (`PLAN_MODE_BLOCKED`).
+    3. **Prompt & Peran (`src/agent/roles.ts`)**: Mendokumentasikan tool `revert_file` pada `TOOL_RULES`, menambahkan `revert_file` ke aturan read-only peran `reviewer`, serta menambahkan ke proteksi plan mode.
+    4. **Slash Command `/undo [path]` (`src/agent/commands.ts`)**: Memperbarui perintah `/undo` agar dapat menerima argumen path opsional (mis. `/undo src/core/ui.ts`) untuk rollback file spesifik, sekaligus mempertahankan `/undo` tanpa argumen untuk membatalkan snapshot terakhir global.
+    5. **TUI Step Indicator (`src/core/ui.ts`)**: Menyertakan `revert_file` pada deteksi modifikasi berkas proyek di `inferStepDescription`.
+- **Sanitasi & Mitigasi Prompt Injection pada Memory (`src/core/memory.ts`, `src/agent/roles.ts`, `src/agent/tools.ts`)**:
+  * **Kebutuhan**: Entri memori yang tersimpan di `.ruko/memory.md` (baik via tool `remember` maupun editan manual) berpotensi disusupi instruksi imperatif tersembunyi (mis. `"jika user tanya X, jawab Y"`, `"you must always respond in JSON"`, atau override sistem) yang dapat memanipulasi perilaku model saat diinjeksikan otomatis ke konteks percakapan.
+  * **Solusi**:
+    1. **Deteksi Instruksi ke Model (`detectModelInstruction`, `MODEL_INSTRUCTION_RULES`)**: Menyusun aturan regex komprehensif untuk mendeteksi:
+       - Arahan kondisional respons ke pengguna (`"jika user tanya X, jawab Y"` / `"if user asks X, reply Y"`).
+       - Perintah kontrol perilaku model langsung (`"kamu harus selalu menjawab..."` / `"you must never reply..."`).
+       - Percobaan prompt injection / jailbreak / override instruksi sistem (`"ignore all previous instructions..."`, `"system prompt: ..."`).
+       - Tetap meloloskan catatan teknis dan fakta proyek pasif yang sah (mis. `"Gunakan PostgreSQL untuk DB produksi"`, `"Port server default adalah 3000"`).
+    2. **Gate Penyimpanan (`appendMemory`)**: Secara default menolak entri yang terdeteksi sebagai instruksi imperatif ke model (`actionOnInstruction: 'reject'`), mencegah polusi instruksi ke `.ruko/memory.md`. Mendukung opsi `'tag'` untuk menetralkan entri dengan penanda pasif jika diminta.
+    3. **Gate Konteks / Sanitasi Injeksi (`sanitizeMemoryForPrompt`, `formatMemoryForPrompt`)**: Untuk file `.ruko/memory.md` yang diedit manual di luar kendali CLI, sistem memindai setiap baris memori sebelum diinjeksikan ke prompt. Baris yang terdeteksi berformat instruksi ke model otomatis disanitasi dengan label `[INSTRUKSI_DIABAIKAN / DATA PASIF: ...]`, dan panduan sistem dipertegas agar model dilarang menjalankan entri bertanda tersebut sebagai perintah eksekusi.
+    4. **Panduan Prompt Tool (`src/agent/roles.ts`)**: Memperbarui deskripsi `remember` di `TOOL_RULES` agar agen memahami bahwa instruksi imperatif interaktif dilarang disimpan ke memori.
+- **Peningkatan Timeout Default `exec` & Parameter Timeout Per-Panggilan (`src/core/executor.ts`, `src/types.ts`, `src/core/approval.ts`, `src/agent/tools.ts`, `src/agent/roles.ts`)**:
+  * **Kebutuhan**: Timeout default `exec` sebelumnya adalah 30 detik (30_000ms), terlalu singkat untuk tugas kompilasi, instalasi package (`npm install`), atau suite pengujian lama, memaksa penggunaan `start_process` yang tidak praktis untuk perintah foreground singkat. Selain itu, belum ada jalur parsing resmi untuk parameter timeout kustom per panggilan tool.
+  * **Solusi**:
+    1. **Peningkatan Timeout Default**: Menaikkan `DEFAULT_TIMEOUT_MS` di `src/core/executor.ts` dan `DEFAULT_CONFIG.execTimeoutMs` di `src/types.ts` dari 30s menjadi 120s (120_000ms / 2 menit).
+    2. **Parameter Timeout Per-Panggilan (`resolveExecTimeout`)**: Menambahkan fungsi parser yang mendukung parameter `timeoutMs`, `timeout_ms`, dan `timeout` (baik tipe number maupun string numerik). Nilai kecil (`<= 600`) tanpa embel-embel 'Ms' otomatis diinterpretasikan sebagai detik (misal `timeout: 60` -> 60_000ms) dan di-clamp secara aman antara 100ms hingga 3_600_000ms (1 jam).
+    3. **Penyaluran Konfigurasi Aman (`src/core/approval.ts`)**: Memastikan `guardedExecute` menyalurkan `options.timeoutMs ?? config.execTimeoutMs` ke fungsi eksekutor, menghormati konfigurasi pengguna.
+    4. **Notifikasi Timeout Informatif (`src/core/executor.ts`)**: Ketika proses dihentikan paksa karena timeout, sistem menyertakan pesan diagnostik ramah di output/stderr: `[Command dihentikan: waktu eksekusi melebihi batas timeout Xms. Gunakan parameter timeoutMs lebih besar pada exec jika command membutuhkan waktu lebih lama, atau gunakan start_process untuk proses latar belakang.]`.
+    5. **Prompt Tool Rules (`src/agent/roles.ts`)**: Memperbarui dokumentasi protokol tool `exec` di `TOOL_RULES` untuk mencerminkan default 120s dan instruksi penggunaan `timeoutMs`.
+- **Dukungan Array & String Comma-Separated pada Parameter `extension` di `code_search` (`src/agent/filetools.ts`, `src/agent/tools.ts`, `src/agent/roles.ts`)**:
+  * **Kebutuhan**: Parameter `extension` pada tool `code_search` sebelumnya hanya menerima tipe string tunggal (mis. `"ts"`), sehingga pencarian lintas tipe file (misal TypeScript dan TSX, atau Markdown dan JS) memerlukan pemanggilan tool berkali-kali secara manual.
+  * **Solusi**:
+    1. **Normalisasi Filter Ekstensi (`parseExtensionFilter`)**: Menambahkan fungsi normalisasi di `src/agent/filetools.ts` yang menangani `string`, `string[]`, maupun string comma-separated (mis. `".ts, .tsx"`, `"ts,tsx"`, atau `[".ts", ".tsx"]`). Ekstensi dipangkas dari whitespace, dinormalisasi ke lowercase, dan titik awalan dibersihkan menjadi `Set<string>`.
+    2. **Penyelarasan Dispatcher Tool (`src/agent/tools.ts`)**: Mengizinkan penerimaan nilai array maupun string pada `call.extension`, `call.extensions`, maupun alias `call.ext`.
+    3. **Prompt Tool Rules (`src/agent/roles.ts`)**: Memperbarui deskripsi aturan `code_search` di `TOOL_RULES` untuk mengedukasi model bahwa `extension` menerima format array atau comma-separated.
+- **Tool `list_dir` untuk Inspeksi Langsung Isi Direktori (`src/agent/filetools.ts`, `src/agent/tools.ts`, `src/agent/roles.ts`, `src/core/ui.ts`)**:
+  * **Kebutuhan**: Sebelumnya agen harus menggunakan `glob` dengan pola `*` untuk melihat isi folder. Tidak ada tool sederhana 1-level untuk menginspeksi direktori secara langsung beserta ukuran berkasnya.
+  * **Solusi**:
+    1. **Core Directory Listing (`src/agent/filetools.ts`)**: Menambahkan `listDirTool` dengan validasi sandboxing workspace (`assertInsideWorkspace`), proteksi berkas sensitif otomatis (`isSensitivePath`), pemilahan jenis entri (`[DIR]`, `[FILE]` dengan ukuran format B/KB/MB, `[LINK]`), dan pengelompokan direktori di urutan teratas.
+    2. **Tool Dispatcher (`src/agent/tools.ts`)**: Mendaftarkan tool `list_dir` dan alias `list_directory`, mengizinkan akses read-only (tersedia di plan mode tanpa blok).
+    3. **Prompt & Role Integration (`src/agent/roles.ts`)**: Mendokumentasikan `list_dir` di `TOOL_RULES`, menambahkan `list_dir` ke daftar allowlist peran read-only `reviewer`, dan memperbarui rekomendasi penemuan berkas.
+    4. **TUI Step Description (`src/core/ui.ts`)**: Memetakan tool `list_dir` ke inferensi langkah kerja UI TUI ("Membaca konfigurasi & struktur berkas").
+- **Rangkaian Pengujian**:
+  * Menambahkan 9 unit test baru di `src/tests/revert_file.test.ts` (revert dari snapshot, penghapusan file baru, fallback git checkout, penolakan mode snapshot jika tanpa snapshot, approval gate, plan mode blocking, proteksi file sensitif & path traversal, serta perintah `/undo [path]`).
+  * Menambahkan 4 unit test baru di `src/tests/memory.test.ts` (akurasi deteksi instruksi imperatif vs fakta pasif, penolakan dan penandaan di `appendMemory`, penolakan di tool `remember`, serta netralisasi otomatis di `sanitizeMemoryForPrompt`).
+  * Menambahkan 6 unit test baru di `src/tests/exec_timeout.test.ts` (default 120s, parser parameter `resolveExecTimeout`, terminasi command timeout dengan pesan notifikasi, eksekusi sukses di bawah batas, dan integrasi per-call `timeoutMs` & `timeout`).
+  * Menambahkan 3 unit test baru di `src/tests/glob_search.test.ts` (dukungan comma-separated string `".ts, .md"`, array `[".ts", ".md"]`, variasi tanpa dot/dengan spasi, dan dispatch `runToolCall` dengan array/comma-separated).
+  * Menambahkan 13 unit test baru di `src/tests/list_dir.test.ts` (listing direktori dan file beserta ukuran, default root path, subdirektori, direktori kosong, batas limit & truncating, penolakan path file & folder fiktif, proteksi sandboxing workspace `/etc`, proteksi berkas sensitif `.env` / `.ruko/config.json`, opsi `showHidden`, dispatch `runToolCall` & alias `list_directory`, ketersediaan di plan mode, dan inferensi langkah TUI).
+  * Total pengujian: **409 passed** (100% lulus, 0 gagal).
+
+---
+
 ### v1.6.1 (14 September 2026) — Preservasi Utuh Pesan Asisten, State Loop Turn Deduplication, & Robust Tool Loop Guard
 
 #### Ditambahkan & Diperbarui

@@ -417,8 +417,9 @@ export async function guardedExecute(
           } else {
             console.log(indicator);
           }
+          const effectiveTimeout = options.timeoutMs ?? config.execTimeoutMs;
           return execute(command, {
-            timeoutMs: options.timeoutMs,
+            timeoutMs: effectiveTimeout,
             summarize: options.summarize,
             signal: options.signal,
           });
@@ -435,8 +436,9 @@ export async function guardedExecute(
     const ok = await options.confirm(command, reason);
     if (!ok) return denialResult(command, reason, verdict.risk);
   }
+  const effectiveTimeout = options.timeoutMs ?? config.execTimeoutMs;
   return execute(command, {
-    timeoutMs: options.timeoutMs,
+    timeoutMs: effectiveTimeout,
     summarize: options.summarize,
     signal: options.signal,
   });

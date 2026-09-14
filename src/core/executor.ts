@@ -18,7 +18,7 @@ export interface ExecOptions {
   signal?: AbortSignal;
 }
 
-export const DEFAULT_TIMEOUT_MS = 30_000;
+export const DEFAULT_TIMEOUT_MS = 120_000;
 export const DEFAULT_MAX_BUFFER = 10 * 1024 * 1024;
 
 /**
@@ -46,6 +46,18 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
         // `error.code` is the process exit code; `null` when killed by timeout.
         const code = error ? (typeof error.code === 'number' ? error.code : null) : 0;
         let output = [stdout, stderr].filter(Boolean).join('\n');
+
+        // Check if process was killed by timeout
+        const killedByTimeout = Boolean(
+          error && (error.killed || (error as any).signal === 'SIGTERM') && durationMs >= Math.max(0, timeoutMs - 1500),
+        );
+        if (killedByTimeout) {
+          const timeoutMsg =
+            `\n[Command dihentikan: waktu eksekusi melebihi batas timeout ${timeoutMs}ms (${Math.round(timeoutMs / 1000)}s). ` +
+            `Gunakan parameter timeoutMs lebih besar jika command membutuhkan waktu lebih lama, atau gunakan start_process untuk proses latar belakang.]`;
+          output = output ? `${output}\n${timeoutMsg}` : timeoutMsg;
+          stderr = stderr ? `${stderr}\n${timeoutMsg}` : timeoutMsg;
+        }
 
         let truncated = false;
 

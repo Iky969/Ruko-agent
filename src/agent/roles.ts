@@ -36,20 +36,24 @@ export const CORE_IDENTITY =
 /** (b) Tool protocol — byte-identical every call to maximize cache hits. */
 export const TOOL_RULES =
   'Tool protocol:\n' +
-  '- To run a shell command, reply with a single fenced block:\n' +
-  '```tool\n{"tool": "exec", "command": "<command>", "cwd": null, "timeoutMs": 30000}\n```\n' +
+  '- To run a foreground shell command, reply with a single fenced block:\n' +
+  '```tool\n{"tool": "exec", "command": "<command>", "cwd": null, "timeoutMs": 120000}\n```\n' +
+  '  Default timeout is 120000ms (2 minutes). For longer foreground commands, pass a higher timeoutMs (e.g. 300000 for 5 minutes). Use start_process for background servers/watchers.\n' +
   '- To search for files matching a glob pattern or discover directory trees, reply with:\n' +
   '```tool\n{"tool": "glob", "pattern": "**/*.ts", "path": "."}\n```\n' +
   '  Returns matching relative file paths (ignores node_modules, .git, dist, .ruko, coverage, and binaries; capped at 200 files).\n' +
+  '- To inspect the direct contents of a directory (files with byte sizes and subdirectories) without glob pattern matching, reply with:\n' +
+  '```tool\n{"tool": "list_dir", "path": "."}\n```\n' +
+  '  Returns immediate child files and directories (ignores sensitive paths).\n' +
   '- To search for text or regex across code files with context lines, reply with:\n' +
-  '```tool\n{"tool": "code_search", "query": "<string or regex>", "path": ".", "extension": "ts"}\n```\n' +
-  '  Returns matching lines with line numbers and 1-2 surrounding context lines (capped at 50 matches).\n' +
+  '```tool\n{"tool": "code_search", "query": "<string or regex>", "path": ".", "extension": "ts,tsx"}\n```\n' +
+  '  Returns matching lines with line numbers and 1-2 surrounding context lines (capped at 50 matches; extension accepts string, comma-separated e.g. "ts,tsx", or array e.g. ["ts", "tsx"]).\n' +
   '- To read a text file (numbered lines, paginated), reply with:\n' +
   '```tool\n{"tool": "read_file", "path": "<file>", "offset": 1, "limit": 200}\n```\n' +
   '  Use offset/limit to page through large files; the result reports the total line count.\n' +
   '- To record a persistent fact, project decision, or user preference across sessions, reply with:\n' +
   '```tool\n{"tool": "remember", "content": "<concise note or fact>"}\n```\n' +
-  '  Appends a dated bullet to .ruko/memory.md. Use only for important project facts, architectural decisions, and user preferences useful in future sessions; NEVER use for temporary state or trivial details.\n' +
+  '  Appends a dated bullet to .ruko/memory.md. Use only for important project facts, architectural decisions, and user preferences useful in future sessions; NEVER use for temporary state, trivial details, or imperative model instructions (e.g. "if user asks X, reply Y").\n' +
   '- To search past conversation histories across saved sessions, reply with:\n' +
   '```tool\n{"tool": "search_sessions", "query": "<keywords>", "limit": 5}\n```\n' +
   '  Returns matching conversation snippets from past sessions (newest first, up to limit).\n' +
@@ -57,15 +61,16 @@ export const TOOL_RULES =
   '```tool\n{"tool": "list_skills"}\n```\n' +
   '- To load detailed instructions for a specific project skill, reply with:\n' +
   '```tool\n{"tool": "load_skill", "name": "<skill-name>"}\n```\n' +
-  '- To save a reusable procedure or learned workflow as a skill, reply with:\n' +
-  '```tool\n{"tool": "save_skill", "name": "<skill-name>", "description": "<summary>", "instructions": "<markdown instructions>"}\n```\n' +
-  '  RULE: Save a NEW skill ONLY when: (a) user explicitly gives repeated, complex instructions (not for one-off tasks), OR (b) user explicitly asks "simpan ini sebagai skill". NEVER save skills automatically or silently from ordinary turns. Content must be generalizable across contexts, not specific to one task.\n' +
-  '- To delete an obsolete or unneeded project skill, reply with:\n' +
+  '  Returns markdown documentation and guidance for the skill.\n' +
+  '- To save or update a reusable project skill, reply with:\n' +
+  '```tool\n{"tool": "save_skill", "name": "<skill-name>", "description": "<brief summary>", "content": "<markdown body>"}\n```\n' +
+  '  Creates or updates .ruko/skills/<skill-name>/SKILL.md (subject to user confirmation when approval is active).\n' +
+  '- To delete an existing project skill, reply with:\n' +
   '```tool\n{"tool": "delete_skill", "name": "<skill-name>"}\n```\n' +
-  '  Requires user confirmation [Y/N] via approval gate; displays skill content preview before deletion.\n' +
-  '- To fetch and sanitize content from a web page (HTTP/HTTPS), reply with:\n' +
+  '  Removes .ruko/skills/<skill-name>/ directory (subject to user confirmation when approval is active).\n' +
+  '- To fetch content from a URL via HTTP GET, reply with:\n' +
   '```tool\n{"tool": "web_fetch", "url": "<https-url>"}\n```\n' +
-  '  Fetches web content (HTML sanitized to clean text, JSON, or plain text; capped at 5k chars). Binds to a 10s timeout.\n' +
+  '  Retrieves web documentation or APIs; rejects private/internal IP addresses (SSRF protection); converts HTML to clean readable text.\n' +
   '- To delegate a self-contained sub-task or research query to an isolated subagent, reply with:\n' +
   '```tool\n{"tool": "delegate", "task": "<task description>"}\n```\n' +
   '  Spawns an isolated subagent with its own fresh context and returns the concise result.\n' +
@@ -81,19 +86,22 @@ export const TOOL_RULES =
   '```tool\n{"tool": "delete_file", "path": "<file>"}\n```\n' +
   '- To move or rename a file, reply with:\n' +
   '```tool\n{"tool": "move_file", "source": "<source-path>", "target": "<target-path>"}\n```\n' +
-  '- To run a non-blocking background command (e.g. dev server, build watcher), reply with:\n' +
-  '```tool\n{"tool": "start_process", "command": "<command>", "cwd": "<optional-subdir>"}\n```\n' +
-  '  Spawns a detached process (max 3 concurrent active processes; requires user approval gate).\n' +
-  '- To read recent logs from a background process, reply with:\n' +
-  '```tool\n{"tool": "read_process_logs", "process_id": "<process-id>"}\n```\n' +
-  '  Returns the ring buffer of up to 100 recent lines (stdout/stderr) with automatic credential redaction.\n' +
-  '- To inspect the status of a background process, reply with:\n' +
+  '- To revert or undo changes to a specific file (using local snapshot or git rollback), reply with:\n' +
+  '```tool\n{"tool": "revert_file", "path": "<file>", "mode": "auto"}\n```\n' +
+  '  Restores the file to its previous state prior to the last edit/patch/write. Mode can be "auto" (default: snapshot then git fallback), "snapshot", or "git".\n' +
+  '- To start a background service, server, or watcher process, reply with:\n' +
+  '```tool\n{"tool": "start_process", "command": "<command>", "cwd": null}\n```\n' +
+  '  Returns a process ID for tracking; does not block the agent loop.\n' +
+  '- To inspect recent stdout/stderr output from a background process, reply with:\n' +
+  '```tool\n{"tool": "read_process_logs", "process_id": "<process-id>", "lines": 50}\n```\n' +
+  '  Returns the tail of the process output buffer.\n' +
+  '- To check whether a background process is currently running, reply with:\n' +
   '```tool\n{"tool": "get_status", "process_id": "<process-id>"}\n```\n' +
   '  Returns deterministic status: "running", "exited", or "stale".\n' +
   '- To terminate a background process, reply with:\n' +
   '```tool\n{"tool": "stop_process", "process_id": "<process-id>"}\n```\n' +
   '  Sends SIGTERM then SIGKILL if needed (non-destructive action, no approval required).\n' +
-  '- Prefer glob and code_search to discover files and locate code before reading full files; prefer read_file over cat/head/tail; prefer patch_file/edit_file/write_file/delete_file/move_file over shell redirection and rm/mv; use start_process for long-running/background services; use exec for everything else.\n' +
+  '- Prefer glob, list_dir, and code_search to discover files and locate code before reading full files; prefer read_file over cat/head/tail; prefer patch_file/edit_file/write_file/delete_file/move_file/revert_file over shell redirection and rm/mv/git checkout; use start_process for long-running/background services; use exec for everything else.\n' +
   '- After receiving the tool result, either run another tool or answer in plain text.\n' +
   '- Large command output is summarized with [... TRUNCATED ...] markers; work with what remains and re-run a narrower command if needed.\n';
 
@@ -109,7 +117,7 @@ export const BUILT_IN_ROLES: RoleDef[] = [
     name: 'reviewer',
     description: 'Hanya baca + memberi masukan (tidak mengubah file).',
     prompt:
-      'Role: code reviewer. You are READ-ONLY: never call exec/start_process/stop_process/write_file/edit_file/patch_file/delete_file/move_file/remember/save_skill/delete_skill — only read_file, glob, code_search, list_skills, load_skill, web_fetch, search_sessions, read_process_logs, and get_status are allowed. Give structured feedback: bugs and risks first (with file:line), then improvements, then positives. Suggest concrete fixes as snippets, do not apply them.',
+      'Role: code reviewer. You are READ-ONLY: never call exec/start_process/stop_process/write_file/edit_file/patch_file/delete_file/move_file/revert_file/remember/save_skill/delete_skill — only read_file, glob, list_dir, code_search, list_skills, load_skill, web_fetch, search_sessions, read_process_logs, and get_status are allowed. Give structured feedback: bugs and risks first (with file:line), then improvements, then positives. Suggest concrete fixes as snippets, do not apply them.',
   },
   {
     name: 'teacher',
@@ -200,7 +208,7 @@ export interface PromptLayers {
 /** Plan-mode guard as prose — the hard enforcement lives in the CLI code (§4). */
 export function planModeAddendum(): string {
   return (
-    'ACTIVE MODE — PLAN: You may ONLY read and propose. Do not call exec/start_process/write_file/edit_file/patch_file/delete_file/move_file/remember/save_skill/delete_skill ' +
+    'ACTIVE MODE — PLAN: You may ONLY read and propose. Do not call exec/start_process/write_file/edit_file/patch_file/delete_file/move_file/revert_file/remember/save_skill/delete_skill ' +
     '(the CLI blocks them anyway). Output a numbered step plan for user approval; the user runs it after ' +
     'exiting plan mode with /plan off.'
   );

@@ -11,6 +11,7 @@ import {
   renderBox,
   renderApprovalBox,
   renderDivider,
+  terminalWidth,
   truncateVisible,
   RevealFilter,
   stripAnsi,
@@ -355,5 +356,53 @@ test('status bar integrates active background processes and is responsive on nar
   assert.ok(narrowPlain.includes('ctx 20%'), 'contains context percent');
   assert.ok(visibleLength(truncateVisible(narrowBar, 40)) <= 40, 'narrow status bar fits <= 40 cols');
 });
+
+test('status bar on narrow screens (Termux <= 40 cols) preserves context percent and indicators without cutting off', () => {
+  // Long model name on 40 columns
+  const bar40 = buildStatusBar({
+    model: 'claude-3-7-sonnet-20250219',
+    usedChars: 12000,
+    budgetChars: 30000,
+    width: 40,
+    busy: true,
+    activeProcesses: [{ command: 'vite' }],
+  });
+  const plain40 = stripAnsi(bar40);
+  assert.ok(plain40.includes('ctx 40%'), 'ctx percent must be present on 40-col screen');
+  assert.ok(plain40.includes('⏳'), 'busy indicator must be present');
+  assert.ok(visibleLength(bar40) <= 39, `visible length (${visibleLength(bar40)}) must be <= 39 cols`);
+
+  // Extra narrow terminal (34 columns, e.g. mobile portrait with font zoom)
+  const bar34 = buildStatusBar({
+    model: 'gemini-2.5-flash',
+    usedChars: 6000,
+    budgetChars: 30000,
+    width: 34,
+  });
+  const plain34 = stripAnsi(bar34);
+  assert.ok(plain34.includes('ctx 20%'), 'ctx percent must be present on 34-col screen');
+  assert.ok(visibleLength(bar34) <= 33, `visible length (${visibleLength(bar34)}) must be <= 33 cols`);
+});
+
+test('terminalWidth respects process.env.COLUMNS when stdout.columns is undefined', () => {
+  const origCols = process.stdout.columns;
+  const origEnv = process.env.COLUMNS;
+  try {
+    delete (process.stdout as any).columns;
+    process.env.COLUMNS = '42';
+    assert.equal(terminalWidth(), 42);
+
+    process.env.COLUMNS = '12'; // below min 20
+    assert.equal(terminalWidth(), 20);
+
+    delete process.env.COLUMNS;
+    assert.equal(terminalWidth(), 80); // fallback
+  } finally {
+    process.stdout.columns = origCols;
+    if (origEnv !== undefined) process.env.COLUMNS = origEnv;
+    else delete process.env.COLUMNS;
+  }
+});
+
 
 

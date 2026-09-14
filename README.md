@@ -1,10 +1,10 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-1.6.1-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.6.2-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-368%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-409%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
@@ -196,17 +196,19 @@ Agen menggunakan protokol tool call terstruktur dalam blok kode:
 
 | Tool | Kategori | Deskripsi & Kegunaan |
 | :--- | :---: | :--- |
-| `exec` | Eksekusi | Menjalankan perintah shell melalui filter *approval gate* dua lapis dan *log summarizer*. |
+| `exec` | Eksekusi | Menjalankan perintah shell melalui filter *approval gate* dua lapis dan *log summarizer* (default 120s, mendukung `timeoutMs`). |
 | `glob` | Inspeksi | Menemukan daftar berkas berdasarkan pola glob multi-pattern (mengabaikan folder build & biner). |
-| `code_search` | Inspeksi | Pencarian keyword atau regex di seluruh berkas teks dengan baris konteks. |
+| `list_dir` | Inspeksi | Menampilkan isi langsung direktori (subfolder dan berkas beserta ukuran byte) tanpa glob traversal. |
+| `code_search` | Inspeksi | Pencarian keyword atau regex di seluruh berkas teks dengan baris konteks (mendukung filter extension array / comma-separated). |
 | `read_file` | Pembacaan | Membaca isi berkas teks berpaginasi (offset/limit) dan bernomor baris. |
 | `write_file` | Penulisan | Membuat berkas baru di dalam batas workspace. |
 | `edit_file` | Penulisan | Menimpa isi berkas yang sudah ada dengan menampilkan *diff* visual perubahan. |
 | `patch_file` | Penulisan | Mengganti potongan teks unik secara presisi (*search-and-replace* hemat token). |
 | `delete_file` | Manipulasi | Menghapus berkas tunggal secara aman (wajib konfirmasi `[Y/N]` dan snapshot undo otomatis). |
 | `move_file` | Manipulasi | Memindahkan / mengganti nama berkas (wajib konfirmasi `[Y/N]` dan snapshot undo otomatis). |
+| `revert_file` | Manipulasi | Mengembalikan berkas ke kondisi sebelumnya (snapshot `.ruko/undo/` atau fallback `git checkout`). |
 | `web_fetch` | Jaringan | Mengambil konten web publik (HTML/JSON/Text) dengan timeout 10 detik dan sanitasi HTML. |
-| `remember` | Memori | Menyimpan fakta proyek/preferensi ke `.ruko/memory.md` lintas sesi. |
+| `remember` | Memori | Menyimpan fakta proyek/preferensi ke `.ruko/memory.md` lintas sesi (dengan proteksi sanitasi prompt injection). |
 | `search_sessions` | Pencarian | Pencarian percakapan lintas sesi tersimpan secara inkremental (default limit 5, cuplikan maks. 150 karakter). |
 | `load_skill` | Skill | Memuat instruksi operasional skill proyek dari `.ruko/skills/`. |
 | `save_skill` | Skill | Menyimpan alur kerja sukses sebagai skill baru yang reusable (hanya jika diminta / instruksi berulang). |
@@ -237,7 +239,7 @@ Ketik `/` di terminal untuk memunculkan menu interaktif, atau gunakan perintah b
 | `/clear` | Membersihkan memori percakapan pada sesi saat ini. |
 | `/compact` | Memaksa kompresi riwayat percakapan saat ini. |
 | `/plan on \| off` | Mode rencana: mengunci tool penulisan dan eksekusi di level kode. |
-| `/undo` | Membatalkan perubahan berkas terakhir dari jurnal `.ruko/undo/`. |
+| `/undo [path]` | Membatalkan perubahan berkas terakhir atau berkas spesifik dari jurnal `.ruko/undo/`. |
 | `/role [nama]` | Mengganti peran sistem AI (`default`, `reviewer`, `teacher`, `minimal`). |
 | `/mode beginner \| pro` | Mode pengguna: panduan mendalam (`beginner`) atau ringkas (`pro`). |
 | `/anim [on\|off]` | Mengaktifkan/menonaktifkan animasi Pac-Man saat AI berpikir. |

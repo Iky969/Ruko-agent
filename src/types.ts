@@ -110,7 +110,7 @@ export interface AgentConfig {
 export const DEFAULT_CONFIG: AgentConfig = {
   maxContextChars: 30_000,
   maxLogChars: 1_000,
-  execTimeoutMs: 30_000,
+  execTimeoutMs: 120_000,
   approvalEnabled: true,
   approvalAllowlist: [],
   // No provider-specific default: the setup wizard requires the user to fill

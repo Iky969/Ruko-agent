@@ -86,6 +86,69 @@ test('Tab accepts the highlighted command (§4)', async () => {
   assert.equal(await line, '/config ');
 });
 
+test('Arrow down navigation and Enter selects the highlighted command in slash menu', async () => {
+  const menu = (buffer: string): MenuItem[] =>
+    buffer.startsWith('/')
+      ? [
+          { label: '/help', detail: 'help text', insert: '/help' },
+          { label: '/model', detail: 'switch model', insert: '/model ' },
+          { label: '/exit', detail: 'quit', insert: '/exit' },
+        ]
+      : [];
+  const { editor, input } = makeEditor();
+  const line = editor.readLine({
+    prompt: '› ',
+    getMenu: menu,
+    menuOnlyClose: (b) => b.trim() === '/',
+  });
+  input.send('/'); // open overlay
+  input.send('\u001b[B'); // Arrow Down -> moves to /model (index 1)
+  input.send('\r'); // Enter should select /model instead of closing or submitting bare '/'
+  assert.equal(await line, '/model');
+});
+
+test('Arrow up navigation wraps to bottom and Enter selects the highlighted command', async () => {
+  const menu = (buffer: string): MenuItem[] =>
+    buffer.startsWith('/')
+      ? [
+          { label: '/help', detail: 'help text', insert: '/help' },
+          { label: '/model', detail: 'switch model', insert: '/model ' },
+          { label: '/exit', detail: 'quit', insert: '/exit' },
+        ]
+      : [];
+  const { editor, input } = makeEditor();
+  const line = editor.readLine({
+    prompt: '› ',
+    getMenu: menu,
+    menuOnlyClose: (b) => b.trim() === '/',
+  });
+  input.send('/'); // open overlay (selected: 0)
+  input.send('\u001b[A'); // Arrow Up -> wraps to /exit (index 2)
+  input.send('\r'); // Enter selects /exit
+  assert.equal(await line, '/exit');
+});
+
+test('Typing after arrow navigation resets selection back to typed buffer', async () => {
+  const menu = (buffer: string): MenuItem[] =>
+    buffer.startsWith('/')
+      ? [
+          { label: '/help', detail: 'help text', insert: '/help' },
+          { label: '/model', detail: 'switch model', insert: '/model ' },
+        ]
+      : [];
+  const { editor, input } = makeEditor();
+  const line = editor.readLine({
+    prompt: '› ',
+    getMenu: menu,
+    menuOnlyClose: (b) => b.trim() === '/',
+  });
+  input.send('/');
+  input.send('\u001b[B'); // Arrow Down -> /model
+  input.send('c'); // Now buffer is '/c', typing cancels active menuNavigated
+  input.send('\r'); // Enter submits '/c'
+  assert.equal(await line, '/c');
+});
+
 test('masked input never echoes the secret, only the mask (§5)', async () => {
   const { editor, input, output } = makeEditor();
   const line = editor.readLine({ prompt: 'API Key: ', mask: true });

@@ -35,7 +35,7 @@ export interface ReadLineOptions {
    * editor redraws it in place on every frame and ERASES it on submit/cancel,
    * so at most one status bar is ever alive on screen.
    */
-  statusLine?: () => string;
+  statusLine?: (width?: number) => string;
   /** Dim hint shown only while the buffer is empty (§3). */
   placeholder?: string;
   /** Echo `*` per character instead of the real text (§5). */
@@ -60,7 +60,7 @@ export interface AmbientOptions {
   prompt: string;
   placeholder?: string;
   /** Live status line drawn above the input (same renderer as readLine). */
-  statusLine?: () => string;
+  statusLine?: (width?: number) => string;
   /** Slash overlay while the AI works — identical filtering rules. */
   getMenu?: (buffer: string) => MenuItem[];
   /** Enter pressed while the AI is busy — the loop shows the queue modal. */
@@ -105,6 +105,7 @@ export class LineEditor {
   private cursor = 0;
   private menu: MenuItem[] = [];
   private selected = 0;
+  private menuNavigated = false;
   private history: string[] = [];
   private historyIndex = -1;
   private historySavedBuffer = '';
@@ -182,6 +183,7 @@ export class LineEditor {
     this.cursor = 0;
     this.menu = [];
     this.selected = 0;
+    this.menuNavigated = false;
     this.drawnRows = 0;
     this.drawnCursorRow = 0;
     this.statusRows = 0;
@@ -215,6 +217,7 @@ export class LineEditor {
     this.cursor = 0;
     this.menu = [];
     this.selected = 0;
+    this.menuNavigated = false;
     this.drawnRows = 0;
     this.drawnCursorRow = 0;
     this.statusRows = 0;
@@ -267,6 +270,7 @@ export class LineEditor {
     this.ambientSaved = null;
     this.menu = [];
     this.selected = 0;
+    this.menuNavigated = false;
     this.drawnRows = 0;
     this.drawnCursorRow = 0;
     this.statusRows = 0;
@@ -309,6 +313,7 @@ export class LineEditor {
     this.cursor = 0;
     this.menu = [];
     this.selected = 0;
+    this.menuNavigated = false;
     this.drawnRows = 0;
     this.drawnCursorRow = 0;
     this.statusRows = 0;
@@ -321,7 +326,9 @@ export class LineEditor {
 
   /** Usable terminal width (fallback 80 when stdout is not a TTY). */
   private termWidth(): number {
-    return Math.max(20, this.output.columns ?? 80);
+    const envCols = process.env.COLUMNS ? parseInt(process.env.COLUMNS, 10) : NaN;
+    const cols = this.output.columns ?? process.stdout.columns ?? (Number.isFinite(envCols) && envCols > 0 ? envCols : undefined) ?? 80;
+    return Math.max(20, cols);
   }
 
   private renderedLine(): string {
@@ -416,7 +423,7 @@ export class LineEditor {
     const { rows, heights } = this.modal ? { rows: [], heights: [] } : this.menuRows();
     const width = this.termWidth();
 
-    const status = options.statusLine ? truncateVisible(options.statusLine(), width - 1) : '';
+    const status = options.statusLine ? truncateVisible(options.statusLine(width), width - 1) : '';
     const line = this.renderedLine();
     const lineRows = Math.max(1, Math.ceil(visibleLength(line) / width));
     const col = visibleLength(options.prompt) + this.cursor;
@@ -584,7 +591,7 @@ export class LineEditor {
         this.tail = tailOut;
         const width = this.termWidth();
         const options = this.activeOptions();
-        const currentStatus = options.statusLine ? truncateVisible(options.statusLine(), width - 1) : '';
+        const currentStatus = options.statusLine ? truncateVisible(options.statusLine(width), width - 1) : '';
         const statusChanged = currentStatus !== this.lastRenderedStatus;
 
         if (statusChanged) {
@@ -678,6 +685,7 @@ export class LineEditor {
         if (this.menu.length > 0) {
           this.menu = [];
           this.selected = 0;
+          this.menuNavigated = false;
           this.render();
           i += 1;
           continue;
@@ -734,6 +742,7 @@ export class LineEditor {
       if (ch === '\u0015') {
         this.buffer = '';
         this.cursor = 0;
+        this.menuNavigated = false;
         i += 1;
         continue;
       }
@@ -801,22 +810,26 @@ export class LineEditor {
   private insert(text: string): void {
     this.buffer = this.buffer.slice(0, this.cursor) + text + this.buffer.slice(this.cursor);
     this.cursor += text.length;
+    this.menuNavigated = false;
   }
 
   private backspace(): void {
     if (this.cursor === 0) return;
     this.buffer = this.buffer.slice(0, this.cursor - 1) + this.buffer.slice(this.cursor);
     this.cursor -= 1;
+    this.menuNavigated = false;
   }
 
   private deleteForward(): void {
     if (this.cursor >= this.buffer.length) return;
     this.buffer = this.buffer.slice(0, this.cursor) + this.buffer.slice(this.cursor + 1);
+    this.menuNavigated = false;
   }
 
   private moveSelection(delta: number): void {
     if (this.menu.length === 0) return;
     this.selected = (this.selected + delta + this.menu.length) % this.menu.length;
+    this.menuNavigated = true;
   }
 
   private acceptSelection(): void {
@@ -825,6 +838,7 @@ export class LineEditor {
     const text = item.insert ?? item.label;
     this.buffer = text;
     this.cursor = text.length;
+    this.menuNavigated = false;
     this.refreshMenu();
     this.render();
   }
@@ -837,6 +851,7 @@ export class LineEditor {
     this.menu = items;
     if (items.length === 0) {
       this.selected = 0;
+      this.menuNavigated = false;
       return;
     }
     const idx = previous ? items.findIndex((m) => m.label === previous) : -1;
@@ -852,6 +867,7 @@ export class LineEditor {
       this.cursor = 0;
       this.menu = [];
       this.selected = 0;
+      this.menuNavigated = false;
       this.refreshMenu();
       this.eraseRegion();
       this.ambient.onSubmit(value);
@@ -860,7 +876,17 @@ export class LineEditor {
     }
     const pending = this.pending;
     if (!pending) return;
-    const value = this.buffer;
+
+    let value = this.buffer;
+    // If the user actively navigated / scrolled the menu, Enter selects and commits the highlighted item
+    if (this.menuNavigated && this.menu.length > 0 && this.menu[this.selected]) {
+      const item = this.menu[this.selected];
+      value = (item.insert ?? item.label).trim();
+      this.menu = [];
+      this.selected = 0;
+      this.menuNavigated = false;
+    }
+
     // Menu-only Enter (bare "/"): close the overlay by ERASING the whole
     // drawn region and commit NOTHING — a help listing the user dismissed
     // must never settle in the scrollback (feedback v0.6 #2).
