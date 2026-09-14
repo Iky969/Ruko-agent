@@ -1,4 +1,4 @@
-import { chainedSegments, Confirmer, guardedExecute, isYoloMode } from '../core/approval.js';
+import { chainedSegments, Confirmer, detectRisk, guardedExecute, isYoloMode } from '../core/approval.js';
 import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
 import { renderFileDiff, splitLines } from '../core/diff.js';
 import { takeSnapshot } from '../core/undo.js';
@@ -10,7 +10,7 @@ import { searchSessions } from '../core/session.js';
 import { runSubagent } from './subagent.js';
 import { webFetchTool } from './webtools.js';
 import { defaultProcessManager } from './processManager.js';
-import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -123,6 +123,10 @@ export interface ToolDeps {
    * an explicit workspace boundary.
    */
   workspaceRoot?: string;
+  /**
+   * Delegation nesting depth to prevent infinite recursion / subagent bomb.
+   */
+  subagentDepth?: number;
 }
 
 /** Tools refused while plan mode is active (read_file stays available). */
@@ -160,11 +164,58 @@ export function assertInsideWorkspace(abs: string, workspaceRoot: string = getWo
   // Normalise both to trailing-sep for prefix comparison so that
   // /project-foo doesn't match /project as a valid workspace.
   const cwdPrefix = cwd.endsWith(path.sep) ? cwd : cwd + path.sep;
-  if (abs !== cwd && !abs.startsWith(cwdPrefix)) {
+  let canonicalCwd = cwd;
+  try {
+    if (existsSync(cwd)) canonicalCwd = realpathSync(cwd);
+  } catch {
+    // ignore
+  }
+  const canonicalCwdPrefix = canonicalCwd.endsWith(path.sep) ? canonicalCwd : canonicalCwd + path.sep;
+
+  const isLexicalInside =
+    abs === cwd || abs.startsWith(cwdPrefix) || abs === canonicalCwd || abs.startsWith(canonicalCwdPrefix);
+  if (!isLexicalInside) {
     throw new Error(
       `Path "${abs}" di luar working directory — akses file di luar project tidak diizinkan. ` +
       `Workspace: ${cwd}`,
     );
+  }
+
+  // Canonical symlink check: verify the real target does not escape the workspace
+  try {
+    if (existsSync(abs)) {
+      const real = realpathSync(abs);
+      const isRealInside =
+        real === cwd || real.startsWith(cwdPrefix) || real === canonicalCwd || real.startsWith(canonicalCwdPrefix);
+      if (!isRealInside) {
+        throw new Error(
+          `Path "${abs}" mengarah ke symlink di luar working directory ("${real}"). Akses ditolak demi keamanan sandbox. ` +
+          `Workspace: ${cwd}`,
+        );
+      }
+    } else {
+      // If path does not exist yet, verify nearest existing ancestor directory doesn't escape
+      let cur = path.dirname(abs);
+      while (cur && cur !== path.dirname(cur)) {
+        if (existsSync(cur)) {
+          const realCur = realpathSync(cur);
+          const isCurInside =
+            realCur === cwd || realCur.startsWith(cwdPrefix) || realCur === canonicalCwd || realCur.startsWith(canonicalCwdPrefix);
+          if (!isCurInside) {
+            throw new Error(
+              `Direktori induk "${cur}" mengarah ke symlink di luar working directory ("${realCur}"). Akses ditolak demi keamanan sandbox. ` +
+              `Workspace: ${cwd}`,
+            );
+          }
+          break;
+        }
+        cur = path.dirname(cur);
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('di luar working directory')) {
+      throw err;
+    }
   }
 }
 
@@ -174,6 +225,7 @@ export function assertInsideWorkspace(abs: string, workspaceRoot: string = getWo
  * - .ruko/undo/**
  * - .env, .env.*
  * - id_rsa, id_ed25519, *.pem, *.key
+ * - .git/config
  *
  * Case-insensitive, matches relative and absolute variations.
  */
@@ -222,6 +274,11 @@ export function isSensitivePath(targetPath: string, workspaceRoot: string = getW
     return true;
   }
 
+  // 5. .git/config
+  if (relLower === '.git/config' || relLower.endsWith('/.git/config')) {
+    return true;
+  }
+
   return false;
 }
 
@@ -234,6 +291,23 @@ export function assertNotSensitivePath(targetPath: string, workspaceRoot: string
     throw new Error(
       `Akses ke file sensitif "${targetPath}" ditolak demi keamanan kredensial/data sensitif.`,
     );
+  }
+  // Also check canonical destination if file exists (guards against symlinks pointing to sensitive files)
+  try {
+    const cwd = path.resolve(workspaceRoot);
+    const abs = path.isAbsolute(targetPath) ? path.resolve(targetPath) : path.resolve(cwd, targetPath);
+    if (existsSync(abs)) {
+      const real = realpathSync(abs);
+      if (isSensitivePath(real, workspaceRoot)) {
+        throw new Error(
+          `Akses ke file sensitif "${targetPath}" (mengarah ke "${real}") ditolak demi keamanan kredensial/data sensitif.`,
+        );
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('file sensitif')) {
+      throw err;
+    }
   }
 }
 
@@ -254,7 +328,28 @@ async function writeWithDiff(
   fileLabel: string,
   newContent: string,
   onLog?: (line: string) => void,
+  workspaceRoot: string = getWorkspaceRoot(),
 ): Promise<string> {
+  // Reject writing/editing through symbolic link
+  try {
+    if (existsSync(abs)) {
+      const lst = lstatSync(abs);
+      if (lst.isSymbolicLink()) {
+        throw new Error(
+          `Akses ditolak: "${fileLabel}" adalah symbolic link. Menulis atau mengubah file melalui symbolic link dilarang demi keamanan sandbox.`,
+        );
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('symbolic link')) {
+      throw err;
+    }
+  }
+
+  // Pre-write re-validation
+  assertInsideWorkspace(abs, workspaceRoot);
+  assertNotSensitivePath(abs, workspaceRoot);
+
   const existed = existsSync(abs);
   const oldContent = existed ? await readFile(abs, 'utf8') : '';
   if (existed && oldContent === newContent) {
@@ -263,6 +358,18 @@ async function writeWithDiff(
   }
   // Undo safety net (§6): snapshot the old state before any mutation.
   takeSnapshot(abs);
+
+  // Eliminate TOCTOU swap window: verify target is not a symlink right before writing
+  try {
+    if (existsSync(abs) && lstatSync(abs).isSymbolicLink()) {
+      throw new Error(`Akses ditolak: "${fileLabel}" terdeteksi sebagai symbolic link sebelum penulisan.`);
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('symbolic link')) {
+      throw err;
+    }
+  }
+
   await writeFile(abs, newContent, 'utf8');
   onLog?.(green(`🟢 Edit(${fileLabel})`));
   const diff = renderFileDiff(
@@ -297,7 +404,21 @@ export function isPathInsideWorkspace(targetPath: string, workspaceRoot: string 
     if (!clean) return false;
     const abs = path.isAbsolute(clean) ? path.resolve(clean) : path.resolve(cwd, clean);
     const cwdPrefix = cwd.endsWith(path.sep) ? cwd : cwd + path.sep;
-    return abs === cwd || abs.startsWith(cwdPrefix);
+    let canonicalCwd = cwd;
+    try {
+      if (existsSync(cwd)) canonicalCwd = realpathSync(cwd);
+    } catch {}
+    const canonicalCwdPrefix = canonicalCwd.endsWith(path.sep) ? canonicalCwd : canonicalCwd + path.sep;
+
+    const isLexical =
+      abs === cwd || abs.startsWith(cwdPrefix) || abs === canonicalCwd || abs.startsWith(canonicalCwdPrefix);
+    if (!isLexical) return false;
+
+    if (existsSync(abs)) {
+      const real = realpathSync(abs);
+      return real === cwd || real.startsWith(cwdPrefix) || real === canonicalCwd || real.startsWith(canonicalCwdPrefix);
+    }
+    return true;
   } catch {
     return false;
   }
@@ -739,7 +860,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         });
       }
       try {
-        return await writeWithDiff(abs, rel, content, deps.onLog);
+        return await writeWithDiff(abs, rel, content, deps.onLog, ws);
       } catch (err) {
         return JSON.stringify({
           error: `${call.tool}: ${err instanceof Error ? err.message : String(err)}`,
@@ -772,7 +893,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       try {
         const before = await readFile(abs, 'utf8');
         const after = applySearchReplace(before, oldText, newText, call.replaceAll === true);
-        return await writeWithDiff(abs, rel, after, deps.onLog);
+        return await writeWithDiff(abs, rel, after, deps.onLog, ws);
       } catch (err) {
         return JSON.stringify({
           error: err instanceof Error ? err.message : String(err),
@@ -1121,6 +1242,11 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       );
     }
     case 'delegate': {
+      if (deps.subagentDepth && deps.subagentDepth >= 1) {
+        const msg = 'delegate ditolak: subagent tidak diizinkan memanggil delegate secara bertingkat (delegation recursion limit = 1).';
+        deps.onLog?.(yellow(`⚠ ${msg}`));
+        return JSON.stringify({ error: msg });
+      }
       const task = String(call.task ?? call.instruction ?? '');
       if (!task.trim()) {
         return JSON.stringify({ error: 'delegate: missing "task" field' });
@@ -1143,6 +1269,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
           {
             planMode: deps.planMode,
             workspaceRoot: ws,
+            depth: (deps.subagentDepth ?? 0) + 1,
           },
         );
         return JSON.stringify(
@@ -1164,6 +1291,26 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       const command = String(call.command ?? '');
       if (!command.trim()) {
         return JSON.stringify({ error: 'start_process: missing "command" field' });
+      }
+
+      if (isSensitiveEnvCommand(command)) {
+        const msg = 'start_process ditolak: command berpotensi membocorkan environment variable sensitif. Kredensial tidak dapat diakses lewat tool ini.';
+        deps.onLog?.(yellow(`⚠ ${msg}`));
+        return JSON.stringify({ error: msg });
+      }
+
+      const fileCheck = detectSensitiveFileAccessInExec(command, ws);
+      if (fileCheck.blocked) {
+        deps.onLog?.(yellow(`⚠ ${fileCheck.message}`));
+        return JSON.stringify({ error: fileCheck.message });
+      }
+
+      const mutationCheck = detectWorkspaceMutationInExec(command, ws);
+      if (mutationCheck.blocked) {
+        deps.onLog?.(yellow(`⚠ start_process ditolak: gunakan tool resmi ${mutationCheck.toolAdvice}`));
+        return JSON.stringify({
+          error: mutationCheck.message,
+        });
       }
 
       const cwdArg = call.cwd ? String(call.cwd) : '';
@@ -1188,6 +1335,13 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       }
 
       const config = deps.config ?? DEFAULT_CONFIG;
+      const verdict = detectRisk(command, config);
+      if (verdict.risk === 'blocked') {
+        const msg = `start_process ditolak: BLOCKED — ${verdict.reason ?? 'perintah dilarang demi keamanan'}`;
+        deps.onLog?.(yellow(`⚠ ${msg}`));
+        return JSON.stringify({ error: msg });
+      }
+
       if (config.approvalEnabled && !isYoloMode()) {
         if (!deps.confirm) {
           return JSON.stringify({

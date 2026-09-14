@@ -702,6 +702,12 @@ export function inferStepDescription(
   ) {
     return 'Pengelolaan proses latar belakang';
   }
+  if (tools.has('delete_file') || tools.has('move_file')) {
+    return 'Pengelolaan & reorganisasi berkas proyek';
+  }
+  if (tools.has('web_fetch')) {
+    return 'Mengambil konten referensi web eksternal';
+  }
   return `Langkah ${stepNumber}`;
 }
 

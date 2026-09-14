@@ -6,6 +6,44 @@
 
 ## 📦 Riwayat Rilis & Status Fitur (Changelog)
 
+### v1.7.0 (14 September 2026) — Universal Tool Security Hardening, Symlink Sandboxing, SSRF Redirect Defense, Subagent Recursion Guard, & UI Step Enrichment
+
+#### Ditambahkan & Diperbarui
+- **Hardening Keamanan Tool `start_process` (`src/agent/tools.ts`)**:
+  * Menyelaraskan seluruh filter keamanan `start_process` dengan standar `exec`:
+    1. Memblokir perintah berisiko tinggi (*blocked commands* seperti fork bomb `:(){ :|:& };:`, `rm -rf /`, `mkfs`, writing directly to `/dev/sd*`) menggunakan `detectRisk()`.
+    2. Menolak eksfiltrasi kredensial environment variable (`isSensitiveEnvCommand()`) seperti `printenv` dan `echo $RUKO_API_KEY`.
+    3. Menolak inspeksi file sensitif (`detectSensitiveFileAccessInExec()`) seperti `cat .ruko/config.json`, `cat .env`, dan kunci privat.
+    4. Menolak mutasi berkas dasar tanpa tool resmi (`detectWorkspaceMutationInExec()`).
+- **Mitigasi SSRF via HTTP Redirect di `web_fetch` (`src/agent/webtools.ts`)**:
+  * Mengubah opsi fetch native menjadi `redirect: 'manual'`.
+  * Mengimplementasikan safe redirect-following loop (maksimal 5 hop, deteksi loop) di mana setiap header `Location` divalidasi ulang lewat `checkSsrfSafety()` sebelum diikuti.
+  * Mencegah eksfiltrasi data cloud instance metadata (169.254.169.254) dan port intranet lokal melalui open redirect eksternal.
+- **Symlink Traversal Sandboxing Seluruh File Tools (`src/agent/tools.ts`, `src/agent/filetools.ts`)**:
+  * `assertInsideWorkspace` & `assertNotSensitivePath`: Menambahkan resolusi kanonikal (`realpathSync`) untuk memastikan symlink tidak melompat keluar dari batas workspace maupun menargetkan file sensitif.
+  * Menambahkan proteksi file `.git/config` pada `isSensitivePath` untuk mencegah pencurian token repositori git / embedded credentials.
+  * `walkDirectory` (`globTool` & `codeSearchTool`): Memfilter dan mengabaikan symlink yang targetnya berada di luar direktori kerja proyek (`isPathInsideWorkspace(real, cwd)`).
+- **Sanitasi Path Traversal di Skills System & Session Persistence (`src/core/skills.ts`, `src/core/session.ts`)**:
+  * `readSkill` & `deleteSkill`: Sanitasi nama skill menggunakan `sanitizeSkillName` serta verifikasi boundary kanonikal direktori `.ruko/skills/`.
+  * `saveSession`, `loadSession`, & `exportSessionTrajectory`: Penegakan validasi ketat ID sesi berbasis regex `^[a-zA-Z0-9_-]+$` dan verifikasi boundary folder kanonikal. Upaya injeksi path traversal (`../../../etc/passwd`) ditolak mutlak dengan error eksplisit alih-alih disanitasi menjadi file baru.
+- **Native IP-Pinning Transport Layer & Eliminasi Total DNS Rebinding (`src/agent/webtools.ts`)**:
+  * Menggantikan transport native `fetch` pada `webFetchTool` dengan implementasi custom berbasis `node:http` dan `node:https` yang menerapkan **Native IP-Pinning**.
+  * `checkSsrfSafety`: Memvalidasi protokol, IP literal, private/metadata ranges, serta me-resolve DNS dengan verifikasi ganda, kemudian mengembalikan `pinnedIp` dan `ipFamily`.
+  * `pinnedHttpFetch`: Memaksa opsi socket `lookup` langsung mengembalikan `pinnedIp` yang telah diverifikasi aman. Ini menjamin runtime/OS tidak pernah melakukan resolusi DNS kedua, sehingga eksploitasi DNS Rebinding TOCTOU tertutup 100% secara deterministik.
+  * **Penerapan Universal pada Seluruh Hop**: IP-pinning dievaluasi dan ditegakkan di setiap hop rantai redirect (`301`, `302`, `303`, `307`, `308`), bukan hanya pada request pertama.
+- **Dokumentasi Batasan Keamanan Diketahui (Known Security Limitations)**:
+  * Mendokumentasikan secara transparan batasan teoretis *filesystem TOCTOU race condition* (micro-window antara pengecekan symlink dan kernel I/O saat proses asing OS melakukan symlink-swap paralel) di `README.md` dan `PROGRESS.md`.
+- **Izin Berkas Ketat Snapshot Undo (`src/core/undo.ts`)**:
+  * Menerapkan mode permissions `0o600` pada pembuatan berkas snapshot `.content` dan `.meta.json` serta `0o700` pada direktori `.ruko/undo/`.
+- **Proteksi Rekursi Delegasi Subagent (`src/agent/tools.ts`, `src/agent/agent.ts`, `src/agent/subagent.ts`)**:
+  * Membatasi kedalaman delegasi subagent (`subagentDepth >= 1`) dan menolak pemanggilan `delegate` berulang dari dalam subagent untuk mencegah subagent fork bomb / recursion.
+- **Pengayaan UI & Contextual Step Indicator (`src/core/ui.ts`)**:
+  * Menambahkan identifikasi langkah tool pada `inferStepDescription` untuk `delete_file` / `move_file` (`"Pengelolaan & reorganisasi berkas proyek"`) dan `web_fetch` (`"Mengambil konten referensi web eksternal"`).
+- **Rangkaian Pengujian Mandiri Komprehensif (`src/tests/security_hardening_v17.test.ts`)**:
+  * 13 unit test adversarial memvalidasi seluruh perbaikan keamanan secara end-to-end (termasuk Native IP-Pinning socket level, active DNS rebinding, and strict session traversal rejection). Total pengujian: **381 passed** (100% lulus, 0 gagal).
+
+---
+
 ### v1.6.1 (14 September 2026) — Preservasi Utuh Pesan Asisten, State Loop Turn Deduplication, & Robust Tool Loop Guard
 
 #### Ditambahkan & Diperbarui
@@ -231,7 +269,7 @@ Catatan batasan arsitektural yang disadari:
 
 1. **Verifikasi Baseline**:
    - Jalankan `npm run typecheck` (harus 0 error).
-   - Jalankan `npm test` (harus **368 passed**, 0 fail).
+   - Jalankan `npm test` (harus **379 passed**, 0 fail).
    - E2E test: `npm run test:e2e` (1 passed).
 2. **Struktur Direktori Proyek**:
    - `src/core/`: Infrastruktur murni Node.js (loop, approval, executor, summarizer, undo, context, session, config, wizard, ui, skills).
