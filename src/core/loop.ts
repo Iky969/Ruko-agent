@@ -27,6 +27,7 @@ import { playSplash, SplashInfo } from './splash.js';
 import { checkMemoryWarning, initMemoryFile } from './memory.js';
 import { appendHistory, defaultHistoryPath, loadHistory } from './history.js';
 import { getWorkspaceRoot } from '../agent/tools.js';
+import { defaultProcessManager } from '../agent/processManager.js';
 
 /** Prompt line shown under the status bar (placeholder until the user types). */
 const PROMPT_HINT = 'Ask anything, or type / for commands';
@@ -189,6 +190,7 @@ export class SystemLoop {
       pending: this.queue.length,
       // §8: last turn's token-ish stats ride in the bar, not a separate line.
       turn: this.agent.lastUsage ?? undefined,
+      activeProcesses: defaultProcessManager.getActiveProcesses(),
     });
   }
 
@@ -347,7 +349,7 @@ export class SystemLoop {
     });
     try {
       const response = await this.agent.handleInstruction(input, this.turnAbort.signal);
-      if (response) {
+      if (response && response.trim() && response !== '(no response)') {
         this.ctx.add('assistant', response);
         // With streaming the text was already revealed live by the agent.
         if (!this.agent.lastResponseStreamed) console.log(formatTerminalMarkdown(response));

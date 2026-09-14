@@ -429,3 +429,21 @@ test('stopAmbient leaves the committed output line and erases the region', () =>
   assert.ok(!output.data.includes('BAR busy'), 'no region redrawn after stop');
   assert.ok(!output.data.includes('teks belum newline'), 'output line not re-printed');
 });
+
+test('anti-flickering: in-place tail updates (spinner frames) do not erase and redraw the status bar', () => {
+  const { editor, output } = makeAmbient({ status: 'BAR steady' });
+  // First write commits tail row above the ambient region
+  output.write('\rThinking 1');
+  assert.ok(output.data.includes('BAR steady'), 'status bar drawn initially');
+
+  output.data = '';
+  // Subsequent in-place updates (like spinner frames every 100ms)
+  output.write('\rThinking 2');
+  output.write('\rThinking 3');
+
+  // Should update tail in-place without erasing the live status bar below
+  assert.ok(output.data.includes('Thinking 3'), 'latest tail text written');
+  assert.ok(!output.data.includes('\r\u001b[0J'), 'must not emit full region clear (ESC[0J) on identical status bar');
+  editor.stopAmbient();
+});
+

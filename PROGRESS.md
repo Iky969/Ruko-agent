@@ -6,6 +6,35 @@
 
 ## 📦 Riwayat Rilis & Status Fitur (Changelog)
 
+### v1.6.0 (14 September 2026) — Anti-Flickering TUI, Status Bar Process Indicator, SSE Stream Hardening, & Robust Tool Loop Handling
+
+#### Ditambahkan & Diperbarui
+- **Penanganan Empty Content Model Setelah Eksekusi Tool (`src/agent/agent.ts`, `src/core/loop.ts`)**:
+  * Mengatasi kasus di mana model mengembalikan respons kosong (`""` atau `null`) setelah pemanggilan tool (seperti Read/Glob) dengan `finish_reason: "stop"`.
+  * Mengirimkan follow-up message internal (`role: 'user'`) secara otomatis untuk meminta model merangkum hasil eksekusi tool, alih-alih mencetak `"(no response)"` dan menghentikan giliran tanpa penjelasan.
+  * Menambahkan filter di `runTurn` agar teks `(no response)` tidak bocor ke output konsol pengguna.
+- **Stream Ingestion Hardening untuk SSE Chunks (`src/agent/llm.ts`)**:
+  * Mengimplementasikan buffering berbasis baris lokal (`lines.pop()`) pada parser Server-Sent Events (SSE).
+  * Menjamin potongan chunk parsial yang terbelah antar paket jaringan disimpan utuh sebelum dilakukan parsing JSON, mencegah teks terpotong di tengah streaming.
+  * Menyimpan dan mengekspos atribut `lastFinishReason` pada seluruh provider (`OpenAiCompatibleProvider`, `AnthropicProvider`, `GeminiProvider`).
+- **Normalisasi Skema Tool Result & Tool Call (`src/types.ts`, `src/agent/llm.ts`, `src/agent/agent.ts`)**:
+  * Menambahkan properti `tool_call_id`, `name`, dan `tool_calls` pada tipe `ContextMessage`.
+  * Pesan asisten yang memicu eksekusi tool menyertakan `tool_calls` dengan `id` standar (format `call_<tool>_<iter>_<idx>_<ts>`).
+  * Pesan hasil tool dikirimkan kembali ke provider dengan `role: 'tool'`, `tool_call_id` yang valid, dan nama tool yang sesuai, mencegah *silent rejection* dari API server standar OpenAI/Anthropic/Gemini.
+- **Anti-Flickering & Pembaruan In-Place TUI (`src/core/tui.ts`)**:
+  * Menerapkan dirty-checking berbasis cache (`lastRenderedStatus`, `lastRenderedLine`, `lastRenderedMenuKey`, `lastRenderedModalPrompt`, dll.) untuk mencegah escape sequence ANSI (`\r`, `\x1b[2K`, dsb.) dieksekusi jika konten baris tidak berubah.
+  * Mengoptimalkan frame spinner (Pac-Man Thinking) agar memperbarui baris ekor secara in-place tanpa menghapus dan menggambar ulang seluruh status bar serta prompt di bawahnya setiap interval 100ms.
+  * Mengeliminasi frame tearing dan kedipan pada layar mobile / emulator terminal (Termux).
+- **Indikator Proses Latar Belakang di Status Bar (`src/core/ui.ts`, `src/core/loop.ts`, `src/agent/tools.ts`)**:
+  * Menghapus log status proses aktif yang mengotori area chat percakapan biasa pada `get_status`.
+  * Mengintegrasikan ringkasan proses aktif langsung ke baris status bawah di antara nama model dan persentase konteks (contoh: `⚡ [glm-5.3-flash] | ⚙️ 2 proc (sleep 301, vite) | ctx 20%`).
+  * Menyediakan pemformatan responsif untuk terminal layar sempit (>= 40 kolom) dengan bentuk ringkas `⚙️ 2 proc`.
+- **Rangkaian Pengujian & Penambahan Unit Test**:
+  * Menambahkan uji unit di `src/tests/ui.test.ts` (formatProcessSummary & responsive narrow status bar), `src/tests/tui.test.ts` (anti-flickering in-place tail updates), `src/tests/llm.test.ts` (SSE partial chunk stream hardening & finish_reason), dan `src/tests/agent.test.ts` (penanganan empty content model & validasi skema tool_call_id).
+  * Total pengujian meningkat menjadi **365 passed** (100% lulus, 0 gagal).
+
+---
+
 ### v1.5.0 (13 September 2026) — Proteksi Dua Lapis Berkas & Environment Variable Sensitif (Mitigasi Eksfiltrasi Kredensial & Prompt Injection)
 
 #### Latar Belakang & Temuan Keamanan yang Divalidasi Manual
@@ -181,7 +210,7 @@ Catatan batasan arsitektural yang disadari:
 
 1. **Verifikasi Baseline**:
    - Jalankan `npm run typecheck` (harus 0 error).
-   - Jalankan `npm test` (harus **353 passed**, 0 fail).
+   - Jalankan `npm test` (harus **365 passed**, 0 fail).
    - E2E test: `npm run test:e2e` (1 passed).
 2. **Struktur Direktori Proyek**:
    - `src/core/`: Infrastruktur murni Node.js (loop, approval, executor, summarizer, undo, context, session, config, wizard, ui, skills).

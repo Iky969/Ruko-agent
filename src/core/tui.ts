@@ -129,6 +129,15 @@ export class LineEditor {
   private tailRendered = false;
   private patchedWrite: ((chunk: any, ...rest: any[]) => boolean) | null = null;
   private rawOutputWrite: ((chunk: any, ...rest: any[]) => boolean) | null = null;
+  /** Anti-flickering dirty-checking cache */
+  private lastRenderedStatus = '';
+  private lastRenderedLine = '';
+  private lastRenderedMenuKey = '';
+  private lastRenderedModalPrompt = '';
+  private lastRenderedWidth = 0;
+  private lastDrawnCursorCol = 0;
+  private renderThrottleTimer: NodeJS.Timeout | null = null;
+  private lastRenderTimestamp = 0;
 
   constructor(
     private readonly input: ReadStream = process.stdin as ReadStream,
@@ -224,6 +233,10 @@ export class LineEditor {
       const modal = this.modal;
       this.modal = null;
       modal.resolve(modal.defaultKey ?? null);
+    }
+    if (this.renderThrottleTimer) {
+      clearTimeout(this.renderThrottleTimer);
+      this.renderThrottleTimer = null;
     }
     this.eraseRegion();
     this.ambient = null;
@@ -391,12 +404,42 @@ export class LineEditor {
   }
 
   private render(): void {
+    if (this.renderThrottleTimer) {
+      clearTimeout(this.renderThrottleTimer);
+      this.renderThrottleTimer = null;
+    }
+    this.lastRenderTimestamp = Date.now();
     if (!this.pending && !this.ambient) return;
     const options = this.activeOptions();
     // While a modal question is open it replaces the overlay: the user's
     // full attention goes to the choice (feedback v0.7 #2/#6).
     const { rows, heights } = this.modal ? { rows: [], heights: [] } : this.menuRows();
     const width = this.termWidth();
+
+    const status = options.statusLine ? truncateVisible(options.statusLine(), width - 1) : '';
+    const line = this.renderedLine();
+    const lineRows = Math.max(1, Math.ceil(visibleLength(line) / width));
+    const col = visibleLength(options.prompt) + this.cursor;
+    const cursorRow = Math.min(lineRows - 1, Math.floor(col / width));
+    const cursorCol = col - cursorRow * width;
+    const menuKey = rows.join('|');
+    const modalPrompt = this.modal?.prompt ?? '';
+
+    // Anti-flickering dirty check: jika tidak ada perubahan data nyata pada region,
+    // hindari emisi ulang ANSI escape code (\r atau \x1b[2K atau \x1b[0J) yang memicu flickering.
+    if (
+      this.drawnRows > 0 &&
+      this.lastRenderedStatus === status &&
+      this.lastRenderedLine === line &&
+      this.lastRenderedMenuKey === menuKey &&
+      this.lastRenderedModalPrompt === modalPrompt &&
+      this.lastRenderedWidth === width &&
+      this.drawnCursorRow === cursorRow &&
+      this.lastDrawnCursorCol === cursorCol
+    ) {
+      return;
+    }
+
     // Return the cursor to the FIRST row of the previously drawn region
     // (status line included — a bare "\r" only resets within the CURRENT row,
     // which breaks redraw once the buffer wraps to row 2+), then erase
@@ -409,22 +452,17 @@ export class LineEditor {
     // clamped to width-1 so it can never wrap and break the rewind math
     // (feedback v0.6.2 — the bar used to pile up in scrollback per iteration).
     if (options.statusLine) {
-      const status = truncateVisible(options.statusLine(), width - 1);
       out += `${status}\n`;
       this.statusRows = 1;
     } else {
       this.statusRows = 0;
     }
-    const line = this.renderedLine();
     out += line;
     // Rows this draw occupies once the terminal wraps it naturally.
-    const lineRows = Math.max(1, Math.ceil(visibleLength(line) / width));
     this.drawnRows = lineRows;
     // Cursor cell = prompt width + caret index within the buffer.
-    const col = visibleLength(options.prompt) + this.cursor;
-    const cursorRow = Math.min(lineRows - 1, Math.floor(col / width));
-    const cursorCol = col - cursorRow * width;
     this.drawnCursorRow = cursorRow;
+    this.lastDrawnCursorCol = cursorCol;
     // Overlay rows sit below the input line and wrap like the line does —
     // counting them as 1 row each (the old bug) left the cursor buried in
     // the previous menu, so the next ESC[0J only cleared DOWNWARD and stale
@@ -447,6 +485,13 @@ export class LineEditor {
     if (upFromBottom > 0) out += `\u001b[${upFromBottom}A`;
     out += '\r';
     if (cursorCol > 0) out += `\u001b[${cursorCol}C`;
+
+    this.lastRenderedStatus = status;
+    this.lastRenderedLine = line;
+    this.lastRenderedMenuKey = menuKey;
+    this.lastRenderedModalPrompt = modalPrompt;
+    this.lastRenderedWidth = width;
+
     this.rawWrite(out);
   }
 
@@ -465,7 +510,13 @@ export class LineEditor {
     this.rawWrite(out);
     this.drawnRows = 0;
     this.drawnCursorRow = 0;
+    this.lastDrawnCursorCol = 0;
     this.statusRows = 0;
+    this.lastRenderedStatus = '';
+    this.lastRenderedLine = '';
+    this.lastRenderedMenuKey = '';
+    this.lastRenderedModalPrompt = '';
+    this.lastRenderedWidth = 0;
   }
 
   /** Erase the uncommitted output row (if rendered) AND the live region. */
@@ -483,8 +534,14 @@ export class LineEditor {
     this.rawWrite(out);
     this.drawnRows = 0;
     this.drawnCursorRow = 0;
+    this.lastDrawnCursorCol = 0;
     this.statusRows = 0;
     this.tailRendered = false;
+    this.lastRenderedStatus = '';
+    this.lastRenderedLine = '';
+    this.lastRenderedMenuKey = '';
+    this.lastRenderedModalPrompt = '';
+    this.lastRenderedWidth = 0;
   }
 
   /**
@@ -512,7 +569,7 @@ export class LineEditor {
       }
       const text =
         typeof chunk === 'string' ? chunk : Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-      this.eraseForOutput();
+
       const merged = this.tail + text;
       const nl = merged.lastIndexOf('\n');
       const completed = nl === -1 ? '' : merged.slice(0, nl + 1);
@@ -521,6 +578,37 @@ export class LineEditor {
       // (spinner stop() clears its row) must leave tail EMPTY, otherwise the
       // dead spinner text would be re-committed by the next newline.
       const tailOut = afterNl.includes('\r') ? afterNl.slice(afterNl.lastIndexOf('\r') + 1) : afterNl;
+
+      // Anti-flickering: jika hanya update in-place pada baris tail (misal spinner) tanpa newline baru
+      if (!completed && this.tailRendered) {
+        this.tail = tailOut;
+        const width = this.termWidth();
+        const options = this.activeOptions();
+        const currentStatus = options.statusLine ? truncateVisible(options.statusLine(), width - 1) : '';
+        const statusChanged = currentStatus !== this.lastRenderedStatus;
+
+        if (statusChanged) {
+          // Status bar berubah secara nyata (persentase context, proses, model): render ulang
+          this.eraseForOutput();
+          raw(tailOut + '\n');
+          this.tailRendered = true;
+          this.render();
+        } else {
+          // Status bar tidak berubah: perbarui hanya baris tail in-place tanpa menyentuh status bar
+          const climb = this.drawnCursorRow + this.statusRows + 1;
+          const col = visibleLength(options.prompt) + this.cursor;
+          const lineRows = Math.max(1, Math.ceil(visibleLength(this.renderedLine()) / width));
+          const cursorRow = Math.min(lineRows - 1, Math.floor(col / width));
+          const cursorCol = col - cursorRow * width;
+
+          let out = `\u001b[${climb}A\r\u001b[2K${tailOut}\u001b[${climb}B\r`;
+          if (cursorCol > 0) out += `\u001b[${cursorCol}C`;
+          this.rawWrite(out);
+        }
+        return true;
+      }
+
+      this.eraseForOutput();
       this.tail = tailOut;
       raw(completed + tailOut);
       // The region always sits BELOW the live output row; an in-place row

@@ -251,6 +251,8 @@ export interface StatusBarInput {
   model: string;
   usedChars: number;
   budgetChars: number;
+  /** Custom terminal width for responsive status bar layout / testing. */
+  width?: number;
   /** Active role name (dim, right of the model). */
   role?: string;
   /** Plan mode flag shows `⏸ PLAN` in the bar so the block state is visible. */
@@ -264,10 +266,42 @@ export interface StatusBarInput {
   turn?: { promptChars: number; completionChars: number };
   /** Queued messages waiting for the AI to finish (v0.7 badge, feedback #4). */
   pending?: number;
+  /** Active background processes. */
+  activeProcesses?: Array<{ id?: string; command?: string }>;
+}
+
+/**
+ * Ringkasan proses aktif untuk status bar.
+ * Format normal: "2 proc (sleep 301, vite)"
+ * Format ringkas / layar sempit: "2 proc"
+ */
+export function formatProcessSummary(
+  processes?: Array<{ command?: string }>,
+  compact = false,
+): string {
+  if (!processes || processes.length === 0) return '';
+  const count = processes.length;
+  if (compact) {
+    return `${count} proc`;
+  }
+  const names = processes
+    .map((p) => {
+      const cmd = String(p.command ?? '').trim();
+      const parts = cmd.split(/\s+/);
+      const short = parts.length > 2 ? `${parts[0]} ${parts[1]}` : cmd;
+      return short.length > 15 ? `${short.slice(0, 12)}…` : short;
+    })
+    .filter(Boolean)
+    .slice(0, 3);
+  return names.length > 0 ? `${count} proc (${names.join(', ')})` : `${count} proc`;
 }
 
 /** `⚡ [model] | ctx 41% (12.3k/30k) · ↑3.2k ↓800 | / perintah` dark-green bar. */
 export function buildStatusBar(input: StatusBarInput): string {
+  const w = input.width ?? terminalWidth();
+  const isNarrow = w < 60;
+  const isVeryNarrow = w < 48;
+
   const pct = input.budgetChars > 0
     ? Math.min(100, Math.round((input.usedChars / input.budgetChars) * 100))
     : 0;
@@ -278,8 +312,24 @@ export function buildStatusBar(input: StatusBarInput): string {
     ? ` · ↑${formatK(input.turn.promptChars)} ↓${formatK(input.turn.completionChars)}`
     : '';
   const waiting = input.pending && input.pending > 0 ? ` · ⏳ ${input.pending} menunggu ` : '';
+
+  const procCount = input.activeProcesses?.length ?? 0;
+  let procStr = '';
+  if (procCount > 0) {
+    const summary = formatProcessSummary(input.activeProcesses, isVeryNarrow);
+    procStr = ` | ⚙️ ${summary}`;
+  }
+
+  if (isNarrow) {
+    // Narrow terminal responsive layout (>= 40 columns):
+    // e.g. " ⚡ [glm-5.3-flash] | ⚙️ 2 proc | ctx 20% "
+    return onDarkGreen(
+      ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}ctx ${pct}%${waiting ? waiting : ' '}`,
+    );
+  }
+
   return onDarkGreen(
-    ` ⚡ [${input.model}${role}] | ${busy}${plan}ctx ${pct}% (${formatK(input.usedChars)}/${formatK(input.budgetChars)})${turn} | / perintah · Ctrl+C batal ${waiting}`,
+    ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}ctx ${pct}% (${formatK(input.usedChars)}/${formatK(input.budgetChars)})${turn} | / perintah · Ctrl+C batal ${waiting}`,
   );
 }
 

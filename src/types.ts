@@ -11,6 +11,19 @@ export interface ContextMessage {
   content: string;
   /** ISO timestamp when the message was recorded. */
   timestamp: string;
+  /** Identifier of the tool call this message is responding to (when role === 'tool'). */
+  tool_call_id?: string;
+  /** Name of the tool (when role === 'tool'). */
+  name?: string;
+  /** Tool calls initiated by the assistant (standard provider format). */
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: {
+      name: string;
+      arguments: string;
+    };
+  }>;
 }
 
 /** Result of running a shell command. */

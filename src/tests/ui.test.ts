@@ -6,6 +6,7 @@ import {
   colorsEnabled,
   createSpinner,
   formatK,
+  formatProcessSummary,
   LineGate,
   renderBox,
   renderApprovalBox,
@@ -311,4 +312,48 @@ test('renderApprovalBox renders equal-width rows with warning header and ANSI co
     process.stdout.columns = origCols;
   }
 });
+
+test('formatProcessSummary formats single, multiple, and compact process representations', () => {
+  assert.equal(formatProcessSummary([]), '');
+  assert.equal(formatProcessSummary([{ command: 'sleep 301' }]), '1 proc (sleep 301)');
+  assert.equal(
+    formatProcessSummary([{ command: 'sleep 301' }, { command: 'vite' }]),
+    '2 proc (sleep 301, vite)',
+  );
+  assert.equal(
+    formatProcessSummary([{ command: 'sleep 301' }, { command: 'vite' }, { command: 'npm test' }]),
+    '3 proc (sleep 301, vite, npm test)',
+  );
+  assert.equal(
+    formatProcessSummary([{ command: 'sleep 301' }, { command: 'vite' }], true),
+    '2 proc',
+  );
+});
+
+test('status bar integrates active background processes and is responsive on narrow viewport', () => {
+  const bar = buildStatusBar({
+    model: 'glm-5.3-flash',
+    usedChars: 6000,
+    budgetChars: 30000,
+    activeProcesses: [{ command: 'sleep 301' }, { command: 'vite' }],
+  });
+  const plain = stripAnsi(bar);
+  assert.ok(plain.includes('⚡ [glm-5.3-flash]'), 'contains model badge');
+  assert.ok(plain.includes('⚙️ 2 proc (sleep 301, vite)'), 'contains active process summary');
+  assert.ok(plain.includes('ctx 20%'), 'contains context usage percent');
+
+  // Narrow terminal responsive test (40 columns)
+  const narrowBar = buildStatusBar({
+    model: 'glm-5.3-flash',
+    usedChars: 6000,
+    budgetChars: 30000,
+    width: 40,
+    activeProcesses: [{ command: 'sleep 301' }, { command: 'vite' }],
+  });
+  const narrowPlain = stripAnsi(narrowBar);
+  assert.ok(narrowPlain.includes('⚙️ 2 proc'), 'contains compact proc badge');
+  assert.ok(narrowPlain.includes('ctx 20%'), 'contains context percent');
+  assert.ok(visibleLength(truncateVisible(narrowBar, 40)) <= 40, 'narrow status bar fits <= 40 cols');
+});
+
 

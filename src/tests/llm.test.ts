@@ -258,3 +258,91 @@ test('testConnection reports incomplete config without calling the endpoint', as
     assert.equal(calls, 0);
   });
 });
+
+test('chat handles partial SSE chunks split across packets without cutting off text', async () => {
+  await withCleanEnv(async () => {
+    const p = createProvider({ apiKey: 'k', baseUrl: 'https://x/v1', model: 'm' });
+    // Chunk 1 is incomplete JSON cut in the middle of payload; Chunk 2 completes the line
+    const frames = [
+      'data: {"choices":[{"delta":{"content":"con',
+      'nected"}}]}\n',
+      'data: {"choices":[{"delta":{"content":" world"},"finish_reason":"stop"}]}\n\n',
+    ];
+    let streamed = '';
+    await withFetchStub(
+      async () => sseResponse(frames),
+      async () => {
+        const text = await p.chat([{ role: 'user', content: 'test', timestamp: '' }], {
+          onToken: (t) => {
+            streamed += t;
+          },
+        });
+        assert.equal(text, 'connected world', 'reconstructed partial chunk smoothly');
+        assert.equal(streamed, 'connected world');
+        assert.equal(p.lastFinishReason, 'stop', 'captured finish_reason stop from SSE');
+      },
+    );
+  });
+});
+
+test('chat normalizes role tool messages with valid tool_call_id and includes tool_calls on assistant message', async () => {
+  await withCleanEnv(async () => {
+    const p = createProvider({ apiKey: 'k', baseUrl: 'https://x/v1', model: 'm' });
+    let capturedBody: any = null;
+
+    await withFetchStub(
+      async (_url, init) => {
+        capturedBody = JSON.parse(String(init?.body));
+        return jsonResponse({
+          choices: [{ message: { content: 'Selesai.' }, finish_reason: 'stop' }],
+        });
+      },
+      async () => {
+        await p.chat([
+          { role: 'user', content: 'baca file', timestamp: '' },
+          {
+            role: 'assistant',
+            content: 'membaca...',
+            timestamp: '',
+            tool_calls: [
+              {
+                id: 'call_read_1',
+                type: 'function',
+                function: { name: 'read_file', arguments: '{"path":"a.txt"}' },
+              },
+            ],
+          },
+          {
+            role: 'tool',
+            content: 'isi file a',
+            timestamp: '',
+            tool_call_id: 'call_read_1',
+            name: 'read_file',
+          },
+        ]);
+      },
+    );
+
+    assert.ok(capturedBody, 'request body must be captured');
+    const msgs = capturedBody.messages;
+    assert.equal(msgs.length, 3);
+
+    // Assistant message keeps tool_calls
+    assert.equal(msgs[1].role, 'assistant');
+    assert.equal(msgs[1].content, 'membaca...');
+    assert.deepEqual(msgs[1].tool_calls, [
+      {
+        id: 'call_read_1',
+        type: 'function',
+        function: { name: 'read_file', arguments: '{"path":"a.txt"}' },
+      },
+    ]);
+
+    // Tool message has role 'tool' with tool_call_id and name
+    assert.equal(msgs[2].role, 'tool');
+    assert.equal(msgs[2].tool_call_id, 'call_read_1');
+    assert.equal(msgs[2].name, 'read_file');
+    assert.equal(msgs[2].content, 'isi file a');
+  });
+});
+

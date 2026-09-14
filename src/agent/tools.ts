@@ -1263,7 +1263,6 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
           error: `get_status: proses dengan ID "${processId}" tidak ditemukan.`,
         });
       }
-      deps.onLog?.(cyan(`🔵 ProcessStatus(${processId})`));
       return JSON.stringify(status, null, 2);
     }
     case 'stop_process': {

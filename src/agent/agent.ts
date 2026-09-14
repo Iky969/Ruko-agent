@@ -167,6 +167,8 @@ export class Agent {
       console.log(line);
     });
 
+    let emptyFollowUpSent = false;
+
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i += 1) {
       // v0.7: user chose "kirim sekarang" — stop before the next request so
       // the interrupted turn ends cleanly instead of starting new work.
@@ -215,7 +217,25 @@ export class Agent {
       // preamble that sat right before the hidden ```tool block (§2).
       const iterStreamed = gate.finish(calls.length === 0);
       if (calls.length === 0) {
-        const text = stripToolBlocks(raw) || '(no response)';
+        const text = stripToolBlocks(raw);
+        // Tangani Empty Content: Jika respons model setelah eksekusi tool menghasilkan
+        // text/content kosong padahal finish_reason adalah "stop", jangan langsung mencetak "(no response)".
+        // Kirimkan follow-up message internal (role: "user") untuk meminta model merangkum hasil tool yang baru dijalankan.
+        if (!text.trim() && (tree.currentStep > 0 || i > 0) && !emptyFollowUpSent) {
+          const finishReason = this.llmProvider.lastFinishReason ?? 'stop';
+          const isStop = !finishReason || ['stop', 'STOP', 'end_turn'].includes(finishReason);
+          if (isStop) {
+            emptyFollowUpSent = true;
+            messages.push({
+              role: 'user',
+              content: 'Tolong berikan ringkasan atau rangkuman penjelasan mengenai hasil eksekusi tool di atas untuk menjawab permintaan pengguna.',
+              timestamp: new Date().toISOString(),
+            });
+            continue;
+          }
+        }
+
+        const finalText = text || (tree.currentStep > 0 ? 'Semua langkah tool telah selesai dijalankan.' : '');
         if (tree.isTreeActive || tree.currentStep > 0) {
           tree.finish('Semua langkah tuntas');
           process.stdout.write('\n');
@@ -223,15 +243,28 @@ export class Agent {
           process.stdout.write('\n');
         }
         this.lastResponseStreamed = iterStreamed;
-        return text;
+        return finalText;
       }
 
       // Text streamed before a tool call needs a line break before the logs.
       if (iterStreamed) process.stdout.write('\n');
       const text = stripToolBlocks(raw);
-      if (text) {
-        messages.push({ role: 'assistant', content: text, timestamp: '' });
-      }
+      const toolCalls = calls.map((c, idx) => ({
+        id: (typeof c.id === 'string' && c.id.trim())
+          ? c.id.trim()
+          : `call_${c.tool}_${i}_${idx}_${Date.now()}`,
+        type: 'function' as const,
+        function: {
+          name: c.tool,
+          arguments: JSON.stringify(c),
+        },
+      }));
+      messages.push({
+        role: 'assistant',
+        content: text,
+        timestamp: new Date().toISOString(),
+        tool_calls: toolCalls,
+      });
 
       // Spacing before tool tree begins if not already spaced
       if (tree.currentStep === 0 && !iterStreamed) {
@@ -242,7 +275,9 @@ export class Agent {
       const desc = inferStepDescription(calls, tree.currentStep + 1);
       tree.startStep(desc);
 
-      for (const call of calls) {
+      for (let callIdx = 0; callIdx < calls.length; callIdx += 1) {
+        const call = calls[callIdx];
+        const toolCallId = toolCalls[callIdx]?.id || `call_${call.tool}_${Date.now()}`;
         if (signal?.aborted) {
           if (tree.isTreeActive) {
             tree.finish('Dibatalkan oleh pengguna');
@@ -263,7 +298,9 @@ export class Agent {
               warning: warn,
               message: `Tool "${call.tool}" dengan argumen identik baru saja dijalankan pada langkah sebelumnya. Eksekusi kedua dilewati.`,
             })}`,
-            timestamp: '',
+            timestamp: new Date().toISOString(),
+            tool_call_id: toolCallId,
+            name: call.tool,
           });
           continue;
         }
@@ -298,7 +335,9 @@ export class Agent {
         messages.push({
           role: 'tool',
           content: `Result of tool "${call.tool}":\n${result}`,
-          timestamp: '',
+          timestamp: new Date().toISOString(),
+          tool_call_id: toolCallId,
+          name: call.tool,
         });
       }
     }

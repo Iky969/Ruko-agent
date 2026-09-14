@@ -71,6 +71,8 @@ export interface LLMProvider {
   readonly isConfigured: boolean;
   /** The currently active model name. */
   readonly model: string;
+  /** Finish reason of the most recent completion (e.g. 'stop', 'length', 'tool_calls'). */
+  lastFinishReason?: string | null;
   /** Switches the active model at runtime (e.g. via /model). */
   setModel(model: string): void;
   /** Applies new API credentials at runtime (e.g. after `/config setup`). */
@@ -182,6 +184,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   private baseUrl: string;
   private currentModel: string;
   private readonly retry: RetryOptions;
+  lastFinishReason: string | null = null;
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     this.apiKey = cfg.apiKey || process.env.OPENAI_API_KEY || '';
@@ -300,16 +303,36 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       );
     }
 
+    this.lastFinishReason = null;
+
+    // Normalisasi Skema Tool Result: Pastikan payload pesan balik setelah tool execution
+    // sesuai dengan skema standar provider (role: "tool" dengan tool_call_id yang valid).
+    const formattedMessages = messages.map((m) => {
+      if (m.role === 'tool') {
+        const toolCallId = (m.tool_call_id && m.tool_call_id.trim()) || `call_${Date.now()}`;
+        return {
+          role: 'tool',
+          tool_call_id: toolCallId,
+          content: m.content,
+          ...(m.name ? { name: m.name } : {}),
+        };
+      }
+      const msgObj: Record<string, unknown> = {
+        role: m.role,
+        content: m.content,
+      };
+      if (m.tool_calls && m.tool_calls.length > 0) {
+        msgObj.tool_calls = m.tool_calls;
+      }
+      return msgObj;
+    });
+
     const response = await this.requestWithRetry(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.authHeaders(),
       body: JSON.stringify({
         model: options?.model ?? this.currentModel,
-        // Tool results are inlined as user messages; keep only roles the API knows.
-        messages: messages.map((m) => ({
-          role: m.role === 'tool' ? 'user' : m.role,
-          content: m.content,
-        })),
+        messages: formattedMessages,
         temperature: options?.temperature ?? 0.3,
         max_tokens: options?.maxTokens ?? 2048,
         stream: true,
@@ -326,43 +349,61 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     if (!contentType.includes('text/event-stream') || !response.body) {
       // Endpoint ignored `stream` — parse the plain JSON completion instead.
       const data = (await response.json()) as {
-        choices?: Array<{ message?: { content?: string | null } }>;
+        choices?: Array<{
+          message?: { content?: string | null };
+          finish_reason?: string | null;
+        }>;
       };
+      this.lastFinishReason = data.choices?.[0]?.finish_reason ?? 'stop';
       const content = data.choices?.[0]?.message?.content ?? '';
       if (content) options?.onToken?.(content);
       return content;
     }
 
     let full = '';
-    let pending = '';
+    let buffer = '';
     const decoder = new TextDecoder();
-    const consumeEvent = (event: string): void => {
-      for (const line of event.split(/\r?\n/)) {
-        if (!line.startsWith('data:')) continue;
-        const payload = line.slice(5).trim();
-        if (!payload || payload === '[DONE]') continue;
-        try {
-          const parsed = JSON.parse(payload) as {
-            choices?: Array<{ delta?: { content?: string | null } }>;
-          };
-          const token = parsed.choices?.[0]?.delta?.content;
-          if (token) {
-            full += token;
-            options?.onToken?.(token);
-          }
-        } catch {
-          // Keep-alive or malformed SSE frame — ignore.
+    const processLine = (line: string): void => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) return;
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === '[DONE]') return;
+      try {
+        const parsed = JSON.parse(payload) as {
+          choices?: Array<{
+            delta?: { content?: string | null };
+            finish_reason?: string | null;
+          }>;
+        };
+        const finishReason = parsed.choices?.[0]?.finish_reason;
+        if (finishReason) {
+          this.lastFinishReason = finishReason;
         }
+        const token = parsed.choices?.[0]?.delta?.content;
+        if (token) {
+          full += token;
+          options?.onToken?.(token);
+        }
+      } catch {
+        // Keep-alive or malformed SSE frame — ignore.
       }
     };
+
+    // Stream Ingestion Hardening: simpan sisa chunk yang belum newline lengkap ke buffer lokal
+    // sebelum di-parse JSON agar teks streaming tidak terpotong di tengah kalimat.
     for await (const raw of response.body as AsyncIterable<Uint8Array>) {
-      pending += decoder.decode(raw, { stream: true });
-      const events = pending.split(/\r?\n\r?\n/);
-      pending = events.pop() ?? '';
-      for (const event of events) consumeEvent(event);
+      buffer += decoder.decode(raw, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+      for (const line of lines) processLine(line);
     }
-    pending += decoder.decode();
-    if (pending.trim()) consumeEvent(pending);
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      for (const line of buffer.split(/\r?\n/)) processLine(line);
+    }
+    if (!this.lastFinishReason) {
+      this.lastFinishReason = 'stop';
+    }
     return full;
   }
 }
@@ -393,6 +434,7 @@ export class AnthropicProvider implements LLMProvider {
   private baseUrl: string;
   private currentModel: string;
   private readonly retry: RetryOptions;
+  lastFinishReason: string | null = null;
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     this.apiKey = cfg.apiKey || process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY || '';
@@ -542,10 +584,15 @@ export class AnthropicProvider implements LLMProvider {
       throw new Error(`Anthropic API error ${response.status}: ${sanitizeSensitiveText(body.slice(0, 500), this.apiKey)}`);
     }
 
+    this.lastFinishReason = null;
     const contentType = response.headers.get('content-type') ?? '';
     if (!contentType.includes('text/event-stream') || !response.body) {
       try {
-        const data = (await response.json()) as { content?: Array<{ type?: string; text?: string }> };
+        const data = (await response.json()) as {
+          content?: Array<{ type?: string; text?: string }>;
+          stop_reason?: string | null;
+        };
+        this.lastFinishReason = data.stop_reason ?? 'end_turn';
         const text = data.content?.map((c) => c.text ?? '').join('') ?? '';
         if (text) options?.onToken?.(text);
         return text;
@@ -555,50 +602,57 @@ export class AnthropicProvider implements LLMProvider {
     }
 
     let full = '';
-    let pending = '';
+    let buffer = '';
     const decoder = new TextDecoder();
-    const consumeEvent = (event: string): void => {
-      for (const line of event.split(/\r?\n/)) {
-        if (!line.startsWith('data:')) continue;
-        const payloadStr = line.slice(5).trim();
-        if (!payloadStr || payloadStr === '[DONE]') continue;
-        try {
-          const parsed = JSON.parse(payloadStr) as {
-            type?: string;
-            error?: { type?: string; message?: string };
-            delta?: { type?: string; text?: string };
-            content_block?: { type?: string; text?: string };
-          };
-          if (parsed.type === 'error' && parsed.error?.message) {
-            throw new Error(`Anthropic stream error: ${parsed.error.message}`);
-          }
-          if (parsed.delta?.text) {
-            full += parsed.delta.text;
-            options?.onToken?.(parsed.delta.text);
-          } else if (parsed.type === 'content_block_start' && parsed.content_block?.text) {
-            full += parsed.content_block.text;
-            options?.onToken?.(parsed.content_block.text);
-          }
-        } catch (err) {
-          if (err instanceof Error && err.message.startsWith('Anthropic stream error:')) {
-            throw err;
-          }
-          // ignore malformed frame or ping
+    const processLine = (line: string): void => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) return;
+      const payloadStr = trimmed.slice(5).trim();
+      if (!payloadStr || payloadStr === '[DONE]') return;
+      try {
+        const parsed = JSON.parse(payloadStr) as {
+          type?: string;
+          error?: { type?: string; message?: string };
+          delta?: { type?: string; text?: string; stop_reason?: string };
+          content_block?: { type?: string; text?: string };
+        };
+        if (parsed.type === 'error' && parsed.error?.message) {
+          throw new Error(`Anthropic stream error: ${parsed.error.message}`);
         }
+        if (parsed.delta?.stop_reason) {
+          this.lastFinishReason = parsed.delta.stop_reason;
+        }
+        if (parsed.delta?.text) {
+          full += parsed.delta.text;
+          options?.onToken?.(parsed.delta.text);
+        } else if (parsed.type === 'content_block_start' && parsed.content_block?.text) {
+          full += parsed.content_block.text;
+          options?.onToken?.(parsed.content_block.text);
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith('Anthropic stream error:')) {
+          throw err;
+        }
+        // ignore malformed frame or ping
       }
     };
 
     try {
       for await (const raw of response.body as AsyncIterable<Uint8Array>) {
-        pending += decoder.decode(raw, { stream: true });
-        const events = pending.split(/\r?\n\r?\n/);
-        pending = events.pop() ?? '';
-        for (const event of events) consumeEvent(event);
+        buffer += decoder.decode(raw, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? '';
+        for (const line of lines) processLine(line);
       }
-      pending += decoder.decode();
-      if (pending.trim()) consumeEvent(pending);
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        for (const line of buffer.split(/\r?\n/)) processLine(line);
+      }
     } catch (err) {
       throw sanitizeError(err, this.apiKey);
+    }
+    if (!this.lastFinishReason) {
+      this.lastFinishReason = 'end_turn';
     }
 
     return full;
@@ -627,6 +681,7 @@ export class GeminiProvider implements LLMProvider {
   private baseUrl: string;
   private currentModel: string;
   private readonly retry: RetryOptions;
+  lastFinishReason: string | null = null;
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     this.apiKey = cfg.apiKey || process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY || '';
@@ -781,57 +836,72 @@ export class GeminiProvider implements LLMProvider {
       throw new Error(`Gemini API error ${response.status}: ${sanitizeSensitiveText(body.slice(0, 500), this.apiKey)}`);
     }
 
-    let full = '';
-    let pending = '';
-    const decoder = new TextDecoder();
-    const consumeEvent = (event: string): void => {
-      for (const line of event.split(/\r?\n/)) {
-        if (!line.startsWith('data:')) continue;
-        const payloadStr = line.slice(5).trim();
-        if (!payloadStr) continue;
-        try {
-          const parsed = JSON.parse(payloadStr) as {
-            candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-          };
-          const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (text) {
-            full += text;
-            options?.onToken?.(text);
-          }
-        } catch {
-          // ignore
-        }
-      }
-    };
-
+    this.lastFinishReason = null;
     const contentType = response.headers.get('content-type') ?? '';
     if (!contentType.includes('text/event-stream') || !response.body) {
       try {
         const data = (await response.json()) as {
-          candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+          candidates?: Array<{
+            content?: { parts?: Array<{ text?: string }> };
+            finishReason?: string;
+          }>;
         };
+        this.lastFinishReason = data.candidates?.[0]?.finishReason ?? 'STOP';
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
         if (text) {
-          full = text;
           options?.onToken?.(text);
         }
-        return full;
+        return text;
       } catch (err) {
         throw sanitizeError(err, this.apiKey);
       }
     }
 
+    let full = '';
+    let buffer = '';
+    const decoder = new TextDecoder();
+    const processLine = (line: string): void => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) return;
+      const payloadStr = trimmed.slice(5).trim();
+      if (!payloadStr) return;
+      try {
+        const parsed = JSON.parse(payloadStr) as {
+          candidates?: Array<{
+            content?: { parts?: Array<{ text?: string }> };
+            finishReason?: string;
+          }>;
+        };
+        const finishReason = parsed.candidates?.[0]?.finishReason;
+        if (finishReason) {
+          this.lastFinishReason = finishReason;
+        }
+        const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) {
+          full += text;
+          options?.onToken?.(text);
+        }
+      } catch {
+        // ignore
+      }
+    };
+
     try {
       for await (const raw of response.body as AsyncIterable<Uint8Array>) {
-        pending += decoder.decode(raw, { stream: true });
-        const events = pending.split(/\r?\n\r?\n/);
-        pending = events.pop() ?? '';
-        for (const event of events) consumeEvent(event);
+        buffer += decoder.decode(raw, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? '';
+        for (const line of lines) processLine(line);
       }
-      pending += decoder.decode();
-      if (pending.trim()) consumeEvent(pending);
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        for (const line of buffer.split(/\r?\n/)) processLine(line);
+      }
     } catch (err) {
       throw sanitizeError(err, this.apiKey);
+    }
+    if (!this.lastFinishReason) {
+      this.lastFinishReason = 'STOP';
     }
 
     return full;
