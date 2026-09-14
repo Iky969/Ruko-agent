@@ -46,7 +46,41 @@ export function compressHistory(
     const folded = tryFold(head, tail, tailChars, targetChars, excerpt);
     if (folded) return folded;
   }
-  return messages; // cannot compress without losing fidelity entirely
+
+  // Best-effort fallback when targetChars cannot be fully reached (e.g. protected tail
+  // or minimal digest exceeds the target budget). Instead of leaving the entire history
+  // uncompressed, compress all of head with the tightest excerpt if it saves space.
+  const fallback = foldAllHead(head, tail, EXCERPT_BUDGETS[EXCERPT_BUDGETS.length - 1]);
+  if (fallback && verbatimChars(fallback) < verbatimChars(messages)) {
+    return fallback;
+  }
+
+  return messages; // cannot compress without increasing size
+}
+
+function foldAllHead(
+  head: ContextMessage[],
+  tail: ContextMessage[],
+  maxPerMessageChars: number,
+): ContextMessage[] | null {
+  if (head.length === 0) return null;
+  const compact = (m: ContextMessage): string => {
+    const content =
+      m.content.length > maxPerMessageChars
+        ? `${m.content.slice(0, maxPerMessageChars)}…`
+        : m.content;
+    return `[${m.role}] ${content}`;
+  };
+
+  const foldedParts = head.map(compact);
+  const header = `[compressed history — ${foldedParts.length} turn(s) lama diringkas]`;
+  const digestMessage: ContextMessage = {
+    role: 'user',
+    content: `${header}\n${foldedParts.join('\n')}`,
+    timestamp: head[0].timestamp,
+  };
+
+  return [digestMessage, ...tail];
 }
 
 /** Attempts to fold old turns with the given excerpt size; null when impossible. */

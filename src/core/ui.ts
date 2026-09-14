@@ -8,6 +8,23 @@
 
 const ANSI_RE = /\u001b\[[0-9;]*[a-zA-Z]/g;
 
+/**
+ * Matches dangerous terminal escape sequences:
+ * - OSC sequences: \u001b] ... (\u0007 | \u001b\) (e.g. title changes, hyperlinks)
+ * - DCS / APC / PM: \u001b[P_^] ... \u001b\
+ * - Control characters: \u0007 (bell), \u000c (form feed)
+ */
+const DANGEROUS_TERMINAL_RE = /\u001b(?:\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[P_^][^\u001b]*\u001b\\)|[\u0007\u000c]/g;
+
+/**
+ * Sanitizes terminal output by stripping dangerous OSC, DCS, and device control sequences
+ * while preserving standard safe color codes.
+ */
+export function sanitizeTerminalOutput(text: string): string {
+  if (!text || typeof text !== 'string') return '';
+  return text.replace(DANGEROUS_TERMINAL_RE, '');
+}
+
 /** Colors are dropped automatically for non-TTY output (tests, pipes). */
 export function colorsEnabled(): boolean {
   return !!process.stdout.isTTY && !process.env.NO_COLOR;
@@ -34,9 +51,9 @@ export const bgGreen = (s: string): string => wrap('42', s);
  */
 export const onDarkGreen = (s: string): string => wrap('38;5;252;48;5;22', s);
 
-/** Strips all ANSI escape sequences from a string. */
+/** Strips all ANSI escape sequences and terminal control codes from a string. */
 export function stripAnsi(text: string): string {
-  return text.replace(ANSI_RE, '');
+  return text.replace(DANGEROUS_TERMINAL_RE, '').replace(ANSI_RE, '');
 }
 
 /**

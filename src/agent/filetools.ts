@@ -1,6 +1,8 @@
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isPathInsideWorkspace, isSensitivePath } from './tools.js';
+import { assertInsideWorkspace, assertNotSensitivePath, assertNotSecurityCore, getWorkspaceRoot, isPathInsideWorkspace, isSecurityCoreFile, isSensitivePath } from './tools.js';
+
+export { assertNotSecurityCore, isSecurityCoreFile } from './tools.js';
 
 /** Default number of lines a `read_file` call returns when not asked for. */
 export const DEFAULT_READ_LIMIT = 200;
@@ -96,12 +98,26 @@ export async function readFileTool(
   try {
     abs = path.resolve(cwd, filePath);
     assertInsideWorkspace(abs, cwd);
+    assertNotSensitivePath(filePath, cwd);
     assertNotSensitivePath(abs, cwd);
   } catch (err) {
     return { ok: false, text: err instanceof Error ? err.message : String(err) };
   }
   const limit = clampInt(opts.limit, 1, MAX_READ_LIMIT, DEFAULT_READ_LIMIT);
   const offset = Math.max(1, Math.trunc(opts.offset ?? 1));
+
+  try {
+    const lst = await fs.lstat(abs);
+    if (lst.isSymbolicLink()) {
+      const real = await fs.realpath(abs);
+      assertInsideWorkspace(real, cwd);
+      assertNotSensitivePath(real, cwd);
+    }
+  } catch (err) {
+    if (err instanceof Error && (err.message.includes('working directory') || err.message.includes('file sensitif'))) {
+      return { ok: false, text: `read_file: ${err.message}` };
+    }
+  }
 
   let stat;
   try {
@@ -396,6 +412,8 @@ export async function globTool(
   try {
     startDir = opts.path ? path.resolve(cwd, opts.path) : cwd;
     assertInsideWorkspace(startDir, cwd);
+    if (opts.path) assertNotSensitivePath(opts.path, cwd);
+    assertNotSensitivePath(startDir, cwd);
   } catch (err) {
     return {
       ok: false,
@@ -406,10 +424,11 @@ export async function globTool(
     };
   }
 
-  if (isSensitivePath(startDir, cwd)) {
+  // Reject explicit sensitive target patterns
+  if (pattern && isSensitivePath(pattern, cwd)) {
     return {
-      ok: true,
-      text: 'Tidak ada file ditemukan.',
+      ok: false,
+      text: `glob ditolak: pola target "${pattern}" mengarah ke berkas sensitif demi keamanan kredensial.`,
       files: [],
       totalFound: 0,
       truncated: false,
@@ -606,6 +625,14 @@ export async function listDirTool(
         // ignore error
       }
     } else if (entry.isSymbolicLink()) {
+      try {
+        const real = await fs.realpath(fullPath);
+        if (!isPathInsideWorkspace(real, cwd) || isSensitivePath(real, cwd)) {
+          continue;
+        }
+      } catch {
+        continue;
+      }
       type = 'symlink';
     }
 
@@ -773,7 +800,34 @@ export async function codeSearchTool(
     };
   }
 
-  if (isSensitivePath(targetPath, cwd)) {
+  try {
+    const lst = await fs.lstat(targetPath);
+    if (lst.isSymbolicLink()) {
+      const real = await fs.realpath(targetPath);
+      assertInsideWorkspace(real, cwd);
+      if (isSensitivePath(real, cwd)) {
+        return {
+          ok: true,
+          text: 'Tidak ada kecocokan ditemukan.',
+          totalMatches: 0,
+          totalFiles: 0,
+          truncated: false,
+        };
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('working directory')) {
+      return {
+        ok: false,
+        text: `code_search: ${err.message}`,
+        totalMatches: 0,
+        totalFiles: 0,
+        truncated: false,
+      };
+    }
+  }
+
+  if (isSensitivePath(targetPath, cwd) || (opts.path && isSensitivePath(opts.path, cwd))) {
     return {
       ok: true,
       text: 'Tidak ada kecocokan ditemukan.',

@@ -1,4 +1,4 @@
-import { chainedSegments, Confirmer, detectRisk, guardedExecute, isYoloMode } from '../core/approval.js';
+import { chainedSegments, Confirmer, decodePathSafely, detectRisk, extractAndResolveShellVariables, guardedExecute, isYoloMode } from '../core/approval.js';
 import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
 import { DEFAULT_TIMEOUT_MS } from '../core/executor.js';
 import { renderFileDiff, splitLines } from '../core/diff.js';
@@ -11,9 +11,10 @@ import { searchSessions } from '../core/session.js';
 import { runSubagent } from './subagent.js';
 import { webFetchTool } from './webtools.js';
 import { defaultProcessManager } from './processManager.js';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 
 /**
  * Hard cap (§5: batasi output tool) applied to every tool result before it
@@ -186,13 +187,25 @@ export function assertInsideWorkspace(abs: string, workspaceRoot: string = getWo
 
   // Canonical symlink check: verify the real target does not escape the workspace
   try {
-    if (existsSync(abs)) {
-      const real = realpathSync(abs);
+    let isSymlink = false;
+    try {
+      const lst = lstatSync(abs);
+      isSymlink = lst.isSymbolicLink();
+    } catch {}
+
+    if (isSymlink || existsSync(abs)) {
+      let real: string;
+      try {
+        real = realpathSync(abs);
+      } catch {
+        const target = readlinkSync(abs);
+        real = path.isAbsolute(target) ? path.resolve(target) : path.resolve(path.dirname(abs), target);
+      }
       const isRealInside =
         real === cwd || real.startsWith(cwdPrefix) || real === canonicalCwd || real.startsWith(canonicalCwdPrefix);
       if (!isRealInside) {
         throw new Error(
-          `Path "${abs}" mengarah ke symlink di luar working directory ("${real}"). Akses ditolak demi keamanan sandbox. ` +
+          `Path "${abs}" mengarah ke symlink di luar working directory / workspace ("${real}"). Akses ditolak demi keamanan sandbox. ` +
           `Workspace: ${cwd}`,
         );
       }
@@ -206,7 +219,7 @@ export function assertInsideWorkspace(abs: string, workspaceRoot: string = getWo
             realCur === cwd || realCur.startsWith(cwdPrefix) || realCur === canonicalCwd || realCur.startsWith(canonicalCwdPrefix);
           if (!isCurInside) {
             throw new Error(
-              `Direktori induk "${cur}" mengarah ke symlink di luar working directory ("${realCur}"). Akses ditolak demi keamanan sandbox. ` +
+              `Direktori induk "${cur}" mengarah ke symlink di luar working directory / workspace ("${realCur}"). Akses ditolak demi keamanan sandbox. ` +
               `Workspace: ${cwd}`,
             );
           }
@@ -216,70 +229,223 @@ export function assertInsideWorkspace(abs: string, workspaceRoot: string = getWo
       }
     }
   } catch (err) {
-    if (err instanceof Error && err.message.includes('di luar working directory')) {
+    if (err instanceof Error && (err.message.includes('di luar working directory') || err.message.includes('luar workspace'))) {
       throw err;
     }
   }
 }
 
 /**
+ * Immutable security core files of Ruko Agent.
+ * Modifying or deleting these files through agent tools is forbidden.
+ */
+export const SECURITY_CORE_FILES = [
+  'src/core/approval.ts',
+  'src/core/executor.ts',
+  'src/agent/tools.ts',
+  'src/agent/filetools.ts',
+  'src/agent/subagent.ts',
+  'src/agent/webtools.ts',
+] as const;
+
+export const SECURITY_CORE_FILES_SET = new Set<string>(
+  SECURITY_CORE_FILES.map((f) => f.toLowerCase()),
+);
+
+/**
+ * Maximum payload size allowed for file writing and editing (5 MB).
+ * Protects against memory exhaustion and runaway output.
+ */
+export const MAX_FILE_WRITE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Checks if a target path matches any of Ruko's immutable security core files.
+ */
+export function isSecurityCoreFile(targetPath: string, workspaceRoot: string = getWorkspaceRoot()): boolean {
+  if (!targetPath || typeof targetPath !== 'string') return false;
+  const decoded = decodePathSafely(targetPath).trim().replace(/^['"]|['"]$/g, '');
+  if (!decoded) return false;
+
+  const cwd = path.resolve(workspaceRoot);
+  const candidates = [
+    decoded,
+    decoded.replace(/\\(.)/g, '$1'),
+    decoded.replace(/\\/g, '/'),
+  ];
+
+  for (const cand of candidates) {
+    const abs = path.isAbsolute(cand) ? path.resolve(cand) : path.resolve(cwd, cand);
+    const rel = path.relative(cwd, abs).replace(/\\/g, '/').toLowerCase();
+    const cleanRel = rel.startsWith('./') ? rel.slice(2) : rel;
+
+    if (SECURITY_CORE_FILES_SET.has(cleanRel)) {
+      return true;
+    }
+
+    try {
+      if (existsSync(abs)) {
+        const real = realpathSync(abs);
+        const realRel = path.relative(cwd, real).replace(/\\/g, '/').toLowerCase();
+        const cleanRealRel = realRel.startsWith('./') ? realRel.slice(2) : realRel;
+        if (SECURITY_CORE_FILES_SET.has(cleanRealRel)) {
+          return true;
+        }
+      }
+    } catch {}
+  }
+
+  return false;
+}
+
+/**
+ * Asserts that a target path is not one of Ruko's immutable security core files.
+ */
+export function assertNotSecurityCore(targetPath: string, workspaceRoot: string = getWorkspaceRoot()): void {
+  if (isSecurityCoreFile(targetPath, workspaceRoot)) {
+    throw new Error(
+      `Akses modifikasi ditolak: "${targetPath}" adalah berkas keamanan inti Ruko (Immutable Security Core file). Berkas ini dilindungi dari modifikasi atau penghapusan demi menjaga integritas sistem proteksi.`,
+    );
+  }
+}
+
+/**
  * Checks if a target path points to a sensitive file or directory:
- * - .ruko/config.json
+ * - .ruko/config.json (relative, in workspace, or absolute in home / termux home / system)
  * - .ruko/undo/**
  * - .env, .env.*
+ * - .git-credentials, .git-credentials.*
  * - id_rsa, id_ed25519, *.pem, *.key
  * - .git/config
  *
- * Case-insensitive, matches relative and absolute variations.
+ * Case-insensitive, handles URL-encoding (%2e%2e%2f) and escape characters (\).
  */
 export function isSensitivePath(targetPath: string, workspaceRoot: string = getWorkspaceRoot()): boolean {
   if (!targetPath || typeof targetPath !== 'string') return false;
-  const clean = targetPath.trim().replace(/^['"]|['"]$/g, '');
-  if (!clean) return false;
+  const rawClean = targetPath.trim().replace(/^['"]|['"]$/g, '');
+  if (!rawClean) return false;
 
   const cwd = path.resolve(workspaceRoot);
-  const abs = path.isAbsolute(clean) ? path.resolve(clean) : path.resolve(cwd, clean);
-  const rel = path.relative(cwd, abs).replace(/\\/g, '/');
-  const relLower = rel.toLowerCase();
-  const baseLower = path.basename(abs).toLowerCase();
-  const extLower = path.extname(abs).toLowerCase();
+  const home = os.homedir();
 
-  // 1. .ruko/config.json
-  if (relLower === '.ruko/config.json' || relLower.endsWith('/.ruko/config.json')) {
-    return true;
-  }
+  // Test both unescaped and normalized candidates to handle %-encoding and \-escaping
+  const candidateForms = new Set<string>();
+  candidateForms.add(rawClean);
 
-  // 2. .ruko/undo/**
-  if (
-    relLower === '.ruko/undo' ||
-    relLower.startsWith('.ruko/undo/') ||
-    relLower.includes('/.ruko/undo/') ||
-    relLower.endsWith('/.ruko/undo')
-  ) {
-    return true;
-  }
+  const decoded = decodePathSafely(rawClean);
+  candidateForms.add(decoded);
 
-  // 3. .env, .env.*
-  if (baseLower === '.env' || baseLower.startsWith('.env.')) {
-    return true;
-  }
+  const unescaped = decoded.replace(/\\(.)/g, '$1');
+  candidateForms.add(unescaped);
 
-  // 4. id_rsa, id_ed25519, *.pem, *.key
-  if (
-    baseLower === 'id_rsa' ||
-    baseLower.startsWith('id_rsa.') ||
-    baseLower === 'id_ed25519' ||
-    baseLower.startsWith('id_ed25519.')
-  ) {
-    return true;
-  }
-  if (extLower === '.pem' || extLower === '.key') {
-    return true;
-  }
+  const slashNorm = unescaped.replace(/\\/g, '/');
+  candidateForms.add(slashNorm);
 
-  // 5. .git/config
-  if (relLower === '.git/config' || relLower.endsWith('/.git/config')) {
-    return true;
+  for (let cand of candidateForms) {
+    cand = cand.trim().replace(/^['"]|['"]$/g, '');
+    if (!cand) continue;
+
+    // Expand ~ or ~/ to home directory
+    if (cand === '~' || cand.startsWith('~/') || cand.startsWith('~\\')) {
+      cand = home + cand.slice(1);
+    }
+
+    const candLower = cand.toLowerCase().replace(/\\/g, '/');
+
+    // 1. .ruko/config.json (relative, in workspace, or absolute in home / termux home / system)
+    if (
+      candLower === '.ruko/config.json' ||
+      candLower.endsWith('/.ruko/config.json') ||
+      candLower.includes('/.ruko/config.json') ||
+      candLower.includes('.ruko/config.json')
+    ) {
+      return true;
+    }
+
+    const abs = path.isAbsolute(cand) ? path.resolve(cand) : path.resolve(cwd, cand);
+    const absLower = abs.toLowerCase().replace(/\\/g, '/');
+    const rel = path.relative(cwd, abs).replace(/\\/g, '/');
+    const relLower = rel.toLowerCase();
+    const baseLower = path.basename(abs).toLowerCase();
+    const extLower = path.extname(abs).toLowerCase();
+
+    // 1b. Absolute or relative .ruko/config.json
+    if (
+      absLower.endsWith('/.ruko/config.json') ||
+      relLower === '.ruko/config.json' ||
+      relLower.endsWith('/.ruko/config.json')
+    ) {
+      return true;
+    }
+
+    // 2. .ruko/undo/**
+    if (
+      relLower === '.ruko/undo' ||
+      relLower.startsWith('.ruko/undo/') ||
+      relLower.includes('/.ruko/undo/') ||
+      relLower.endsWith('/.ruko/undo') ||
+      absLower.includes('/.ruko/undo/') ||
+      absLower.endsWith('/.ruko/undo')
+    ) {
+      return true;
+    }
+
+    // 3. .env, .env.*
+    if (baseLower === '.env' || baseLower.startsWith('.env.')) {
+      return true;
+    }
+
+    // 4. .git-credentials
+    if (baseLower === '.git-credentials' || baseLower.startsWith('.git-credentials.')) {
+      return true;
+    }
+
+    // 5. id_rsa, id_ed25519, *.pem, *.key
+    if (
+      baseLower === 'id_rsa' ||
+      baseLower.startsWith('id_rsa.') ||
+      baseLower === 'id_ed25519' ||
+      baseLower.startsWith('id_ed25519.')
+    ) {
+      return true;
+    }
+    if (extLower === '.pem' || extLower === '.key') {
+      return true;
+    }
+
+    // 6. .git/config
+    if (
+      relLower === '.git/config' ||
+      relLower.endsWith('/.git/config') ||
+      absLower.endsWith('/.git/config')
+    ) {
+      return true;
+    }
+
+    // 7. Shell startup/profile configurations (.bashrc, .bash_profile, .zshrc, .profile, etc.)
+    if (
+      baseLower === '.bashrc' ||
+      baseLower.startsWith('.bashrc.') ||
+      baseLower === '.bash_profile' ||
+      baseLower.startsWith('.bash_profile.') ||
+      baseLower === '.bash_login' ||
+      baseLower.startsWith('.bash_login.') ||
+      baseLower === '.bash_logout' ||
+      baseLower.startsWith('.bash_logout.') ||
+      baseLower === '.zshrc' ||
+      baseLower.startsWith('.zshrc.') ||
+      baseLower === '.zprofile' ||
+      baseLower.startsWith('.zprofile.') ||
+      baseLower === '.zshenv' ||
+      baseLower.startsWith('.zshenv.') ||
+      baseLower === '.zlogin' ||
+      baseLower.startsWith('.zlogin.') ||
+      baseLower === '.zlogout' ||
+      baseLower.startsWith('.zlogout.') ||
+      baseLower === '.profile' ||
+      baseLower.startsWith('.profile.')
+    ) {
+      return true;
+    }
   }
 
   return false;
@@ -299,19 +465,53 @@ export function assertNotSensitivePath(targetPath: string, workspaceRoot: string
   try {
     const cwd = path.resolve(workspaceRoot);
     const abs = path.isAbsolute(targetPath) ? path.resolve(targetPath) : path.resolve(cwd, targetPath);
-    if (existsSync(abs)) {
-      const real = realpathSync(abs);
-      if (isSensitivePath(real, workspaceRoot)) {
-        throw new Error(
-          `Akses ke file sensitif "${targetPath}" (mengarah ke "${real}") ditolak demi keamanan kredensial/data sensitif.`,
-        );
+    let real: string | null = null;
+    try {
+      const lst = lstatSync(abs);
+      if (lst.isSymbolicLink()) {
+        try {
+          real = realpathSync(abs);
+        } catch {
+          const target = readlinkSync(abs);
+          real = path.isAbsolute(target) ? path.resolve(target) : path.resolve(path.dirname(abs), target);
+        }
+      } else if (existsSync(abs)) {
+        real = realpathSync(abs);
       }
+    } catch {
+      if (existsSync(abs)) {
+        real = realpathSync(abs);
+      }
+    }
+    if (real && isSensitivePath(real, workspaceRoot)) {
+      throw new Error(
+        `Akses ke file sensitif "${targetPath}" (mengarah ke "${real}") ditolak demi keamanan kredensial/data sensitif.`,
+      );
     }
   } catch (err) {
     if (err instanceof Error && err.message.includes('file sensitif')) {
       throw err;
     }
   }
+}
+
+/**
+ * Checks if a string contains references to sensitive files (.ruko/config.json, .env, .git-credentials, SSH keys).
+ */
+export function containsSensitiveFilePattern(text: string): boolean {
+  if (!text || typeof text !== 'string') return false;
+  const decoded = decodePathSafely(text).toLowerCase();
+  const unescaped = decoded.replace(/\\([^\s])/g, '$1');
+  const candidates = [decoded, unescaped];
+
+  for (const c of candidates) {
+    if (/\.ruko[/\\]config\.json\b/i.test(c)) return true;
+    if (/\.git-credentials\b/i.test(c)) return true;
+    if (/(?:^|\s|["'/\\])\.env(?:\.[a-zA-Z0-9_-]+)?\b/i.test(c)) return true;
+    if (/\b(?:id_rsa|id_ed25519)\b/i.test(c)) return true;
+    if (/\.git[/\\]config\b/i.test(c)) return true;
+  }
+  return false;
 }
 
 /**
@@ -333,15 +533,25 @@ async function writeWithDiff(
   onLog?: (line: string) => void,
   workspaceRoot: string = getWorkspaceRoot(),
 ): Promise<string> {
+  // Reject mutating immutable security core files
+  assertNotSecurityCore(fileLabel, workspaceRoot);
+  assertNotSecurityCore(abs, workspaceRoot);
+
+  // Payload size limit protection (Finding 2)
+  const byteLen = Buffer.byteLength(newContent, 'utf8');
+  if (byteLen > MAX_FILE_WRITE_BYTES) {
+    throw new Error(
+      `Payload terlalu besar: ukuran berkas (${byteLen} bytes) melebihi batas maksimum 5MB.`,
+    );
+  }
+
   // Reject writing/editing through symbolic link
   try {
-    if (existsSync(abs)) {
-      const lst = lstatSync(abs);
-      if (lst.isSymbolicLink()) {
-        throw new Error(
-          `Akses ditolak: "${fileLabel}" adalah symbolic link. Menulis atau mengubah file melalui symbolic link dilarang demi keamanan sandbox.`,
-        );
-      }
+    const lst = lstatSync(abs);
+    if (lst.isSymbolicLink()) {
+      throw new Error(
+        `Akses ditolak: "${fileLabel}" adalah symbolic link. Menulis atau mengubah file melalui symbolic link dilarang demi keamanan sandbox.`,
+      );
     }
   } catch (err) {
     if (err instanceof Error && err.message.includes('symbolic link')) {
@@ -364,7 +574,7 @@ async function writeWithDiff(
 
   // Eliminate TOCTOU swap window: verify target is not a symlink right before writing
   try {
-    if (existsSync(abs) && lstatSync(abs).isSymbolicLink()) {
+    if (lstatSync(abs).isSymbolicLink()) {
       throw new Error(`Akses ditolak: "${fileLabel}" terdeteksi sebagai symbolic link sebelum penulisan.`);
     }
   } catch (err) {
@@ -623,33 +833,74 @@ function checkEnvSegment(segment: string): boolean {
 export function isSensitiveEnvCommand(command: string): boolean {
   if (!command || typeof command !== 'string') return false;
 
-  // 1. Check for sensitive variable expansion anywhere in command:
-  // e.g. $NAME or ${NAME} where NAME matches SENSITIVE_VAR_REGEX
-  const varMatches = command.matchAll(/\$([a-zA-Z_][a-zA-Z0-9_]*|\{([a-zA-Z_][a-zA-Z0-9_]*)\})/g);
-  for (const m of varMatches) {
-    const varName = m[2] ?? m[1];
-    if (varName && SENSITIVE_VAR_REGEX.test(varName)) {
-      return true;
-    }
+  const variants = extractAndResolveShellVariables(command);
+  const allVariants = new Set<string>();
+  for (const v of variants) {
+    allVariants.add(v);
+    const unescaped = v.replace(/\\([^\s])/g, '$1');
+    if (unescaped) allVariants.add(unescaped);
   }
 
-  // 2. Check each chained segment
-  const segments = chainedSegments(command);
-  for (const seg of segments) {
-    const s = seg.trim().replace(/^sudo\s+/, '');
-    if (!s) continue;
-
-    if (checkPrintenvSegment(s)) {
-      return true;
+  for (const variant of allVariants) {
+    // 1. Direct variable expansion $VAR, ${VAR}, ${!VAR}
+    const varMatches = variant.matchAll(/\$\{?!?([a-zA-Z_][a-zA-Z0-9_]*)\}|\$([a-zA-Z_][a-zA-Z0-9_]*)/g);
+    for (const m of varMatches) {
+      const varName = m[1] ?? m[2];
+      if (varName && SENSITIVE_VAR_REGEX.test(varName)) {
+        return true;
+      }
     }
 
-    if (checkEnvSegment(s)) {
-      return true;
+    // 2. Variable assignments with sensitive values (e.g. V=RUKO_API_KEY; echo ${!V} or echo $V)
+    const assignRe = /(?:^|[;&|\s])([a-zA-Z_][a-zA-Z0-9_]*)=(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/g;
+    let am: RegExpExecArray | null;
+    while ((am = assignRe.exec(variant)) !== null) {
+      const val = am[2] ?? am[3] ?? am[4] ?? '';
+      if (SENSITIVE_VAR_REGEX.test(val)) {
+        const name = am[1];
+        if (new RegExp(`\\$(?:\\{!?\\s*${name}\\s*\\}|${name}\\b)`).test(variant)) {
+          return true;
+        }
+      }
     }
 
-    // Bare export or export -p dumps environment in bash
-    if (/^(?:export)(?:\s+-p)?$/i.test(s)) {
-      return true;
+    // 3. Chained segments (including subshells)
+    const segments = chainedSegments(variant);
+    for (const seg of segments) {
+      const s = seg.trim().replace(/^sudo\s+/, '');
+      if (!s) continue;
+
+      const unescSeg = s.replace(/\\([^\s])/g, '$1');
+      const testSegs = [s, unescSeg];
+
+      for (const ts of testSegs) {
+        if (checkPrintenvSegment(ts)) {
+          return true;
+        }
+
+        if (checkEnvSegment(ts)) {
+          return true;
+        }
+
+        // Bare export or export -p dumps environment in bash
+        if (/^(?:export)(?:\s+-p)?$/i.test(ts)) {
+          return true;
+        }
+
+        // declare -p or typeset -p (bare or with sensitive variable name)
+        const declMatch = ts.match(/^(?:declare|typeset)\s+-p(?:\s+(.*))?$/i);
+        if (declMatch) {
+          const declArgs = declMatch[1]?.trim();
+          if (!declArgs || SENSITIVE_VAR_REGEX.test(declArgs)) {
+            return true;
+          }
+        }
+
+        // Bare set (without flags) dumps all shell variables in bash
+        if (/^set(?:\s*[><|].*)?$/i.test(ts)) {
+          return true;
+        }
+      }
     }
   }
 
@@ -664,12 +915,15 @@ export function detectSensitiveFileAccessInExec(
   command: string,
   workspaceRoot: string = getWorkspaceRoot(),
 ): { blocked: boolean; message?: string; target?: string } {
-  const segments = chainedSegments(command);
+  const variants = extractAndResolveShellVariables(command);
 
-  for (const seg of segments) {
-    const s = seg.trim().replace(/^sudo\s+/, '');
+  for (const variant of variants) {
+    const segments = chainedSegments(variant);
 
-    const tokenRegex = /[^\s"';&|<>]+|"([^"]*)"|'([^']*)'/g;
+    for (const seg of segments) {
+      const s = seg.trim().replace(/^sudo\s+/, '');
+
+    const tokenRegex = /[^\s"';&|()<>\`]+|"([^"]*)"|'([^']*)'/g;
     let match: RegExpExecArray | null;
 
     while ((match = tokenRegex.exec(s)) !== null) {
@@ -694,16 +948,29 @@ export function detectSensitiveFileAccessInExec(
         candidate = candidate.replace(/^[@<>]+/, '');
         if (!candidate) continue;
 
-        if (isSensitivePath(candidate, workspaceRoot)) {
-          return {
-            blocked: true,
-            target: candidate,
-            message: `exec ditolak: akses ke file sensitif ("${candidate}") diblokir demi keamanan kredensial/data sensitif.`,
-          };
+        // Candidate testing: raw, unescaped, decoded
+        const candidates = new Set<string>();
+        candidates.add(candidate);
+        const unesc = candidate.replace(/\\(.)/g, '$1');
+        candidates.add(unesc);
+        const dec = decodePathSafely(candidate);
+        candidates.add(dec);
+        const decUnesc = decodePathSafely(unesc);
+        candidates.add(decUnesc);
+
+        for (const cand of candidates) {
+          if (isSensitivePath(cand, workspaceRoot)) {
+            return {
+              blocked: true,
+              target: candidate,
+              message: `exec ditolak: akses ke file sensitif ("${candidate}") diblokir demi keamanan kredensial/data sensitif.`,
+            };
+          }
         }
       }
     }
   }
+}
 
   return { blocked: false };
 }
@@ -885,15 +1152,30 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       if (!file) {
         return JSON.stringify({ error: `${call.tool}: missing "path" field` });
       }
+      try {
+        assertNotSecurityCore(file, ws);
+      } catch (err) {
+        return JSON.stringify({
+          error: `${call.tool}: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
       const content = typeof call.content === 'string' ? call.content : null;
       if (content == null) {
         return JSON.stringify({ error: `${call.tool}: missing "content" field (string)` });
+      }
+      const byteLen = Buffer.byteLength(content, 'utf8');
+      if (byteLen > MAX_FILE_WRITE_BYTES) {
+        return JSON.stringify({
+          error: `${call.tool}: payload terlalu besar (${byteLen} bytes) melebihi batas maksimum 5MB.`,
+        });
       }
       let abs: string;
       let rel: string;
       try {
         abs = resolveToolPath(file, ws);
         rel = path.relative(ws, abs) || file;
+        assertNotSecurityCore(file, ws);
+        assertNotSecurityCore(abs, ws);
       } catch (err) {
         return JSON.stringify({
           error: `${call.tool}: ${err instanceof Error ? err.message : String(err)}`,
@@ -917,8 +1199,17 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       if (!file) {
         return JSON.stringify({ error: 'patch_file: missing "path" field' });
       }
-      const oldText = typeof call.oldText === 'string' ? call.oldText : null;
-      const newText = typeof call.newText === 'string' ? call.newText : null;
+      try {
+        assertNotSecurityCore(file, ws);
+      } catch (err) {
+        return JSON.stringify({
+          error: `patch_file: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      const rawOld = call.oldText ?? call.old_string ?? call.search;
+      const rawNew = call.newText ?? call.new_string ?? call.replace;
+      const oldText = typeof rawOld === 'string' ? rawOld : null;
+      const newText = typeof rawNew === 'string' ? rawNew : null;
       if (oldText == null || newText == null) {
         return JSON.stringify({ error: 'patch_file: missing "oldText"/"newText" (strings)' });
       }
@@ -926,6 +1217,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       let rel: string;
       try {
         abs = resolveToolPath(file, ws);
+        assertNotSecurityCore(abs, ws);
         rel = path.relative(ws, abs) || file;
       } catch (err) {
         return JSON.stringify({
@@ -953,7 +1245,9 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       let abs: string;
       let rel: string;
       try {
+        assertNotSecurityCore(file, ws);
         abs = resolveToolPath(file, ws);
+        assertNotSecurityCore(abs, ws);
         rel = path.relative(ws, abs) || file;
       } catch (err) {
         return JSON.stringify({
@@ -1029,7 +1323,9 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       let targetAbs: string;
       let targetRel: string;
       try {
+        assertNotSecurityCore(source, ws);
         sourceAbs = resolveToolPath(source, ws);
+        assertNotSecurityCore(sourceAbs, ws);
         sourceRel = path.relative(ws, sourceAbs) || source;
       } catch (err) {
         return JSON.stringify({
@@ -1037,7 +1333,9 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         });
       }
       try {
+        assertNotSecurityCore(target, ws);
         targetAbs = resolveToolPath(target, ws);
+        assertNotSecurityCore(targetAbs, ws);
         targetRel = path.relative(ws, targetAbs) || target;
       } catch (err) {
         return JSON.stringify({
@@ -1118,7 +1416,9 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       let abs: string;
       let rel: string;
       try {
+        assertNotSecurityCore(file, ws);
         abs = resolveToolPath(file, ws);
+        assertNotSecurityCore(abs, ws);
         rel = path.relative(ws, abs) || file;
       } catch (err) {
         return JSON.stringify({
@@ -1361,6 +1661,10 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       const short = task.length > 50 ? `${task.slice(0, 47)}…` : task;
       deps.onLog?.(magenta(`🟣 Subagent(${short})`));
       try {
+        const timeoutMs =
+          typeof call.timeout_ms === 'number'
+            ? call.timeout_ms
+            : (typeof call.timeout === 'number' ? call.timeout : undefined);
         const subResult = await runSubagent(
           task,
           {
@@ -1374,6 +1678,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
             planMode: deps.planMode,
             workspaceRoot: ws,
             depth: (deps.subagentDepth ?? 0) + 1,
+            timeoutMs,
           },
         );
         return JSON.stringify(

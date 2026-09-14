@@ -1,6 +1,7 @@
 import { exec } from 'node:child_process';
 import { ExecResult } from '../types.js';
 import { summarizeLog } from './summarizer.js';
+import { sanitizeTerminalOutput } from './ui.js';
 
 export interface ExecOptions {
   timeoutMs?: number;
@@ -32,20 +33,35 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const started = Date.now();
 
+    // Sanitize environment: discard shell function exports (BASH_FUNC_*) that can hijack utilities
+    const rawEnv = options.env ? { ...process.env, ...options.env } : { ...process.env };
+    const cleanEnv: NodeJS.ProcessEnv = {};
+    for (const [k, v] of Object.entries(rawEnv)) {
+      if (k.startsWith('BASH_FUNC_')) continue;
+      cleanEnv[k] = v;
+    }
+
+    // Interleaved stream chunk collection for true sequential ordering of stdout & stderr
+    const interleavedChunks: string[] = [];
+
     const child = exec(
       command,
       {
         cwd: options.cwd,
-        env: options.env ? { ...process.env, ...options.env } : process.env,
+        env: cleanEnv,
         timeout: timeoutMs,
         maxBuffer: options.maxBuffer ?? DEFAULT_MAX_BUFFER,
         windowsHide: true,
       },
-      (error, stdout, stderr) => {
+      (error, rawStdout, rawStderr) => {
         const durationMs = Date.now() - started;
         // `error.code` is the process exit code; `null` when killed by timeout.
         const code = error ? (typeof error.code === 'number' ? error.code : null) : 0;
-        let output = [stdout, stderr].filter(Boolean).join('\n');
+        let stdout = sanitizeTerminalOutput(rawStdout);
+        let stderr = sanitizeTerminalOutput(rawStderr);
+        let output = interleavedChunks.length > 0
+          ? sanitizeTerminalOutput(interleavedChunks.join(''))
+          : [stdout, stderr].filter(Boolean).join('\n');
 
         // Check if process was killed by timeout
         const killedByTimeout = Boolean(
@@ -90,6 +106,13 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
         });
       },
     );
+
+    child.stdout?.on('data', (chunk) => {
+      interleavedChunks.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
+    });
+    child.stderr?.on('data', (chunk) => {
+      interleavedChunks.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
+    });
 
     // v0.7: an interrupted turn kills its shell child (SIGKILL so grandchildren
     // die too) — the callback above still resolves with what was captured.

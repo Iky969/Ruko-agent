@@ -210,10 +210,12 @@ export function isPrivateOrLocalIPv6(ip: string): boolean {
   }
 
   // IPv4-mapped IPv6 (::ffff:127.0.0.1 or ::ffff:7f00:1 or ::ffff:a9fe:a9fe)
-  if (clean.startsWith('::ffff:')) {
-    const v4Part = clean.slice(7);
+  if (clean.startsWith('::ffff:') || /(?:^|:)ffff:([0-9a-f:.]+)$/i.test(clean)) {
+    const v4Match = clean.match(/(?:^|:)ffff:([0-9a-f:.]+)$/i);
+    const v4Part = v4Match ? v4Match[1] : clean.slice(7);
     if (v4Part.includes('.')) {
-      return isPrivateOrLocalIPv4(v4Part);
+      const alt = parseAlternativeIPv4(v4Part) || v4Part;
+      return isPrivateOrLocalIPv4(alt);
     }
     const hexSegments = v4Part.split(':');
     if (hexSegments.length === 2) {
@@ -249,12 +251,86 @@ export function isPrivateOrLocalIPv6(ip: string): boolean {
 }
 
 /**
- * Checks if an IP address (v4 or v6) is private or internal.
+ * Normalizes alternative IPv4 representations (decimal integer, octal, hex, or shorthand notation)
+ * to standard dotted-decimal notation. Returns null if not a valid alternative representation.
+ */
+export function parseAlternativeIPv4(ipStr: string): string | null {
+  if (!ipStr || typeof ipStr !== 'string') return null;
+  const clean = ipStr.trim().toLowerCase().replace(/^\[|\]$/g, '');
+
+  // 1. Single 32-bit integer (decimal e.g. 2130706433, hex 0x7f000001, octal 017700000001)
+  if (/^(?:0x[0-9a-f]+|0[0-7]+|[1-9][0-9]*|0)$/.test(clean)) {
+    try {
+      let num: bigint;
+      if (clean.startsWith('0x')) {
+        num = BigInt(clean);
+      } else if (clean.startsWith('0') && clean.length > 1) {
+        num = BigInt('0o' + clean.slice(1));
+      } else {
+        num = BigInt(clean);
+      }
+      if (num >= 0n && num <= 4294967295n) {
+        const n = Number(num);
+        const a = (n >>> 24) & 0xff;
+        const b = (n >>> 16) & 0xff;
+        const c = (n >>> 8) & 0xff;
+        const d = n & 0xff;
+        return `${a}.${b}.${c}.${d}`;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  // 2. Dot-separated notation with 1-4 parts (e.g. 0177.0.0.1, 0x7f.1, 127.1, 10.1)
+  if (/^[0-9a-fx.]*$/i.test(clean) && clean.includes('.')) {
+    const parts = clean.split('.');
+    if (parts.length >= 1 && parts.length <= 4) {
+      const nums: number[] = [];
+      for (const p of parts) {
+        if (!p) return null;
+        let val: number;
+        if (p.startsWith('0x')) {
+          val = parseInt(p.slice(2), 16);
+        } else if (p.startsWith('0') && p.length > 1) {
+          val = parseInt(p, 8);
+        } else {
+          val = parseInt(p, 10);
+        }
+        if (isNaN(val) || val < 0) return null;
+        nums.push(val);
+      }
+
+      if (nums.length === 4) {
+        if (nums.some((n) => n > 255)) return null;
+        return `${nums[0]}.${nums[1]}.${nums[2]}.${nums[3]}`;
+      } else if (nums.length === 3) {
+        // a.b.c -> a.b.(c >> 8).(c & 0xff)
+        if (nums[0] > 255 || nums[1] > 255 || nums[2] > 65535) return null;
+        return `${nums[0]}.${nums[1]}.${(nums[2] >>> 8) & 0xff}.${nums[2] & 0xff}`;
+      } else if (nums.length === 2) {
+        // a.b -> a.(b >> 16).(b >> 8).(b & 0xff)
+        if (nums[0] > 255 || nums[1] > 16777215) return null;
+        return `${nums[0]}.${(nums[1] >>> 16) & 0xff}.${(nums[1] >>> 8) & 0xff}.${nums[1] & 0xff}`;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Checks if an IP address (v4, v6, or alternative representation like decimal/octal) is private or internal.
  */
 export function isPrivateOrLocalIp(ip: string): boolean {
-  const version = isIP(ip.replace(/^\[|\]$/g, ''));
-  if (version === 4) return isPrivateOrLocalIPv4(ip);
-  if (version === 6) return isPrivateOrLocalIPv6(ip);
+  const clean = ip.trim().replace(/^\[|\]$/g, '');
+  const alt = parseAlternativeIPv4(clean);
+  if (alt) {
+    return isPrivateOrLocalIPv4(alt);
+  }
+  const version = isIP(clean);
+  if (version === 4) return isPrivateOrLocalIPv4(clean);
+  if (version === 6) return isPrivateOrLocalIPv6(clean);
   return false;
 }
 
@@ -335,7 +411,21 @@ export async function checkSsrfSafety(
     };
   }
 
-  // 3. Literal IP check
+  // 3. Literal IP or alternative IP check (e.g. decimal integer, octal, hex, shorthand)
+  const altIp = parseAlternativeIPv4(cleanHost);
+  if (altIp) {
+    if (opts.allowLocalhost && isLoopbackHost) {
+      return { safe: true, pinnedIp: altIp, ipFamily: 4 };
+    }
+    if (isPrivateOrLocalIPv4(altIp)) {
+      return {
+        safe: false,
+        reason: `target mengarah ke alamat IP lokal/privat ("${cleanHost}" -> ${altIp})`,
+      };
+    }
+    return { safe: true, pinnedIp: altIp, ipFamily: 4 };
+  }
+
   const ipVersion = isIP(cleanHost);
   if (ipVersion !== 0) {
     if (isPrivateOrLocalIp(cleanHost)) {

@@ -4,7 +4,66 @@
 
 ---
 
-## 📦 Riwayat Rilis & Status Fitur (Changelog)
+### v1.7.1 (15 September 2026) — Context Window Slash Commands (/setctx, /settoken, /usage session tokens), Subagent Resource Deadlines, Terminal Injection Sanitization, & Known Bugs Resolution
+
+#### Ditambahkan & Diperbarui
+- **Dedicated Context Window & Session Token Commands (`src/agent/commands.ts`, `src/agent/agent.ts`, `README.md`)**:
+  * Menambahkan pelacakan akumulasi token sesi (`SessionUsage`) pada kelas `Agent`, mencakup total prompt tokens, completion tokens, total tokens, dan total turn pada sesi aktif.
+  * Memperkaya perintah `/usage` (alias: `/stats`, `/tokens`) untuk menampilkan akumulasi token sesi, estimasi karakter, statistik turn terakhir, serta sub-perintah `/usage clear` untuk mereset counter sesi.
+  * Menambahkan perintah `/setctx [jumlah]` untuk melihat penggunaan memori konteks aktif atau memperbarui budget karakter (`50k`, `80000`, dsb.) dengan validasi angka positif dan batas minimum jumlah karakter aktif.
+  * Menambahkan perintah `/settoken [token]` untuk mempermudah developer mengatur context window berbasis estimasi token (`8k`, `16k`, `32000`, dsb.) dengan rasio konversi standar industri LLM (1 token ≈ 4 karakter).
+- **Subagent Cumulative Timeout & Resource Deadline (`src/agent/subagent.ts`, `src/agent/tools.ts`)**:
+  * Menambahkan opsi `timeoutMs` (default: 60_000ms) pada `SubagentOptions` dan integrasi listener `AbortController` dengan `deps.signal`.
+  * Memastikan subagent yang mengalami hanging atau menjalankan instruksi berat dihentikan secara bersih dengan status timeout terisolasi tanpa memblokir atau merusak proses giliran utama agen induk.
+  * Memperluas `containsSensitiveFilePattern` untuk memblokir seluruh variasi SSH key (`id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`) dan sertifikat/kunci privat (`.pem`, `.key`).
+  * Tool `delegate` secara otomatis meneruskan parameter `timeout_ms` atau `timeout` jika disediakan oleh LLM/pemanggil.
+- **Sanitasi Terminal Injection & ANSI Escape Sequence (`src/core/ui.ts`, `src/core/executor.ts`)**:
+  * Menambahkan fungsi `sanitizeTerminalOutput()` dengan pembersihan mendalam terhadap escape sequence berbahaya: Operating System Command (OSC), Device Control String (DCS), Application Program Command (APC), Privacy Message (PM), serta karakter bell (`\x07`) dan form feed (`\x0c`).
+  * Mencegah terminal visual spoofing, hyperlink injection (OSC 8), dan modifikasi title/clipboard terminal tak diinginkan dari output proses eksternal.
+  * Memperbarui `stripAnsi` agar membersihkan seluruh escape sequence berbahaya sekaligus kode warna ANSI standar.
+- **Pencegahan Shell Function / Env Variable Hijacking & Dumps (`src/core/executor.ts`, `src/agent/tools.ts`)**:
+  * Menyaring dan membuang key environment variable yang diawali `BASH_FUNC_*` saat proses dieksekusi melalui shell, mencegah eksekusi fungsi shell berbahaya warisan lingkungan induk.
+  * Memperkuat `isSensitiveEnvCommand` untuk mendeteksi dan memblokir dump environment variabel via `declare -p`, `typeset -p`, dan bare `set`.
+- **Penyelesaian Bug Teridentifikasi (Known Bugs Resolution) (`src/core/compressor.ts`, `src/core/executor.ts`)**:
+  * **Known Bug #1 (Compression menyerah bila budget tak terjangkau)**: Mengimplementasikan *best-effort fallback compression* (`foldAllHead`) pada `compressHistory`. Jika budget target tidak dapat tercapai secara mutlak karena protected tail turn terlalu panjang, seluruh giliran riwayat lama tetap dikompresi ke ringkasan terpendek selama ukuran berkurang, mencegah ledakan konteks window.
+  * **Known Bug #3 (Urutan stdout vs stderr sekuensial)**: Mengintegrasikan listener data real-time pada stream child process (`child.stdout.on('data')`, `child.stderr.on('data')`) ke dalam `interleavedChunks`, menjamin output gabungan mencatat urutan waktu kronologis yang akurat.
+  * **Known Bug #8 (TOCTOU SSRF Web Fetch)**: Berhasil diatasi secara tuntas melalui implementasi Native IP-Pinning pada custom socket `http.Agent`/`https.Agent` di `src/agent/webtools.ts`.
+- **Penyelesaian Temuan Audit Eksternal (Findings 1, 2, 3) (`src/agent/tools.ts`, `src/agent/subagent.ts`, `src/core/session.ts`)**:
+  * **Finding 1 (Proteksi File Startup & Profile Shell)**: Menambahkan deteksi dan pencegahan akses/modifikasi terhadap berkas konfigurasi shell pengguna (`.bashrc`, `.bash_profile`, `.bash_login`, `.bash_logout`, `.zshrc`, `.zprofile`, `.zshenv`, `.zlogin`, `.zlogout`, `.profile`) pada `isSensitivePath` dan `containsSensitiveFilePattern`.
+  * **Finding 2 (Batas Maksimum Ukuran Berkas 5MB)**: Menetapkan konstanta `MAX_FILE_WRITE_BYTES = 5 * 1024 * 1024` (5MB) dan memvalidasi `byteLength` payload di `writeWithDiff` dan `runToolCall` (`write_file`, `edit_file`, `patch_file`), mencegah memory exhaustion dan infinite text loop output.
+  * **Finding 3 (Preservasi Timestamp Asli pada Ekspor Trajectory)**: Memperbarui `exportSessionTrajectory` di `src/core/session.ts` untuk memelihara timestamp pesan asli (`m.timestamp`) dan timestamp awal sesi pada nama berkas ekspor dan dokumen trajectory hasil export bukannya menimpa dengan waktu sistem saat ekspor.
+- **Rangkaian Pengujian & Baseline Baru**:
+  * Menambahkan test suite baru `src/tests/context_commands_v17.test.ts` (13 unit test) yang memvalidasi `/setctx`, `/settoken`, `/usage` session token stats, `sanitizeTerminalOutput`, best-effort compression fallback, subagent timeout, `declare -p`/bare `set` blocking, SSH/cert pattern detection, sequential interleaved stream output, shell startup file blocking, payload 5MB limit, dan trajectory timestamp preservation.
+  * Total pengujian meningkat menjadi **446 passed** (100% lulus, 0 fail), E2E test lulus (1 passed), dan `npm run typecheck` bersih tanpa galat.
+
+---
+
+### Security Audit & Comprehensive Hardening (15 September 2026) — Centralized Sensitive Protection, Immutable Security Core, SSRF Transport Hardening & IP-Pinning, Symlink Broken-Write Prevention, Command Exec Bypass Neutralization
+
+#### Ditambahkan & Diperbarui
+- **Proteksi Terpusat Berkas Sensitif (`src/agent/tools.ts`, `src/agent/filetools.ts`, `src/agent/subagent.ts`)**:
+  * `isSensitivePath` diperkuat dengan dukungan URL-decoding (`%2e%65%6e%76` -> `.env`), bash backslash unescaping (`.ru\\ko/con\\fig.json`), tilde expansion (`~/.ssh/id_rsa`), case-insensitivity (`.RUKO/CONFIG.JSON`), serta penambahan proteksi `.git-credentials`.
+  * Seluruh tool pembacaan berkas (`readFileTool`, `globTool`, `codeSearchTool`, `listDirTool`) menerapkan inspeksi kanonikal `realpath` terhadap symlink dan memblokir kebocoran file sensitif.
+  * Interseptor delegasi subagent (`runSubagent` & `containsSensitiveFilePattern`) menolak tugas subagent yang berupaya mengakses atau membocorkan kredensial konfigurasi, file `.env`, file kredensial git, atau kunci privat SSH.
+- **Immutable Security Core (`src/agent/tools.ts`, `src/agent/filetools.ts`)**:
+  * Menetapkan 6 berkas inti keamanan Ruko (`src/core/approval.ts`, `src/core/executor.ts`, `src/agent/tools.ts`, `src/agent/filetools.ts`, `src/agent/subagent.ts`, `src/agent/webtools.ts`) sebagai berkas yang tidak dapat dimodifikasi atau dihapus oleh agent.
+  * `assertNotSecurityCore` diterapkan di seluruh mutating tools: `write_file`, `edit_file` (`writeWithDiff`), `patch_file`, `delete_file`, `move_file` (sumber maupun target), dan `revert_file`.
+- **Transport Layer SSRF Hardening & Native IP-Pinning (`src/agent/webtools.ts`)**:
+  * Implementasi `parseAlternativeIPv4` untuk normalisasi notasi IP alternatif: integer desimal 32-bit (misal `2130706433` -> `127.0.0.1`, `2852039166` -> `169.254.169.254`), oktal (`0177.0.0.1`), heksadesimal (`0x7f000001`, `0xa9fea9fe`), shorthand dotted (`127.1`), serta IPv4-mapped IPv6 (`::ffff:127.0.0.1`, `::ffff:7f00:1`).
+  * Penegakan Native IP-Pinning soket TCP pada setiap hop rantai redirect HTTP (`301`, `302`, `303`, `307`, `308`), mencegah serangan open redirect menuju cloud instance metadata atau intranet privat.
+  * Pengecekan resolusi ganda (*double-check*) DNS untuk mendeteksi anomali TTL=0 DNS rebinding secara aktif.
+- **Konsistensi Symlink & Penutupan Celah Broken-Symlink Write-Through (`src/agent/tools.ts`)**:
+  * Mengatasi kerentanan TOCTOU di mana symlink rusak (*broken symlink*) yang mengarah ke luar workspace dapat ditulis sebelum targetnya eksis. `assertInsideWorkspace` kini memanggil `lstatSync` tanpa dependensi pada `existsSync`, dan memvalidasi `readlinkSync` target jika symlink belum terbentuk.
+  * Menolak operasi penulisan atau modifikasi melalui symbolic link pada `writeWithDiff`.
+- **Netralisasi Encoding Bypass pada Filter Command Exec (`src/core/approval.ts`, `src/agent/tools.ts`)**:
+  * Ekstraksi subshell `$()` dan backtick ``` ` ``` di `chainedSegments` dan `extractSubshells`.
+  * Pembersihan (*unescaping*) karakter backslash bash (`r\m -rf /` -> `rm -rf /`, `cat .e\nv` -> `cat .env`).
+  * Pelacakan variabel shell bash sederhana di `isSensitiveEnvCommand` dan `detectSensitiveFileAccessInExec` (`V=.env; cat $V`, `V=RUKO_API_KEY; printenv $V`).
+- **Dokumentasi Resmi `README.md`**:
+  * Menambahkan section resmi `## 🛡️ Security Boundaries & Known Limitations` (7 butir faktual) dan memperbarui Daftar Isi (Table of Contents).
+- **Pengujian Komprehensif & Nol Regresi (`src/tests/sensitive_protection.test.ts`)**:
+  * Menambahkan suite uji Bagian D (Security Core), Bagian E (SSRF alternative IP & redirect hop), Bagian F (Encoding bypass & exec variable tracking), dan Bagian G (Symlink consistency & broken symlink write escape).
+  * Seluruh suite pengujian berjalan 100% sukses: **433 tests passed** (0 fail, 0 errors), dan `npm run typecheck` bersih tanpa galat.
 
 ### v1.7.0 (14 September 2026) — Universal Tool Security Hardening, Symlink Sandboxing, SSRF Redirect Defense, Subagent Recursion Guard, & UI Step Enrichment
 
@@ -321,15 +380,15 @@ Gap fitur yang tersisa dibanding sistem asisten coding modern:
 
 ## 🐞 Known Bugs / Issues
 
-Catatan batasan arsitektural yang disadari:
-1. **Compression menyerah bila budget tak terjangkau** — jika turn yang dilindungi + ringkasan minimum melebihi `maxContextChars`, riwayat dibiarkan utuh (*over budget*).
-2. **`--exec` timeout mencatat exit code `null`** (bukan 124) — perilaku bawaan `child_process.exec`; proses latar belakang dialihkan menggunakan `start_process` (`spawn`).
-3. **Urutan stdout vs stderr** pada field `output` tool `exec` tidak terjamin sekuensial mutlak (limitasi callback buffering).
+Status dan resolusi batasan arsitektural:
+1. ~~**Compression menyerah bila budget tak terjangkau**~~ — **TERATASI (v1.7.1)**: Dilengkapi *best-effort fallback compression* (`foldAllHead` pada `src/core/compressor.ts`) yang tetap meringkas giliran riwayat tertua ke ringkasan terpadat ketika protected tail turn panjang, mencegah ledakan konteks window.
+2. **`--exec` timeout mencatat exit code `null`** (bukan 124) — Perilaku standar Node.js `child_process.exec` saat proses dimatikan paksa oleh sinyal (SIGTERM); pesan diagnostik penjelas `[Command timed out after Xms]` disertakan langsung pada teks `output`. Untuk proses latar belakang, gunakan tool terpisah `start_process` (`spawn`).
+3. ~~**Urutan stdout vs stderr** pada field `output` tool `exec` tidak terjamin sekuensial mutlak~~ — **TERATASI (v1.7.1)**: Menggunakan real-time interleaved stream listener (`child.stdout.on('data')`, `child.stderr.on('data')`) pada `src/core/executor.ts` sehingga output gabungan terjamin kronologis sekuensial.
 4. **Known limitation deteksi obfusikasi perintah regex**: Obfuscation eval/base64 kompleks (`echo <b64> | base64 -d | sh`) tidak dapat ditutup sempurna dengan regex statis tanpa false-positive masif; ditangani via pertahanan lapis kedua (Guardian LLM).
 5. **Approval non-TTY otomatis menolak**: Di lingkungan CI headless yang ingin mengeksekusi aksi berisiko, wajib menyetel flag non-interaktif atau `RUKO_YOLO_MODE`.
 6. **Known limitation redaksi kredensial**: Redaksi token/kredensial pada `read_process_logs` berbasis ekspresi reguler adalah pertahanan berlapis (*best-effort*), bukan jaminan 100% terhadap token arbitrer tanpa kata kunci penanda.
 7. **Streaming interleaving pada terminal sangat sempit**: Teks streaming LLM dapat mengalami pergeseran baris kecil jika terminal berukuran <40 kolom saat indikator thinking aktif.
-8. **TOCTOU pada web_fetch**: Terdapat jeda mikro antara resolusi pra-pemeriksaan DNS SSRF guard dan eksekusi `fetch()` native Node.js (didokumentasikan secara transparan pada kode).
+8. ~~**TOCTOU pada web_fetch**~~ — **TERATASI (v1.7.1)**: Menggunakan custom socket dispatcher `http.Agent`/`https.Agent` dengan Native IP-Pinning langsung pada level socket TCP pada `src/agent/webtools.ts`, menutup celah TOCTOU / DNS rebinding secara tuntas.
 
 ---
 
@@ -337,7 +396,7 @@ Catatan batasan arsitektural yang disadari:
 
 1. **Verifikasi Baseline**:
    - Jalankan `npm run typecheck` (harus 0 error).
-   - Jalankan `npm test` (harus **379 passed**, 0 fail).
+   - Jalankan `npm test` (harus **446 passed**, 0 fail).
    - E2E test: `npm run test:e2e` (1 passed).
 2. **Struktur Direktori Proyek**:
    - `src/core/`: Infrastruktur murni Node.js (loop, approval, executor, summarizer, undo, context, session, config, wizard, ui, skills).

@@ -1,10 +1,10 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-1.7.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.7.1-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-381%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-446%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
@@ -33,6 +33,7 @@ chmod +x $PREFIX/bin/ruko
 - [Daftar Perintah Slash (Slash Commands)](#-daftar-perintah-slash)
 - [Konfigurasi & Profil](#-konfigurasi--profil)
 - [Pengujian & Verifikasi](#-pengujian--verifikasi)
+- [Batasan Keamanan & Limitasi Sistem](#-security-boundaries--known-limitations)
 - [Struktur Modul](#-struktur-modul)
 - [Lisensi](#-lisensi)
 
@@ -181,7 +182,7 @@ Ruko dirancang dengan pertahanan mendalam (*defense-in-depth*) untuk memastikan 
 Output terminal yang melebihi batas (default: 1.000 karakter) otomatis dipotong secara proporsional (kepala ~40% dan ekor ~60%) dengan highlight baris galat (*error/warning/exit code*), menjaga konteks percakapan tetap bersih.
 
 ### 4. Context Compression Adaptif
-Ketika panjang percakapan mendekati batas memori, Ruko secara cerdas merangkum percakapan lama menjadi satu ringkasan padat tanpa menghilangkan instruksi penting dan giliran (*turns*) percakapan terakhir. Batas memori dapat disesuaikan secara dinamis via `/context set <jumlah>`.
+Ketika panjang percakapan mendekati batas memori, Ruko secara cerdas merangkum percakapan lama menjadi satu ringkasan padat tanpa menghilangkan instruksi penting dan giliran (*turns*) percakapan terakhir. Batas memori dapat disesuaikan secara dinamis via `/setctx <jumlah|50k>`, `/settoken <token|16k>`, atau `/context set <jumlah>`.
 
 ### 5. Multi-Profil Provider
 Simpan beberapa konfigurasi AI di `.ruko/config.json` dan beralih profil dengan cepat:
@@ -250,6 +251,8 @@ Ketik `/` di terminal untuk memunculkan menu interaktif, atau gunakan perintah b
 | `/exec <perintah>` | Menjalankan perintah shell langsung dari baris perintah Ruko. |
 | `/history [n]` | Menampilkan *n* pesan riwayat percakapan terakhir. |
 | `/context [set <n>]` | Menampilkan kapasitas memori aktif atau menyetel batas budget karakter baru. |
+| `/setctx [jumlah]` | Menampilkan statistik atau menyetel budget karakter context window (`50k`, `80000`). |
+| `/settoken [token]` | Menampilkan statistik atau menyetel budget context window berbasis estimasi token (`16k`, `32000`, rasio 1:4). |
 | `/memory [clear]` | Menampilkan isi memori persisten atau mereset (`.ruko/memory.md`). |
 | `/usage` | Menampilkan statistik konsumsi karakter dan token sesi. |
 | `/config [set <k> <v> \| setup]` | Menampilkan atau memperbarui konfigurasi sistem. |
@@ -304,7 +307,7 @@ Ruko diuji secara intensif menggunakan test runner bawaan Node.js (`node:test`) 
 # Verifikasi tipe data statis
 npm run typecheck
 
-# Menjalankan 335 unit test anti-regresi
+# Menjalankan 443 unit test anti-regresi
 npm test
 
 # Menjalankan end-to-end (E2E) integration test
@@ -313,11 +316,40 @@ npm run test:e2e
 
 Test suite mencakup pengujian unit untuk:
 - Deteksi risiko approval regex & skenario adversarial Guardian LLM.
+- Proteksi mutlak Immutable Security Core dan pencegahan modifikasi/penghapusan.
 - Sandboxing direktori dan pencegahan traversal path di seluruh tool.
+- Hardening SSRF, notasi IP alternatif (desimal, oktal, hex, IPv4-mapped IPv6), dan IP-pinning redirect hop.
 - Parser streaming SSE LLM multi-provider (OpenAI, Anthropic, Gemini) dan penanganan kode status HTTP.
 - Mekanisme TUI, status bar rewinding, dan input buffer wrapping.
 - Kompresi konteks adaptif dan snapshot undo journal.
 - Persistent memory, skill system, subagent delegation, dan trajectory export.
+
+---
+
+## 🛡️ Security Boundaries & Known Limitations
+
+Bagian ini mendokumentasikan batasan keamanan inheren dan asumsi lingkungan operasional Ruko secara lugas, transparan, dan faktual (tanpa eufemisme atau klaim defensif):
+
+1. **Ketergantungan Approval Gate pada Keputusan Pengguna**:
+   Seluruh mekanisme gerbang konfirmasi (`Approval Gate` dan verifikasi semantik Guardian LLM) sepenuhnya bergantung pada ketelitian pengguna manusia. Jika pengguna memberikan persetujuan (`Y`) tanpa meneliti visual diff atau pesan peringatan risiko, atau jika pengguna mengaktifkan mode otomatis (`--yolo` / `RUKO_YOLO_MODE=1`), proteksi interaktif ini menjadi tidak efektif dan eksekusi berbahaya akan tetap dijalankan di sistem pengguna.
+
+2. **Sifat Filter Redaksi Kredensial Berbasis Best-Effort Regex**:
+   Penyaringan token dan kunci rahasia pada output proses (`read_process_logs`, status bar, dan jejak terminal) mengandalkan pola pencocokan ekspresi reguler heuristik. Ini merupakan lapisan mitigasi sekunder (*best-effort*) dan bukan jaminan 100% mutlak anti-kebocoran terhadap token, kunci privat arbitrer, atau rahasia dengan format acak tanpa penanda kata kunci standar.
+
+3. **Celah Teoretis TOCTOU (Time-of-Check to Time-of-Use) Race Condition pada Filesystem**:
+   Pada sistem operasi multi-proses, terdapat jeda waktu mikrodetik antara saat Ruko memeriksa keabsahan path/symlink (via `lstat` / `realpath`) dan saat operasi penulisan atau eksekusi berkas sesungguhnya dilakukan. Jika ada proses pihak ketiga di tingkat OS yang secara adversarial menukar symlink (*symlink swap*) tepat di celah waktu tersebut, race condition secara teoretis dapat terjadi.
+
+4. **Model Ancaman Single-User / Trusted Environment**:
+   Arsitektur keamanan Ruko saat ini didesain secara spesifik untuk lingkungan pengguna tunggal tepercaya (*single-user trusted local environment*). Jika Ruko dijalankan pada server multi-user, daemon publik tanpa otentikasi, atau diakses bersama pihak lain, terdapat risiko penyalahgunaan hak akses Ruko sebagai perantara (*confused deputy*) untuk melancarkan serangan terhadap sistem atau jaringan lokal pengguna yang belum sepenuhnya dicakup oleh hardening ini.
+
+5. **Manipulasi Output via Prompt Injection pada Konten yang Dibaca (Read-Only Manipulation)**:
+   Proteksi pembatasan berkas dan workspace sandboxing hanya mencegah *modifikasi* atau *pembacaan berkas kredensial sensitif*. Jika agen membaca file kode pihak ketiga, dependensi repositori eksternal, atau halaman web tak tepercaya via `web_fetch` yang mengandung instruksi terselubung (*indirect prompt injection*), model AI tetap rentan terpengaruh atau dimanipulasi untuk menghasilkan analisis yang keliru atau mengusulkan aksi yang merugikan, meskipun berkas yang dibaca berstatus read-only.
+
+6. **Status `.ruko/memory.md` dan `.ruko/skills/` yang Writable by Design**:
+   Berkas persistent memory (`.ruko/memory.md`) dan direktori skills (`.ruko/skills/`) dirancang dapat ditulis oleh agen (*writable by design*) agar agen dapat mempelajari preferensi proyek. Meskipun Ruko telah menyertakan filter penolakan instruksi imperatif pada saat penyimpanan `remember`, entri yang tersimpan tetap disuntikkan ke prompt konteks pada giliran berikutnya, sehingga manipulasi tidak langsung terhadap konten memori tetap menjadi batasan yang perlu diawasi pengguna secara berkala melalui `/memory`.
+
+7. **Rekomendasi Lingkungan Terisolasi (Container / Sandbox)**:
+   Untuk mengevaluasi repositori kode pihak ketiga yang belum diverifikasi, menjalankan tugas otomatis dalam pipeline CI/CD, atau beroperasi di lingkungan publik, pengguna SANGAT DIREKOMENDASIKAN menjalankan Ruko di dalam container terisolasi (seperti **Docker**, **Dev Containers**, atau **VM sementara**) dengan hak akses non-root dan pembatasan akses jaringan keluar (*outbound egress network filtering*).
 
 ---
 
@@ -334,7 +366,8 @@ src/
 │   ├── llm.ts            # Client multi-provider (OpenAI, Anthropic, Gemini) & streaming parser
 │   ├── roles.ts          # Manajemen system prompt berlapis & peran AI
 │   ├── subagent.ts       # Orkestrasi subagent delegasi terisolasi
-│   └── tools.ts          # Handler tool call protocol & pembatas output
+│   ├── tools.ts          # Handler tool call protocol & pembatas output
+│   └── webtools.ts       # Tool web_fetch & web_search dengan SSRF Native IP Pinning
 └── core/
     ├── approval.ts       # Dual-Layer Approval Gate & Guardian LLM
     ├── compressor.ts     # Algoritma kompresi percakapan adaptif

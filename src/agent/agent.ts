@@ -36,6 +36,16 @@ export interface TurnUsage {
   completionChars: number;
 }
 
+/** Cumulative token usage tracked across an entire interactive session. */
+export interface SessionUsage {
+  promptChars: number;
+  completionChars: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  totalTurns: number;
+}
+
 /**
  * Orchestrates user instructions.
  *
@@ -54,6 +64,15 @@ export class Agent {
   lastResponseStreamed = false;
   /** Usage of the most recent handled instruction (for the per-turn line). */
   lastUsage: TurnUsage | null = null;
+  /** Cumulative token and character usage across all turns in the active session. */
+  sessionUsage: SessionUsage = {
+    promptChars: 0,
+    completionChars: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    totalTurns: 0,
+  };
   /** Plan mode toggle — enforced at the tool layer, not just in the prompt. */
   planMode = false;
   private callCounts = new Map<string, number>();
@@ -84,6 +103,19 @@ export class Agent {
   /** True when the AI backend is configured and will be used. */
   get isLlmMode(): boolean {
     return this.llmProvider.isConfigured;
+  }
+
+  /** Resets accumulated session token statistics back to zero. */
+  resetSessionUsage(): void {
+    this.sessionUsage = {
+      promptChars: 0,
+      completionChars: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      totalTurns: 0,
+    };
+    this.lastUsage = null;
   }
 
   /** Active role (built-in or custom file), resolved from config (§4). */
@@ -174,115 +206,10 @@ export class Agent {
 
     let emptyFollowUpSent = false;
 
-    for (let i = 0; i < MAX_TOOL_ITERATIONS; i += 1) {
-      // v0.7: user chose "kirim sekarang" — stop before the next request so
-      // the interrupted turn ends cleanly instead of starting new work.
-      if (signal?.aborted) {
-        if (tree.isTreeActive) {
-          tree.finish('Dibatalkan oleh pengguna');
-        } else {
-          process.stdout.write(yellow('\n⚠ Dibatalkan oleh pengguna\n'));
-        }
-        return '';
-      }
-      usage.promptChars += messages.reduce((s, m) => s + m.content.length, 0);
-      const usePacman = this.config.funAnimations ?? (this.config.mode !== 'pro');
-      const spinner = createSpinner('Thinking', { pacman: usePacman });
-      const gate = new LineGate((text) => {
-        spinner.stop();
-        process.stdout.write('\r\u001b[2K');
-        process.stdout.write(formatTerminalMarkdown(text));
-      });
-      const reveal = new RevealFilter((text) => gate.push(text));
-      let raw: string;
-      try {
-        raw = await this.llmProvider.chat(messages, {
-          onToken: (token) => reveal.feed(token),
-          signal,
-        });
-      } catch (err) {
-        // v0.7: an interrupted stream rejects with AbortError — that is a
-        // clean stop requested by the user, not a provider failure.
-        if (signal?.aborted || isAbortError(err)) {
-          if (tree.isTreeActive) {
-            tree.finish('Dibatalkan oleh pengguna');
-          } else {
-            process.stdout.write(yellow('\n⚠ Dibatalkan oleh pengguna\n'));
-          }
-          return '';
-        }
-        throw err;
-      } finally {
-        reveal.end();
-        spinner.stop();
-      }
-      usage.completionChars += raw.length;
-      const calls = parseToolCalls(raw);
-      // Final answers keep their trailing line; tool iterations drop the dangling
-      // preamble that sat right before the hidden ```tool block (§2).
-      const iterStreamed = gate.finish(calls.length === 0);
-      if (calls.length === 0) {
-        const text = stripToolBlocks(raw);
-        // Tangani Empty Content: Jika respons model setelah eksekusi tool menghasilkan
-        // text/content kosong padahal finish_reason adalah "stop", jangan langsung mencetak "(no response)".
-        // Kirimkan follow-up message internal (role: "user") untuk meminta model merangkum hasil tool yang baru dijalankan.
-        if (!text.trim() && (tree.currentStep > 0 || i > 0) && !emptyFollowUpSent) {
-          const finishReason = this.llmProvider.lastFinishReason ?? 'stop';
-          const isStop = !finishReason || ['stop', 'STOP', 'end_turn'].includes(finishReason);
-          if (isStop) {
-            emptyFollowUpSent = true;
-            messages.push({
-              role: 'user',
-              content: 'Tolong berikan ringkasan atau rangkuman penjelasan mengenai hasil eksekusi tool di atas untuk menjawab permintaan pengguna.',
-              timestamp: new Date().toISOString(),
-            });
-            continue;
-          }
-        }
-
-        const finalText = text || (tree.currentStep > 0 ? 'Semua langkah tool telah selesai dijalankan.' : '');
-        if (tree.isTreeActive || tree.currentStep > 0) {
-          tree.finish('Semua langkah tuntas');
-          process.stdout.write('\n');
-        } else if (iterStreamed) {
-          process.stdout.write('\n');
-        }
-        this.lastResponseStreamed = iterStreamed;
-        return finalText;
-      }
-
-      // Text streamed before a tool call needs a line break before the logs.
-      if (iterStreamed) process.stdout.write('\n');
-      const assistantContent = raw.trim();
-      const toolCalls = calls.map((c, idx) => ({
-        id: (typeof c.id === 'string' && c.id.trim())
-          ? c.id.trim()
-          : `call_${c.tool}_${i}_${idx}_${Date.now()}`,
-        type: 'function' as const,
-        function: {
-          name: c.tool,
-          arguments: JSON.stringify(c),
-        },
-      }));
-      messages.push({
-        role: 'assistant',
-        content: assistantContent,
-        timestamp: new Date().toISOString(),
-        tool_calls: toolCalls,
-      });
-
-      // Spacing before tool tree begins if not already spaced
-      if (tree.currentStep === 0 && !iterStreamed) {
-        process.stdout.write('\n');
-      }
-
-      // Start workflow step in tree
-      const desc = inferStepDescription(calls, tree.currentStep + 1);
-      tree.startStep(desc);
-
-      for (let callIdx = 0; callIdx < calls.length; callIdx += 1) {
-        const call = calls[callIdx];
-        const toolCallId = toolCalls[callIdx]?.id || `call_${call.tool}_${Date.now()}`;
+    try {
+      for (let i = 0; i < MAX_TOOL_ITERATIONS; i += 1) {
+        // v0.7: user chose "kirim sekarang" — stop before the next request so
+        // the interrupted turn ends cleanly instead of starting new work.
         if (signal?.aborted) {
           if (tree.isTreeActive) {
             tree.finish('Dibatalkan oleh pengguna');
@@ -291,68 +218,190 @@ export class Agent {
           }
           return '';
         }
-        // §5: Guard mekanis — tolak eksekusi ganda jika tool call berturut-turut persis identik
-        const sig = this.getCallSignature(call);
-        if (this.lastCallSignature === sig) {
-          const warn = 'Perintah identik terdeteksi berulang, dilewati';
-          tree.log(yellow(`⚠ ${warn}`));
+        usage.promptChars += messages.reduce((s, m) => s + m.content.length, 0);
+        const usePacman = this.config.funAnimations ?? (this.config.mode !== 'pro');
+        const spinner = createSpinner('Thinking', { pacman: usePacman });
+        const gate = new LineGate((text) => {
+          spinner.stop();
+          process.stdout.write('\r\u001b[2K');
+          process.stdout.write(formatTerminalMarkdown(text));
+        });
+        const reveal = new RevealFilter((text) => gate.push(text));
+        let raw: string;
+        try {
+          raw = await this.llmProvider.chat(messages, {
+            onToken: (token) => reveal.feed(token),
+            signal,
+          });
+        } catch (err) {
+          // v0.7: an interrupted stream rejects with AbortError — that is a
+          // clean stop requested by the user, not a provider failure.
+          if (signal?.aborted || isAbortError(err)) {
+            if (tree.isTreeActive) {
+              tree.finish('Dibatalkan oleh pengguna');
+            } else {
+              process.stdout.write(yellow('\n⚠ Dibatalkan oleh pengguna\n'));
+            }
+            return '';
+          }
+          throw err;
+        } finally {
+          reveal.end();
+          spinner.stop();
+        }
+        usage.completionChars += raw.length;
+        const calls = parseToolCalls(raw);
+        // Final answers keep their trailing line; tool iterations drop the dangling
+        // preamble that sat right before the hidden ```tool block (§2).
+        const iterStreamed = gate.finish(calls.length === 0);
+        if (calls.length === 0) {
+          const text = stripToolBlocks(raw);
+          // Tangani Empty Content: Jika respons model setelah eksekusi tool menghasilkan
+          // text/content kosong padahal finish_reason adalah "stop", jangan langsung mencetak "(no response)".
+          // Kirimkan follow-up message internal (role: "user") untuk meminta model merangkum hasil tool yang baru dijalankan.
+          if (!text.trim() && (tree.currentStep > 0 || i > 0) && !emptyFollowUpSent) {
+            const finishReason = this.llmProvider.lastFinishReason ?? 'stop';
+            if (finishReason === 'stop') {
+              emptyFollowUpSent = true;
+              messages.push({
+                role: 'assistant',
+                content: raw.trim(),
+                timestamp: new Date().toISOString(),
+              });
+              messages.push({
+                role: 'user',
+                content: 'Tolong berikan ringkasan atau rangkuman penjelasan mengenai hasil eksekusi tool di atas untuk menjawab permintaan pengguna.',
+                timestamp: new Date().toISOString(),
+              });
+              continue;
+            }
+          }
+
+          const finalText = text || (tree.currentStep > 0 ? 'Semua langkah tool telah selesai dijalankan.' : '');
+          if (tree.isTreeActive || tree.currentStep > 0) {
+            tree.finish('Semua langkah tuntas');
+            process.stdout.write('\n');
+          } else if (iterStreamed) {
+            process.stdout.write('\n');
+          }
+          this.lastResponseStreamed = iterStreamed;
+          return finalText;
+        }
+
+        // Text streamed before a tool call needs a line break before the logs.
+        if (iterStreamed) process.stdout.write('\n');
+        const assistantContent = raw.trim();
+        const toolCalls = calls.map((c, idx) => ({
+          id: (typeof c.id === 'string' && c.id.trim())
+            ? c.id.trim()
+            : `call_${c.tool}_${i}_${idx}_${Date.now()}`,
+          type: 'function' as const,
+          function: {
+            name: c.tool,
+            arguments: JSON.stringify(c),
+          },
+        }));
+        messages.push({
+          role: 'assistant',
+          content: assistantContent,
+          timestamp: new Date().toISOString(),
+          tool_calls: toolCalls,
+        });
+
+        // Spacing before tool tree begins if not already spaced
+        if (tree.currentStep === 0 && !iterStreamed) {
+          process.stdout.write('\n');
+        }
+
+        // Start workflow step in tree
+        const desc = inferStepDescription(calls, tree.currentStep + 1);
+        tree.startStep(desc);
+
+        for (let callIdx = 0; callIdx < calls.length; callIdx += 1) {
+          const call = calls[callIdx];
+          const toolCallId = toolCalls[callIdx]?.id || `call_${call.tool}_${Date.now()}`;
+          if (signal?.aborted) {
+            if (tree.isTreeActive) {
+              tree.finish('Dibatalkan oleh pengguna');
+            } else {
+              process.stdout.write(yellow('\n⚠ Dibatalkan oleh pengguna\n'));
+            }
+            return '';
+          }
+          // §5: Guard mekanis — tolak eksekusi ganda jika tool call berturut-turut persis identik
+          const sig = this.getCallSignature(call);
+          if (this.lastCallSignature === sig) {
+            const warn = 'Perintah identik terdeteksi berulang, dilewati';
+            tree.log(yellow(`⚠ ${warn}`));
+            messages.push({
+              role: 'tool',
+              content: `Result of tool "${call.tool}":\n${JSON.stringify({
+                skipped: true,
+                warning: warn,
+                message: `Tool "${call.tool}" dengan argumen identik baru saja dijalankan pada langkah sebelumnya dan hasilnya sudah ada di konteks percakapan di atas. Eksekusi kedua dilewati; silakan lanjutkan dengan menganalisis hasil yang sudah ada atau jalankan aksi berikutnya.`,
+              })}`,
+              timestamp: new Date().toISOString(),
+              tool_call_id: toolCallId,
+              name: call.tool,
+            });
+            continue;
+          }
+          this.lastCallSignature = sig;
+
+          // §5: loop breaker — identical tool call repeated is a stuck model.
+          if (this.seenRepeat(call)) {
+            tree.finish('Dihentikan karena deteksi loop');
+            return (
+              `[deteksi loop] tool "${call.tool}" dengan argumen sama sudah dipanggil ` +
+              `> ${LOOP_REPEAT_LIMIT}× — eksekusi dihentikan. Ulangi dengan instruksi lain, ` +
+              `atau jalankan manual lewat /exec.`
+            );
+          }
+          const result = await runToolCall(call, {
+            confirm: this.confirm,
+            config: this.config,
+            onLog: (line) => tree.log(line),
+            planMode: this.planMode,
+            signal,
+            llmProvider: this.llmProvider,
+            workspaceRoot: this.workspaceRoot,
+            subagentDepth: this.subagentDepth,
+          });
+          if (signal?.aborted) {
+            if (tree.isTreeActive) {
+              tree.finish('Dibatalkan oleh pengguna');
+            } else {
+              process.stdout.write(yellow('\n⚠ Dibatalkan oleh pengguna\n'));
+            }
+            return '';
+          }
           messages.push({
             role: 'tool',
-            content: `Result of tool "${call.tool}":\n${JSON.stringify({
-              skipped: true,
-              warning: warn,
-              message: `Tool "${call.tool}" dengan argumen identik baru saja dijalankan pada langkah sebelumnya dan hasilnya sudah ada di konteks percakapan di atas. Eksekusi kedua dilewati; silakan lanjutkan dengan menganalisis hasil yang sudah ada atau jalankan aksi berikutnya.`,
-            })}`,
+            content: `Result of tool "${call.tool}":\n${result}`,
             timestamp: new Date().toISOString(),
             tool_call_id: toolCallId,
             name: call.tool,
           });
-          continue;
         }
-        this.lastCallSignature = sig;
+      }
 
-        // §5: loop breaker — identical tool call repeated is a stuck model.
-        if (this.seenRepeat(call)) {
-          tree.finish('Dihentikan karena deteksi loop');
-          return (
-            `[deteksi loop] tool "${call.tool}" dengan argumen sama sudah dipanggil ` +
-            `> ${LOOP_REPEAT_LIMIT}× — eksekusi dihentikan. Ulangi dengan instruksi lain, ` +
-            `atau jalankan manual lewat /exec.`
-          );
-        }
-        const result = await runToolCall(call, {
-          confirm: this.confirm,
-          config: this.config,
-          onLog: (line) => tree.log(line),
-          planMode: this.planMode,
-          signal,
-          llmProvider: this.llmProvider,
-          workspaceRoot: this.workspaceRoot,
-          subagentDepth: this.subagentDepth,
-        });
-        if (signal?.aborted) {
-          if (tree.isTreeActive) {
-            tree.finish('Dibatalkan oleh pengguna');
-          } else {
-            process.stdout.write(yellow('\n⚠ Dibatalkan oleh pengguna\n'));
-          }
-          return '';
-        }
-        messages.push({
-          role: 'tool',
-          content: `Result of tool "${call.tool}":\n${result}`,
-          timestamp: new Date().toISOString(),
-          tool_call_id: toolCallId,
-          name: call.tool,
-        });
+      if (tree.isTreeActive) {
+        tree.finish('Mencapai batas iterasi tool');
+      }
+
+      return '[agent] reached max tool iterations without a final answer; stopping.';
+    } finally {
+      if (usage.promptChars > 0 || usage.completionChars > 0) {
+        const pTok = Math.round(usage.promptChars / 4);
+        const cTok = Math.round(usage.completionChars / 4);
+        this.sessionUsage.promptChars += usage.promptChars;
+        this.sessionUsage.completionChars += usage.completionChars;
+        this.sessionUsage.promptTokens += pTok;
+        this.sessionUsage.completionTokens += cTok;
+        this.sessionUsage.totalTokens += (pTok + cTok);
+        this.sessionUsage.totalTurns += 1;
       }
     }
-
-    if (tree.isTreeActive) {
-      tree.finish('Mencapai batas iterasi tool');
-    }
-
-    return '[agent] reached max tool iterations without a final answer; stopping.';
   }
 
   /** Generates a normalized signature for a tool call to detect exact identical duplicates. */

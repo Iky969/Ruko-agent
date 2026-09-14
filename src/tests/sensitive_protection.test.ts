@@ -1,17 +1,28 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
+  SECURITY_CORE_FILES,
+  assertNotSecurityCore,
   assertNotSensitivePath,
   detectSensitiveFileAccessInExec,
+  isSecurityCoreFile,
   isSensitiveEnvCommand,
   isSensitivePath,
   runToolCall,
   setWorkspaceRoot,
 } from '../agent/tools.js';
 import { codeSearchTool, globTool, readFileTool } from '../agent/filetools.js';
+import {
+  checkSsrfSafety,
+  isPrivateOrLocalIp,
+  isPrivateOrLocalIPv6,
+  parseAlternativeIPv4,
+  webFetchTool,
+} from '../agent/webtools.js';
 import { runSubagent } from '../agent/subagent.js';
 import { loadConfig } from '../core/config.js';
 import { Agent } from '../agent/agent.js';
@@ -386,3 +397,355 @@ test('regresi: proteksi tool TIDAK merusak startup Ruko (loadConfig internal tet
     assert.equal(loaded.baseUrl, 'https://api.example.com/v1');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bagian D: Proteksi Immutable Security Core Files
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('isSecurityCoreFile: mendeteksi tepat 6 berkas inti keamanan Ruko', () => {
+  assert.equal(SECURITY_CORE_FILES.length, 6);
+  assert.ok(SECURITY_CORE_FILES.includes('src/core/approval.ts'));
+  assert.ok(SECURITY_CORE_FILES.includes('src/core/executor.ts'));
+  assert.ok(SECURITY_CORE_FILES.includes('src/agent/tools.ts'));
+  assert.ok(SECURITY_CORE_FILES.includes('src/agent/filetools.ts'));
+  assert.ok(SECURITY_CORE_FILES.includes('src/agent/subagent.ts'));
+  assert.ok(SECURITY_CORE_FILES.includes('src/agent/webtools.ts'));
+
+  assert.equal(isSecurityCoreFile('src/core/approval.ts', '/root'), true);
+  assert.equal(isSecurityCoreFile('src/core/executor.ts', '/root'), true);
+  assert.equal(isSecurityCoreFile('src/agent/tools.ts', '/root'), true);
+  assert.equal(isSecurityCoreFile('src/agent/filetools.ts', '/root'), true);
+  assert.equal(isSecurityCoreFile('src/agent/subagent.ts', '/root'), true);
+  assert.equal(isSecurityCoreFile('src/agent/webtools.ts', '/root'), true);
+
+  // Negative
+  assert.equal(isSecurityCoreFile('src/agent/agent.ts', '/root'), false);
+  assert.equal(isSecurityCoreFile('package.json', '/root'), false);
+});
+
+test('mutating tools menolak keras modifikasi atau penghapusan berkas Security Core', async () => {
+  await inTempWorkspace(async (ws) => {
+    // Siapkan struktur berkas palsu di dalam temporary workspace
+    mkdirSync(join(ws, 'src/core'), { recursive: true });
+    mkdirSync(join(ws, 'src/agent'), { recursive: true });
+
+    for (const coreFile of SECURITY_CORE_FILES) {
+      writeFileSync(join(ws, coreFile), '// original core content\n', 'utf8');
+    }
+
+    // 1. write_file ditolak pada seluruh berkas Security Core
+    for (const coreFile of SECURITY_CORE_FILES) {
+      const resWrite = await runToolCall(
+        { tool: 'write_file', path: coreFile, content: '// malicious rewrite' },
+        { workspaceRoot: ws },
+      );
+      const parsed = JSON.parse(resWrite);
+      assert.ok(parsed.error && parsed.error.includes('Security Core file'));
+      assert.equal(readFileSync(join(ws, coreFile), 'utf8'), '// original core content\n');
+    }
+
+    // 2. edit_file ditolak pada berkas Security Core
+    const resEdit = await runToolCall(
+      {
+        tool: 'edit_file',
+        path: 'src/agent/tools.ts',
+        old_string: '// original core content\n',
+        new_string: '// edited core content\n',
+      },
+      { workspaceRoot: ws },
+    );
+    const parsedEdit = JSON.parse(resEdit);
+    assert.ok(parsedEdit.error && parsedEdit.error.includes('Security Core file'));
+
+    // 3. patch_file ditolak pada berkas Security Core
+    const resPatch = await runToolCall(
+      {
+        tool: 'patch_file',
+        path: 'src/agent/filetools.ts',
+        search: '// original core content\n',
+        replace: '// patched\n',
+      },
+      { workspaceRoot: ws },
+    );
+    const parsedPatch = JSON.parse(resPatch);
+    assert.ok(parsedPatch.error && parsedPatch.error.includes('Security Core file'));
+
+    // 4. delete_file ditolak pada berkas Security Core
+    const resDel = await runToolCall(
+      { tool: 'delete_file', path: 'src/core/approval.ts' },
+      { workspaceRoot: ws },
+    );
+    const parsedDel = JSON.parse(resDel);
+    assert.ok(parsedDel.error && parsedDel.error.includes('Security Core file'));
+    assert.ok(existsSync(join(ws, 'src/core/approval.ts')));
+
+    // 5. move_file ditolak bila sumber atau tujuan adalah berkas Security Core
+    const resMoveSource = await runToolCall(
+      {
+        tool: 'move_file',
+        source: 'src/agent/subagent.ts',
+        destination: 'src/agent/subagent.bak',
+      },
+      { workspaceRoot: ws },
+    );
+    const parsedMoveSource = JSON.parse(resMoveSource);
+    assert.ok(parsedMoveSource.error && parsedMoveSource.error.includes('Security Core file'));
+
+    const resMoveDest = await runToolCall(
+      {
+        tool: 'move_file',
+        source: 'src/agent/subagent.bak',
+        destination: 'src/agent/subagent.ts',
+      },
+      { workspaceRoot: ws },
+    );
+    const parsedMoveDest = JSON.parse(resMoveDest);
+    assert.ok(parsedMoveDest.error && parsedMoveDest.error.includes('Security Core file'));
+
+    // 6. revert_file ditolak pada berkas Security Core
+    const resRevert = await runToolCall(
+      { tool: 'revert_file', path: 'src/agent/webtools.ts' },
+      { workspaceRoot: ws },
+    );
+    const parsedRevert = JSON.parse(resRevert);
+    assert.ok(parsedRevert.error && parsedRevert.error.includes('Security Core file'));
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bagian E: Uji Hardening SSRF & Notasi IP Alternatif
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('parseAlternativeIPv4: normalisasi berbagai representasi notasi IP', () => {
+  // Desimal integer
+  assert.equal(parseAlternativeIPv4('2130706433'), '127.0.0.1');
+  assert.equal(parseAlternativeIPv4('2852039166'), '169.254.169.254');
+  assert.equal(parseAlternativeIPv4('3232235521'), '192.168.0.1');
+  assert.equal(parseAlternativeIPv4('0'), '0.0.0.0');
+
+  // Oktal
+  assert.equal(parseAlternativeIPv4('0177.0.0.1'), '127.0.0.1');
+  assert.equal(parseAlternativeIPv4('017700000001'), '127.0.0.1');
+
+  // Heksadesimal
+  assert.equal(parseAlternativeIPv4('0x7f000001'), '127.0.0.1');
+  assert.equal(parseAlternativeIPv4('0x7f.0.0.1'), '127.0.0.1');
+  assert.equal(parseAlternativeIPv4('0xa9fea9fe'), '169.254.169.254');
+
+  // Shorthand dotted
+  assert.equal(parseAlternativeIPv4('127.1'), '127.0.0.1');
+  assert.equal(parseAlternativeIPv4('10.1'), '10.0.0.1');
+
+  // Non-IP string
+  assert.equal(parseAlternativeIPv4('example.com'), null);
+  assert.equal(parseAlternativeIPv4('not-an-ip'), null);
+});
+
+test('isPrivateOrLocalIp & isPrivateOrLocalIPv6: memblokir notasi privat/lokal dan IPv4-mapped IPv6', () => {
+  // Desimal, oktal, hex privat
+  assert.equal(isPrivateOrLocalIp('2130706433'), true);
+  assert.equal(isPrivateOrLocalIp('2852039166'), true);
+  assert.equal(isPrivateOrLocalIp('0177.0.0.1'), true);
+  assert.equal(isPrivateOrLocalIp('0x7f000001'), true);
+  assert.equal(isPrivateOrLocalIp('127.1'), true);
+
+  // IPv4 standar
+  assert.equal(isPrivateOrLocalIp('127.0.0.1'), true);
+  assert.equal(isPrivateOrLocalIp('10.0.0.1'), true);
+  assert.equal(isPrivateOrLocalIp('172.16.0.1'), true);
+  assert.equal(isPrivateOrLocalIp('192.168.1.1'), true);
+  assert.equal(isPrivateOrLocalIp('169.254.169.254'), true);
+  assert.equal(isPrivateOrLocalIp('8.8.8.8'), false);
+  assert.equal(isPrivateOrLocalIp('1.1.1.1'), false);
+
+  // IPv6 & IPv4-mapped IPv6
+  assert.equal(isPrivateOrLocalIPv6('::1'), true);
+  assert.equal(isPrivateOrLocalIPv6('::ffff:127.0.0.1'), true);
+  assert.equal(isPrivateOrLocalIPv6('::ffff:7f00:1'), true);
+  assert.equal(isPrivateOrLocalIPv6('::ffff:a9fe:a9fe'), true);
+  assert.equal(isPrivateOrLocalIPv6('::ffff:169.254.169.254'), true);
+  assert.equal(isPrivateOrLocalIPv6('fe80::1'), true);
+  assert.equal(isPrivateOrLocalIPv6('fc00::1'), true);
+  assert.equal(isPrivateOrLocalIPv6('2606:4700:4700::1111'), false);
+});
+
+test('checkSsrfSafety: menolak URL dengan notasi IP alternatif berbahaya', async () => {
+  const badUrls = [
+    'http://2130706433/',
+    'http://2852039166/latest/meta-data',
+    'http://0177.0.0.1/',
+    'http://0x7f000001/',
+    'http://[::ffff:127.0.0.1]/',
+    'http://[::ffff:7f00:1]/',
+    'http://[::1]/',
+    'http://169.254.169.254/latest/meta-data',
+  ];
+
+  for (const u of badUrls) {
+    const res = await checkSsrfSafety(new URL(u));
+    assert.equal(res.safe, false, `Expected ${u} to be unsafe`);
+    assert.ok(res.reason && res.reason.length > 0);
+  }
+});
+
+test('webFetchTool: memblokir redirect hop yang mengarah ke target SSRF privat/metadata', async () => {
+  // Jalankan server redirect lokal sementara
+  const server = createServer((req, res) => {
+    if (req.url === '/redirect-to-metadata') {
+      res.writeHead(302, { Location: 'http://169.254.169.254/latest/meta-data' });
+      res.end();
+    } else if (req.url === '/redirect-to-decimal-loopback') {
+      res.writeHead(302, { Location: 'http://2852039166/secret' });
+      res.end();
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('OK');
+    }
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const port = (server.address() as any).port;
+
+  try {
+    // 1. Redirect hop ke 169.254.169.254 diblokir
+    const resMeta = await webFetchTool(
+      `http://127.0.0.1:${port}/redirect-to-metadata`,
+      { allowLocalhost: true },
+    );
+    assert.equal(resMeta.ok, false);
+    assert.ok(resMeta.text.includes('redirect mengarah ke alamat internal') || resMeta.text.includes('IP lokal/privat'));
+
+    // 2. Redirect hop ke integer desimal 2130706433 diblokir
+    const resDec = await webFetchTool(
+      `http://127.0.0.1:${port}/redirect-to-decimal-loopback`,
+      { allowLocalhost: true },
+    );
+    assert.equal(resDec.ok, false);
+    assert.ok(resDec.text.includes('redirect mengarah ke alamat internal') || resDec.text.includes('IP lokal/privat'));
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bagian F: Uji Bypass Encoding Path dan Command Filter Exec
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('detectSensitiveFileAccessInExec: menangkap subshell, backslash unescaping, dan tracking variabel', async () => {
+  await inTempWorkspace(async (ws) => {
+    // Subshell $() dan backtick
+    assert.equal(detectSensitiveFileAccessInExec('echo $(cat .env)', ws).blocked, true);
+    assert.equal(detectSensitiveFileAccessInExec('VAR=$(cat .ruko/config.json)', ws).blocked, true);
+    assert.equal(detectSensitiveFileAccessInExec('echo `cat .env`', ws).blocked, true);
+
+    // Backslash unescaping
+    assert.equal(detectSensitiveFileAccessInExec('cat .ru\\ko/con\\fig.json', ws).blocked, true);
+    assert.equal(detectSensitiveFileAccessInExec('cat .e\\nv', ws).blocked, true);
+    assert.equal(detectSensitiveFileAccessInExec('head -n 5 .e\\nv.local', ws).blocked, true);
+    assert.equal(detectSensitiveFileAccessInExec('cat .git-cre\\dentials', ws).blocked, true);
+    assert.equal(detectSensitiveFileAccessInExec('cat ~/.s\\sh/id_rsa', ws).blocked, true);
+
+    // Variable tracking
+    assert.equal(detectSensitiveFileAccessInExec('V=.env; cat $V', ws).blocked, true);
+    assert.equal(detectSensitiveFileAccessInExec('TARGET=.ruko/config.json; head "$TARGET"', ws).blocked, true);
+    assert.equal(detectSensitiveFileAccessInExec('KEY=id_rsa; tail $KEY', ws).blocked, true);
+  });
+});
+
+test('isSensitiveEnvCommand: menangkap ekspresi bertingkat dan variabel bertranslasi ke env sensitif', () => {
+  assert.equal(isSensitiveEnvCommand('V=RUKO_API_KEY; printenv $V'), true);
+  assert.equal(isSensitiveEnvCommand('K=OPENAI_API_KEY; env | grep $K'), true);
+  assert.equal(isSensitiveEnvCommand('print\\env RUKO_API_KEY'), true);
+  assert.equal(isSensitiveEnvCommand('e\\nv'), true);
+});
+
+test('isSensitivePath: menangani URL-encoding, case sensitivity, dan tilde expansion', () => {
+  // URL-encoding
+  assert.equal(isSensitivePath('%2e%65%6e%76'), true); // .env
+  assert.equal(isSensitivePath('.ruko%2fconfig.json'), true); // .ruko/config.json
+  assert.equal(isSensitivePath('.ruko%2Fconfig%2Ejson'), true);
+
+  // Case variations
+  assert.equal(isSensitivePath('.RUKO/CONFIG.JSON'), true);
+  assert.equal(isSensitivePath('.Env'), true);
+  assert.equal(isSensitivePath('.ENV.LOCAL'), true);
+  assert.equal(isSensitivePath('.Git-Credentials'), true);
+  assert.equal(isSensitivePath('ID_RSA'), true);
+  assert.equal(isSensitivePath('ID_ED25519'), true);
+
+  // Home directory (tilde) expansion
+  assert.equal(isSensitivePath('~/.ssh/id_rsa'), true);
+  assert.equal(isSensitivePath('~/.ssh/id_ed25519'), true);
+  assert.equal(isSensitivePath('~/.git-credentials'), true);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bagian G: Uji Konsistensi Symlink & Broken Symlink Escape
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('symlink consistency: broken symlink write-through ditolak tanpa escape workspace', async () => {
+  await inTempWorkspace(async (ws) => {
+    // Siapkan broken symlink yang menunjuk ke lokasi di luar workspace yang belum ada
+    const outsideTarget = join(tmpdir(), `ruko-broken-escape-${Date.now()}.txt`);
+    const brokenLinkPath = join(ws, 'broken_symlink.txt');
+
+    try {
+      symlinkSync(outsideTarget, brokenLinkPath);
+    } catch {
+      // Jika platform/lingkungan tidak mengizinkan symlink tanpa hak khusus, lewati
+      return;
+    }
+
+    // Upaya menulis ke broken symlink via write_file harus ditolak
+    const resWrite = await runToolCall(
+      { tool: 'write_file', path: 'broken_symlink.txt', content: 'hacked outside content' },
+      { workspaceRoot: ws },
+    );
+    const parsedWrite = JSON.parse(resWrite);
+    assert.ok(parsedWrite.error && (parsedWrite.error.includes('luar workspace') || parsedWrite.error.includes('working directory')));
+    assert.equal(existsSync(outsideTarget), false, 'Berkas target di luar workspace tidak boleh tercipta');
+
+    // Upaya edit_file via broken symlink juga harus ditolak
+    const resEdit = await runToolCall(
+      {
+        tool: 'edit_file',
+        path: 'broken_symlink.txt',
+        content: 'hacked edit',
+      },
+      { workspaceRoot: ws },
+    );
+    const parsedEdit = JSON.parse(resEdit);
+    assert.ok(parsedEdit.error && (parsedEdit.error.includes('luar workspace') || parsedEdit.error.includes('working directory')));
+    assert.equal(existsSync(outsideTarget), false);
+  });
+});
+
+test('symlink consistency: symlink ke berkas sensitif diblokir di readFileTool dan mutating tools', async () => {
+  await inTempWorkspace(async (ws) => {
+    // Buat file sensitif asli .env
+    writeFileSync(join(ws, '.env'), 'SECRET_SYMLINK_TOKEN=99999', 'utf8');
+
+    // Buat symlink di dalam workspace yang mengarah ke .env
+    const linkPath = join(ws, 'symlink_to_env.txt');
+    try {
+      symlinkSync(join(ws, '.env'), linkPath);
+    } catch {
+      return;
+    }
+
+    // 1. readFileTool melalui symlink diblokir
+    const readRes = await readFileTool('symlink_to_env.txt', {}, ws);
+    assert.equal(readRes.ok, false);
+    assert.ok(readRes.text.includes('file sensitif'));
+
+    // 2. write_file melalui symlink ke berkas sensitif diblokir
+    const writeRes = await runToolCall(
+      { tool: 'write_file', path: 'symlink_to_env.txt', content: 'overwrite secret' },
+      { workspaceRoot: ws },
+    );
+    const parsedWrite = JSON.parse(writeRes);
+    assert.ok(parsedWrite.error && parsedWrite.error.includes('file sensitif'));
+    assert.equal(readFileSync(join(ws, '.env'), 'utf8'), 'SECRET_SYMLINK_TOKEN=99999');
+  });
+});
+

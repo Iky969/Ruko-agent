@@ -50,6 +50,12 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Tanggal: 2026-09-14
 - Kontribusi: Release v1.6.2 — Full repository version synchronization, rilis 7 perbaikan feedback.txt, dan verifikasi test suite (409 tests)
 - Tanggal: 2026-09-14
+- Kontribusi: Security Audit & Comprehensive Hardening — Proteksi terpusat berkas sensitif (.ruko/config.json, .env*, .git-credentials, kunci SSH), proteksi mutlak 6 berkas Immutable Security Core, Transport-Layer SSRF hardening dengan dukungan notasi IP alternatif (desimal integer, oktal, hex, IPv4-mapped IPv6) & redirect hop IP-pinning, penutupan celah broken symlink TOCTOU escape, command filter exec encoding unescaping & shell variable tracking, penambahan dokumentasi resmi Security Boundaries & Known Limitations, serta 433 test suites 100% lulus tanpa regresi.
+- Tanggal: 2026-09-15
+- Kontribusi: Implementasi perintah slash `/setctx` & `/settoken` untuk manajemen dinamis context window (rasio standar 1 token ≈ 4 karakter), tenggat sumber daya subagent (`timeoutMs`), sanitasi injeksi terminal (OSC/APC/DCS/PM/bells), mitigasi pembajakan environment variable fungsi shell (`BASH_FUNC_*`), serta penyelesaian Known Bug #1 (best-effort history compression) dan Known Bug #3 (interleaved sequential stdout/stderr) dengan 439 test suite passed.
+- Tanggal: 2026-09-15
+- Kontribusi: Penyelesaian temuan keamanan & reliabilitas — Proteksi file startup shell pengguna (.bashrc, .bash_profile, .zshrc, .profile, dsb.) di `isSensitivePath` dan `containsSensitiveFilePattern`, penetapan batas maksimum ukuran berkas `MAX_FILE_WRITE_BYTES` (5MB) pada seluruh jalur mutasi berkas (`write_file`, `edit_file`, `patch_file`), dan preservasi timestamp asli pesan riwayat pada ekspor trajectory (`exportSessionTrajectory`). Rangkaian pengujian meningkat ke 446 tests 100% lulus.
+- Tanggal: 2026-09-15
 
 ## Claude Opus 4.6
 - Kontribusi: Audit keamanan pre-publish & inisiasi implementasi hardening

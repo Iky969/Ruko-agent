@@ -226,7 +226,10 @@ export function exportSessionTrajectory(
     }
     id = trimmed;
   } else {
-    id = new Date().toISOString().replace(/[:.]/g, '-');
+    const firstTs = messages[0]?.timestamp;
+    const baseDate = firstTs ? new Date(firstTs) : new Date();
+    const dateStr = !isNaN(baseDate.getTime()) ? baseDate.toISOString() : new Date().toISOString();
+    id = dateStr.replace(/[:.]/g, '-');
   }
   const filePath = join(dir, `${id}.${format}`);
   const canonicalDir = resolve(dir);
@@ -243,13 +246,14 @@ export function exportSessionTrajectory(
         step: idx + 1,
         role: m.role,
         content: m.content,
-        timestamp: m.timestamp,
+        timestamp: m.timestamp || new Date().toISOString(),
       }),
     );
     content = lines.join('\n') + (lines.length > 0 ? '\n' : '');
   } else {
     const parts = [
       `# Trajectory Export: ${id}`,
+      `Session Start: ${messages[0]?.timestamp || 'N/A'}`,
       `Generated: ${new Date().toISOString()}`,
       `Total steps: ${messages.length}`,
       '---',
@@ -257,7 +261,8 @@ export function exportSessionTrajectory(
     ];
     for (let i = 0; i < messages.length; i++) {
       const m = messages[i];
-      parts.push(`### Step ${i + 1} — [${m.role.toUpperCase()}] (${m.timestamp})`);
+      const ts = m.timestamp || new Date().toISOString();
+      parts.push(`### Step ${i + 1} — [${m.role.toUpperCase()}] (${ts})`);
       parts.push('');
       parts.push(m.content);
       parts.push('');

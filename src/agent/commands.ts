@@ -460,6 +460,91 @@ const COMMANDS: CommandDef[] = [
     },
   },
   {
+    name: 'setctx',
+    help: 'Atur batas karakter context window (/setctx <jumlah_karakter|50k>).',
+    hint: '[jumlah|50k]',
+    run: (args, env) => {
+      const trimmed = args.trim();
+      if (!trimmed) {
+        console.log(
+          renderBox('Context Budget', [
+            `Karakter aktif: ${env.ctx.totalChars} chars`,
+            `Budget limit: ${env.config.maxContextChars} chars (~${Math.round(env.config.maxContextChars / 4)} tokens)`,
+            `Penggunaan: ${Math.round((env.ctx.totalChars / Math.max(env.config.maxContextChars, 1)) * 100)}%`,
+            `Hint: /setctx <angka|50k> atau /settoken <token|16k>`,
+          ]),
+        );
+        return;
+      }
+
+      let newLimit: number;
+      if (/^\d+[kK]$/.test(trimmed)) {
+        newLimit = parseInt(trimmed.slice(0, -1), 10) * 1_000;
+      } else {
+        newLimit = Number(trimmed.replace(/_/g, ''));
+      }
+
+      if (!Number.isFinite(newLimit) || newLimit <= 0 || !Number.isInteger(newLimit)) {
+        console.log('Error: nilai limit context harus berupa angka positif dalam satuan karakter (contoh: /setctx 50k atau /setctx 80000).');
+        return;
+      }
+
+      if (newLimit < env.ctx.totalChars) {
+        console.log(
+          `Error: nilai baru (${newLimit} karakter) tidak boleh lebih rendah dari jumlah karakter aktif (${env.ctx.totalChars} karakter).`,
+        );
+        return;
+      }
+
+      env.updateConfig({ maxContextChars: newLimit });
+      console.log(green(`✔ Limit context window diperbarui menjadi ${newLimit} karakter (~${Math.round(newLimit / 4)} token).`));
+    },
+  },
+  {
+    name: 'settoken',
+    help: 'Atur budget context window berdasarkan estimasi token (/settoken <token|16k>).',
+    hint: '[token|16k]',
+    run: (args, env) => {
+      const trimmed = args.trim();
+      if (!trimmed) {
+        const activeTokens = Math.round(env.ctx.totalChars / 4);
+        const budgetTokens = Math.round(env.config.maxContextChars / 4);
+        console.log(
+          renderBox('Token Budget (1 token ≈ 4 chars)', [
+            `Estimasi token aktif: ~${activeTokens} tokens (${env.ctx.totalChars} chars)`,
+            `Budget token: ~${budgetTokens} tokens (${env.config.maxContextChars} chars)`,
+            `Penggunaan: ${Math.round((env.ctx.totalChars / Math.max(env.config.maxContextChars, 1)) * 100)}%`,
+            `Hint: /settoken 16k (menjadi 64,000 chars)`,
+          ]),
+        );
+        return;
+      }
+
+      let tokens: number;
+      if (/^\d+[kK]$/.test(trimmed)) {
+        tokens = parseInt(trimmed.slice(0, -1), 10) * 1_000;
+      } else {
+        tokens = Number(trimmed.replace(/_/g, ''));
+      }
+
+      if (!Number.isFinite(tokens) || tokens <= 0 || !Number.isInteger(tokens)) {
+        console.log('Error: nilai token harus berupa angka positif (contoh: /settoken 16k atau /settoken 32000).');
+        return;
+      }
+
+      const newChars = tokens * 4;
+      if (newChars < env.ctx.totalChars) {
+        console.log(
+          `Error: budget ${tokens} token (${newChars} karakter) tidak boleh lebih rendah dari jumlah karakter aktif saat ini (${env.ctx.totalChars} karakter / ~${Math.round(env.ctx.totalChars / 4)} token).`,
+        );
+        return;
+      }
+
+      env.updateConfig({ maxContextChars: newChars });
+      console.log(green(`✔ Budget context window diperbarui menjadi ${tokens} token (${newChars} karakter, rasio 1 token ≈ 4 karakter).`));
+    },
+  },
+  {
     name: 'memory',
     help: 'Lihat isi persistent memory (.ruko/memory.md) atau reset.',
     hint: '[clear]',
@@ -497,23 +582,53 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'usage',
-    aliases: ['stats'],
-    help: 'Statistik pemakaian sesi (context, model, budget).',
-    run: (_args, env) => {
+    aliases: ['stats', 'tokens'],
+    help: 'Statistik pemakaian sesi (context window, model, akumulasi token sesi).',
+    hint: '[clear]',
+    run: (args, env) => {
+      const sub = args.trim().toLowerCase();
+      if (sub === 'clear' || sub === 'reset') {
+        env.agent?.resetSessionUsage();
+        console.log(green('✔ Statistik pemakaian token sesi telah di-reset ke 0.'));
+        return;
+      }
+
       const budget = env.config.maxContextChars;
       const used = env.ctx.totalChars;
       const pct = budget > 0 ? Math.min(100, Math.round((used / budget) * 100)) : 0;
+      const activeCtxTokens = Math.round(used / 4);
+      const budgetTokens = Math.round(budget / 4);
+
+      const s = env.agent?.sessionUsage;
+      const totalPromptTokens = s?.promptTokens ?? 0;
+      const totalCompTokens = s?.completionTokens ?? 0;
+      const totalTokens = s?.totalTokens ?? 0;
+      const totalTurns = s?.totalTurns ?? 0;
+
       const lines = [
         `model: ${env.llm.model} (${env.llm.name})`,
         `role: ${env.config.role ?? 'default'}  |  mode: ${env.config.mode ?? 'beginner'}`,
         `backend: ${env.llm.isConfigured ? 'LLM mode' : 'manual mode'}`,
-        `messages: ${env.ctx.size}`,
-        `context: ${used}/${budget} chars (${pct}% of ${formatK(budget)})`,
-        `session: ${env.handle.getSessionId() ?? '(belum disimpan)'}`,
+        `messages: ${env.ctx.size} pesan`,
+        `context window: ${used}/${budget} chars (${pct}% of ${formatK(budget)}) ~${activeCtxTokens}/${budgetTokens} tokens`,
+        `session id: ${env.handle.getSessionId() ?? '(belum disimpan)'}`,
+        `───────────────────────────────────────────────────────`,
+        `total token sesi ini (${totalTurns} turn):`,
+        `  ↑ prompt:     ~${totalPromptTokens} tokens (${formatK(s?.promptChars ?? 0)} chars)`,
+        `  ↓ completion: ~${totalCompTokens} tokens (${formatK(s?.completionChars ?? 0)} chars)`,
+        `  Σ total:      ~${totalTokens} tokens (rasio estimasi 1 token ≈ 4 chars)`,
       ];
+
       const u = env.agent?.lastUsage;
-      if (u) lines.push(`turn terakhir: ↑ ${formatK(u.promptChars)} ↓ ${formatK(u.completionChars)} chars`);
-      console.log(renderBox('Usage', lines));
+      if (u && (u.promptChars > 0 || u.completionChars > 0)) {
+        const uPromptTok = Math.round(u.promptChars / 4);
+        const uCompTok = Math.round(u.completionChars / 4);
+        lines.push(
+          `turn terakhir: ↑ ${formatK(u.promptChars)} chars (~${uPromptTok} tok) · ↓ ${formatK(u.completionChars)} chars (~${uCompTok} tok)`,
+        );
+      }
+
+      console.log(renderBox('Usage & Token Statistics', lines));
     },
   },
   {

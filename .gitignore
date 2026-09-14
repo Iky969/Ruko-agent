@@ -2,7 +2,7 @@ node_modules/
 dist/
 .ruko/
 *.log
-.env
+.env*
 .DS_Store
 
 # Lokal saja: berisi API key provider — JANGAN pernah di-push.

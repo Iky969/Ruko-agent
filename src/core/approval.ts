@@ -114,29 +114,142 @@ const DANGEROUS_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bwipefs\b/i, 'wipefs (penghapusan signature filesystem)'],
 ];
 
+/** Helper to decode URL-encoded components safely. */
+export function decodePathSafely(p: string): string {
+  let decoded = p;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      break;
+    }
+  }
+  return decoded;
+}
+
+/** Extracts subshell command contents from $(...) and `...`. */
+export function extractSubshells(str: string): string[] {
+  const subs: string[] = [];
+  // 1. Backticks `...`
+  const btMatches = str.matchAll(/`([^`]+)`/g);
+  for (const m of btMatches) {
+    if (m[1]?.trim()) subs.push(m[1].trim());
+  }
+  // 2. $(...) handling balanced parentheses
+  let idx = 0;
+  while ((idx = str.indexOf('$(', idx)) !== -1) {
+    let depth = 1;
+    let end = idx + 2;
+    while (end < str.length && depth > 0) {
+      if (str[end] === '(') depth++;
+      else if (str[end] === ')') depth--;
+      end++;
+    }
+    if (depth === 0) {
+      const inside = str.slice(idx + 2, end - 1).trim();
+      if (inside) subs.push(inside);
+      idx = end;
+    } else {
+      break;
+    }
+  }
+  return subs;
+}
+
+/**
+ * Extracts variable assignments from a command and resolves $VAR references.
+ */
+export function extractAndResolveShellVariables(command: string): string[] {
+  const vars: Record<string, string> = {};
+  const assignRe = /(?:^|[;&|\s])([a-zA-Z_][a-zA-Z0-9_]*)=(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/g;
+  let m: RegExpExecArray | null;
+  while ((m = assignRe.exec(command)) !== null) {
+    const varName = m[1];
+    const varVal = m[2] ?? m[3] ?? m[4] ?? '';
+    vars[varName] = varVal;
+  }
+
+  if (Object.keys(vars).length === 0) {
+    return [command];
+  }
+
+  let expanded = command;
+  for (let pass = 0; pass < 3; pass++) {
+    let changed = false;
+    for (const [k, v] of Object.entries(vars)) {
+      const re = new RegExp(`\\$(?:\\{!?\\s*${k}\\s*\\}|${k}\\b)`, 'g');
+      if (re.test(expanded)) {
+        expanded = expanded.replace(re, v);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  return expanded !== command ? [command, expanded] : [command];
+}
+
 /**
  * Splits a shell command on chain operators (;  &&  ||  |) into individual
- * segments. Both the full original command AND each extracted segment are
+ * segments, extracts subshells, and evaluates variable expansions.
+ * Both the full original command AND each extracted segment are
  * evaluated, so a destructive sub-command cannot hide inside an innocent
  * wrapper to lower its risk level.
  */
 export function chainedSegments(command: string): string[] {
-  const parts = command.split(/\s*(?:&&|\|\|?|;)\s*/).map(s => s.trim()).filter(Boolean);
-  // Include the full command too — catches patterns that span the join point
-  // (e.g. existing DANGEROUS pattern for curl … | sh).
-  return [command, ...parts];
+  const result = new Set<string>();
+  result.add(command);
+
+  // Split by chain operators ; && || | and newlines
+  const parts = command.split(/\s*(?:&&|\|\|?|;|\n)\s*/).map(s => s.trim()).filter(Boolean);
+  for (const p of parts) {
+    result.add(p);
+    const subs = extractSubshells(p);
+    for (const s of subs) {
+      result.add(s);
+      const subParts = s.split(/\s*(?:&&|\|\|?|;|\n)\s*/).map(sp => sp.trim()).filter(Boolean);
+      for (const sp of subParts) {
+        result.add(sp);
+      }
+    }
+  }
+
+  return Array.from(result);
 }
 
 /**
- * Returns the segment itself plus a quote-stripped variant (if different).
- * Shell quotes can hide destructive commands from regex detection
- * (e.g. bash -c "rm -rf /etc" — the quotes prevent the BLOCKED path
- * terminator from matching). By testing both the original and stripped
- * version, wrapped commands are properly classified.
+ * Returns test candidates for a command segment:
+ * - original segment
+ * - quote-stripped variant
+ * - unescaped backslashes variant (defends vs r\m -rf /)
+ * - both quote-stripped and unescaped
+ * - URL-decoded variants (defends vs encoding bypasses)
  */
 function testCandidates(segment: string): string[] {
+  const candidates = new Set<string>();
+  candidates.add(segment);
+
+  // 1. Quotes stripped
   const stripped = segment.replace(/["'`]/g, '');
-  return stripped !== segment ? [segment, stripped] : [segment];
+  if (stripped) candidates.add(stripped);
+
+  // 2. Unescape bash backslash escape sequences (e.g. r\m -rf / -> rm -rf /)
+  const unescaped = segment.replace(/\\([^\s])/g, '$1');
+  if (unescaped) candidates.add(unescaped);
+
+  // 3. Both stripped and unescaped
+  const both = stripped.replace(/\\([^\s])/g, '$1');
+  if (both) candidates.add(both);
+
+  // 4. URL-decoded candidates
+  for (const c of Array.from(candidates)) {
+    const dec = decodePathSafely(c);
+    if (dec && dec !== c) candidates.add(dec);
+  }
+
+  return Array.from(candidates);
 }
 
 /** Classifies a shell command. */
@@ -166,7 +279,6 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
             break;
           }
         }
-        if (worst.risk === 'dangerous') break;
       }
     }
   }
