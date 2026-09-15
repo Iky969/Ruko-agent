@@ -30,7 +30,7 @@ import { getWorkspaceRoot } from '../agent/tools.js';
 import { defaultProcessManager } from '../agent/processManager.js';
 
 /** Prompt line shown under the status bar (placeholder until the user types). */
-const PROMPT_HINT = 'Ask anything, or type / for commands';
+const PROMPT_HINT = '/? for help, ask anything...';
 
 function packageVersion(): string {
   try {

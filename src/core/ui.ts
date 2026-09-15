@@ -266,6 +266,17 @@ export function formatK(n: number): string {
   return `${label}k`;
 }
 
+/** Formats milliseconds into human-readable duration (e.g. 500ms, 4.2s, 1m 24s). */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0s';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const sec = ms / 1000;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const mins = Math.floor(sec / 60);
+  const remSec = Math.round(sec % 60);
+  return `${mins}m ${remSec}s`;
+}
+
 export interface StatusBarInput {
   model: string;
   usedChars: number;
@@ -388,9 +399,10 @@ export function buildStatusBar(input: StatusBarInput): string {
   }
 
   let role = (w >= 50 && input.role && input.role !== 'default') ? ` · ${input.role}` : '';
-  const prefix = ' ⚡ [';
-  const suffix = ']';
-  const sep = ' | ';
+  const isCompactLayout = w < 38;
+  let prefix = isCompactLayout ? '[' : ' ⚡ [';
+  let suffix = ']';
+  let sep = isCompactLayout ? '|' : ' | ';
 
   let fixedLen = visibleLength(prefix) + visibleLength(role) + visibleLength(suffix) + visibleLength(proc) + visibleLength(sep) + visibleLength(right);
 
@@ -399,24 +411,35 @@ export function buildStatusBar(input: StatusBarInput): string {
     fixedLen = visibleLength(prefix) + visibleLength(suffix) + visibleLength(proc) + visibleLength(sep) + visibleLength(right);
   }
 
+  // If still too tight on narrow screens, drop proc to prioritize model + ctx
+  if (fixedLen + visibleLength(input.model) > targetWidth && w < 40 && proc) {
+    proc = '';
+    fixedLen = visibleLength(prefix) + visibleLength(suffix) + visibleLength(proc) + visibleLength(sep) + visibleLength(right);
+  }
+
   let modelText = input.model;
-  const availForModel = targetWidth - fixedLen;
+  let availForModel = targetWidth - fixedLen;
   if (availForModel < visibleLength(modelText)) {
     if (availForModel >= 7) {
       modelText = modelText.slice(0, availForModel - 1) + '…';
-    } else if (procCount > 0 && proc) {
-      proc = ` | ⚙️${procCount}`;
-      fixedLen = visibleLength(prefix) + visibleLength(suffix) + visibleLength(proc) + visibleLength(sep) + visibleLength(right);
-      const newAvail = targetWidth - fixedLen;
-      if (newAvail < visibleLength(modelText)) {
-        modelText = newAvail >= 4 ? modelText.slice(0, newAvail - 1) + '…' : modelText.slice(0, Math.max(1, newAvail));
-      }
+    } else if (availForModel >= 4) {
+      modelText = modelText.slice(0, availForModel - 1) + '…';
+    } else if (availForModel > 0) {
+      modelText = modelText.slice(0, availForModel);
     } else {
-      modelText = availForModel >= 4 ? modelText.slice(0, availForModel - 1) + '…' : modelText.slice(0, Math.max(1, availForModel));
+      modelText = '';
+      if (prefix === '[') prefix = '';
+      if (suffix === ']') suffix = '';
+      if (sep === '|') sep = '';
     }
   }
 
-  return onDarkGreen(`${prefix}${modelText}${role}${suffix}${proc}${sep}${right}`);
+  let assembled = `${prefix}${modelText}${role}${suffix}${proc}${sep}${right}`;
+  if (visibleLength(assembled) > targetWidth) {
+    assembled = truncateVisible(assembled, targetWidth);
+  }
+
+  return onDarkGreen(assembled);
 }
 
 /**
@@ -613,16 +636,256 @@ export class LineGate {
 }
 
 /**
- * Fence-aware streaming reveal filter.
+ * Options for ThoughtSlidingWindow.
+ */
+export interface ThoughtSlidingWindowOptions {
+  /** Maximum number of recent words kept in the sliding window buffer (default: 12). */
+  maxWords?: number;
+  /** Custom render hook (defaults to stdout write with carriage return). */
+  onRender?: (line: string) => void;
+  /** Custom clear hook (defaults to stdout line erase with \r\u001b[2K). */
+  onClear?: () => void;
+}
+
+/**
+ * Word-based sliding window renderer for live reasoning thought streams.
  *
- * Feeds raw LLM tokens through `feed()`; emits only the human-visible text
- * to the sink while hiding ```` ```tool ```` code blocks (the internal tool
- * protocol) even when the fence markers arrive split across chunks. Regular
- * (non-tool) code fences pass through untouched.
+ * Displays the latest N words prefixed with `[berpikir] ` in dim gray (\x1b[90m),
+ * updating in place using \r\u001b[2K so the terminal screen stays clean and unpolluted.
+ */
+export class ThoughtSlidingWindow {
+  private words: string[] = [];
+  private currentPartialWord = '';
+  private readonly maxWords: number;
+  private readonly onRender?: (line: string) => void;
+  private readonly onClear?: () => void;
+  private active = false;
+
+  constructor(options: ThoughtSlidingWindowOptions = {}) {
+    this.maxWords = options.maxWords ?? 12;
+    this.onRender = options.onRender;
+    this.onClear = options.onClear;
+  }
+
+  feed(chunk: string): void {
+    if (!chunk) return;
+    this.active = true;
+    const combined = this.currentPartialWord + chunk;
+    this.currentPartialWord = '';
+
+    const endsWithWhitespace = /\s$/.test(combined);
+    const tokens = combined.trim().split(/\s+/).filter(Boolean);
+
+    if (!endsWithWhitespace && tokens.length > 0) {
+      this.currentPartialWord = tokens.pop()!;
+    }
+
+    for (const w of tokens) {
+      this.words.push(w);
+      if (this.words.length > this.maxWords) {
+        this.words.shift();
+      }
+    }
+
+    this.emit();
+  }
+
+  getWords(): string[] {
+    const list = [...this.words];
+    if (this.currentPartialWord) {
+      list.push(this.currentPartialWord);
+      if (list.length > this.maxWords) {
+        list.shift();
+      }
+    }
+    return list;
+  }
+
+  render(): string {
+    const displayWords = this.getWords();
+    if (displayWords.length === 0) return '';
+    return `\r\u001b[2K${dim(`[berpikir] ${displayWords.join(' ')}`)}`;
+  }
+
+  private emit(): void {
+    const rendered = this.render();
+    if (rendered) {
+      if (this.onRender) {
+        this.onRender(rendered);
+      } else {
+        process.stdout.write(rendered);
+      }
+    }
+  }
+
+  clear(): void {
+    if (this.active) {
+      if (this.onClear) {
+        this.onClear();
+      } else if (this.onRender) {
+        this.onRender('\r\u001b[2K');
+      } else {
+        process.stdout.write('\r\u001b[2K');
+      }
+      this.active = false;
+    }
+    this.words = [];
+    this.currentPartialWord = '';
+  }
+
+  isActive(): boolean {
+    return this.active;
+  }
+
+  reset(): void {
+    this.clear();
+  }
+}
+
+/**
+ * Options for ThoughtStreamParser.
+ */
+export interface ThoughtStreamParserOptions {
+  onText: (text: string) => void;
+  onThought: (thought: string) => void;
+  onThoughtEnd?: () => void;
+}
+
+/**
+ * Streaming parser that routes reasoning `<thought>...</thought>` or `<think>...</think>`
+ * to thought handlers while forwarding regular content to user text sinks.
+ */
+export class ThoughtStreamParser {
+  private buffer = '';
+  private inThought = false;
+  private thoughtTagClose = '';
+
+  constructor(private readonly options: ThoughtStreamParserOptions) {}
+
+  feed(chunk: string): void {
+    this.buffer += chunk;
+    this.drain();
+  }
+
+  isInThought(): boolean {
+    return this.inThought;
+  }
+
+  private drain(): void {
+    for (;;) {
+      if (this.inThought) {
+        const closeIdx = this.buffer.indexOf(this.thoughtTagClose);
+        if (closeIdx === -1) {
+          const hold = fencePrefixHold(this.buffer, this.thoughtTagClose);
+          const emitThought = this.buffer.slice(0, this.buffer.length - hold);
+          this.buffer = hold ? this.buffer.slice(this.buffer.length - hold) : '';
+          if (emitThought) {
+            this.options.onThought(emitThought);
+          }
+          return;
+        }
+
+        const thoughtContent = this.buffer.slice(0, closeIdx);
+        if (thoughtContent) {
+          this.options.onThought(thoughtContent);
+        }
+        this.options.onThoughtEnd?.();
+        this.inThought = false;
+        let rest = this.buffer.slice(closeIdx + this.thoughtTagClose.length);
+        if (rest.startsWith('\n')) rest = rest.slice(1);
+        this.buffer = rest;
+        this.thoughtTagClose = '';
+        continue;
+      }
+
+      const thoughtOpen = this.buffer.indexOf('<thought>');
+      const thinkOpen = this.buffer.indexOf('<think>');
+
+      let openIdx = -1;
+      let openTag = '';
+      let closeTag = '';
+
+      if (thoughtOpen !== -1 && (thinkOpen === -1 || thoughtOpen < thinkOpen)) {
+        openIdx = thoughtOpen;
+        openTag = '<thought>';
+        closeTag = '</thought>';
+      } else if (thinkOpen !== -1) {
+        openIdx = thinkOpen;
+        openTag = '<think>';
+        closeTag = '</think>';
+      }
+
+      if (openIdx === -1) {
+        const holdThought = fencePrefixHold(this.buffer, '<thought>');
+        const holdThink = fencePrefixHold(this.buffer, '<think>');
+        const hold = Math.max(holdThought, holdThink);
+        const emitText = this.buffer.slice(0, this.buffer.length - hold);
+        this.buffer = hold ? this.buffer.slice(this.buffer.length - hold) : '';
+        if (emitText) {
+          this.options.onText(emitText);
+        }
+        return;
+      }
+
+      if (openIdx > 0) {
+        this.options.onText(this.buffer.slice(0, openIdx));
+      }
+      this.inThought = true;
+      this.thoughtTagClose = closeTag;
+      this.buffer = this.buffer.slice(openIdx + openTag.length);
+    }
+  }
+
+  end(): void {
+    if (this.inThought) {
+      if (this.buffer) {
+        this.options.onThought(this.buffer);
+      }
+      this.options.onThoughtEnd?.();
+      this.inThought = false;
+    } else if (this.buffer) {
+      this.options.onText(this.buffer);
+    }
+    this.buffer = '';
+    this.thoughtTagClose = '';
+  }
+}
+
+/** Strips all <thought>...</thought> and <think>...</think> reasoning blocks. */
+export function stripThoughtBlocks(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/\*Thought:[\s\S]*?\*/gi, '')
+    .trim();
+}
+
+/** Extracts text within <thought> or <think> tags. */
+export function extractThoughts(text: string): string[] {
+  if (!text) return [];
+  const results: string[] = [];
+  for (const m of text.matchAll(/<thought>([\s\S]*?)<\/thought>/gi)) {
+    results.push(m[1].trim());
+  }
+  for (const m of text.matchAll(/<think>([\s\S]*?)<\/think>/gi)) {
+    results.push(m[1].trim());
+  }
+  return results;
+}
+
+/**
+ * Protocol-aware streaming reveal filter.
+ *
+ * Feeds raw LLM tokens through `feed()`; emits only human-visible text to
+ * the sink while hiding tool blocks:
+ *   - ```tool ... ```
+ *   - <|DSML|... / <｜DSML｜...
+ *   - <tool_call>...</tool_call>
  */
 export class RevealFilter {
   private buffer = '';
-  private hidden = false;
+  private hiddenType: 'tool_fence' | 'dsml' | 'tool_call' | null = null;
 
   constructor(private readonly sink: (text: string) => void) {}
 
@@ -633,55 +896,115 @@ export class RevealFilter {
 
   /** Flush any pending visible text once the stream has ended. */
   end(): void {
-    if (!this.hidden && this.buffer) this.sink(this.buffer);
+    if (!this.hiddenType && this.buffer) this.sink(this.buffer);
     this.buffer = '';
+    this.hiddenType = null;
   }
 
   private drain(): void {
     for (;;) {
-      if (this.hidden) {
+      if (this.hiddenType === 'tool_fence') {
         const close = this.buffer.indexOf(FENCE);
         if (close === -1) {
           const hold = fencePrefixHold(this.buffer, FENCE);
           this.buffer = hold ? this.buffer.slice(this.buffer.length - hold) : '';
           return;
         }
-        // Drop one newline right after the closing fence so the line before
-        // the tool block and the line after it rejoin without a blank gap.
         let rest = this.buffer.slice(close + FENCE.length);
         if (rest.startsWith('\n')) rest = rest.slice(1);
         this.buffer = rest;
-        this.hidden = false;
+        this.hiddenType = null;
         continue;
       }
-      const open = this.buffer.indexOf(FENCE);
-      if (open === -1) {
-        const hold = fencePrefixHold(this.buffer, FENCE);
+
+      if (this.hiddenType === 'dsml') {
+        const dsmlCloseMatch = /<\/(?:\||｜)DSML(?:\||｜)(?:invoke|tool_calls)[^>]*>/i.exec(this.buffer);
+        if (!dsmlCloseMatch) {
+          const hold1 = fencePrefixHold(this.buffer, '</|DSML|invoke>');
+          const hold2 = fencePrefixHold(this.buffer, '</｜DSML｜invoke>');
+          const hold = Math.max(hold1, hold2);
+          this.buffer = hold ? this.buffer.slice(this.buffer.length - hold) : '';
+          return;
+        }
+        let rest = this.buffer.slice(dsmlCloseMatch.index + dsmlCloseMatch[0].length);
+        if (rest.startsWith('\n')) rest = rest.slice(1);
+        this.buffer = rest;
+        this.hiddenType = null;
+        continue;
+      }
+
+      if (this.hiddenType === 'tool_call') {
+        const closeIdx = this.buffer.indexOf('</tool_call>');
+        if (closeIdx === -1) {
+          const hold = fencePrefixHold(this.buffer, '</tool_call>');
+          this.buffer = hold ? this.buffer.slice(this.buffer.length - hold) : '';
+          return;
+        }
+        let rest = this.buffer.slice(closeIdx + 12);
+        if (rest.startsWith('\n')) rest = rest.slice(1);
+        this.buffer = rest;
+        this.hiddenType = null;
+        continue;
+      }
+
+      const fenceIdx = this.buffer.indexOf(FENCE);
+      const dsmlAsciiIdx = this.buffer.indexOf('<|DSML|');
+      const dsmlUniIdx = this.buffer.indexOf('<｜DSML｜');
+      const toolCallIdx = this.buffer.indexOf('<tool_call');
+
+      const candidates: Array<{ idx: number; type: 'fence' | 'dsml' | 'tool_call' }> = [];
+      if (fenceIdx !== -1) candidates.push({ idx: fenceIdx, type: 'fence' });
+      if (dsmlAsciiIdx !== -1) candidates.push({ idx: dsmlAsciiIdx, type: 'dsml' });
+      if (dsmlUniIdx !== -1) candidates.push({ idx: dsmlUniIdx, type: 'dsml' });
+      if (toolCallIdx !== -1) candidates.push({ idx: toolCallIdx, type: 'tool_call' });
+
+      if (candidates.length === 0) {
+        const holdFence = fencePrefixHold(this.buffer, FENCE);
+        const holdDsml1 = fencePrefixHold(this.buffer, '<|DSML|');
+        const holdDsml2 = fencePrefixHold(this.buffer, '<｜DSML｜');
+        const holdToolCall = fencePrefixHold(this.buffer, '<tool_call');
+        const hold = Math.max(holdFence, holdDsml1, holdDsml2, holdToolCall);
         const emit = this.buffer.slice(0, this.buffer.length - hold);
         this.buffer = hold ? this.buffer.slice(this.buffer.length - hold) : '';
         if (emit) this.sink(emit);
         return;
       }
-      if (open > 0) {
-        this.sink(this.buffer.slice(0, open));
-        this.buffer = this.buffer.slice(open);
+
+      candidates.sort((a, b) => a.idx - b.idx);
+      const earliest = candidates[0];
+
+      if (earliest.idx > 0) {
+        this.sink(this.buffer.slice(0, earliest.idx));
+        this.buffer = this.buffer.slice(earliest.idx);
       }
-      if (this.buffer.length < FENCE.length + 4) {
-        // Not enough lookahead to decide between ```tool and a normal fence.
-        if (TOOL_FENCE_RE.test(this.buffer)) {
-          this.hidden = true;
-          this.buffer = this.buffer.slice(this.buffer.indexOf('tool') + 4);
+
+      if (earliest.type === 'fence') {
+        if (this.buffer.length < FENCE.length + 4) {
+          if (TOOL_FENCE_RE.test(this.buffer)) {
+            this.hiddenType = 'tool_fence';
+            this.buffer = this.buffer.slice(this.buffer.indexOf('tool') + 4);
+          }
+          return;
         }
-        return;
-      }
-      if (TOOL_FENCE_RE.test(this.buffer)) {
-        this.hidden = true;
-        this.buffer = this.buffer.slice(this.buffer.indexOf('tool') + 4);
+        if (TOOL_FENCE_RE.test(this.buffer)) {
+          this.hiddenType = 'tool_fence';
+          this.buffer = this.buffer.slice(this.buffer.indexOf('tool') + 4);
+          continue;
+        }
+        this.sink(FENCE);
+        this.buffer = this.buffer.slice(FENCE.length);
         continue;
       }
-      // Ordinary code fence — reveal it as normal text.
-      this.sink(FENCE);
-      this.buffer = this.buffer.slice(FENCE.length);
+
+      if (earliest.type === 'dsml') {
+        this.hiddenType = 'dsml';
+        continue;
+      }
+
+      if (earliest.type === 'tool_call') {
+        this.hiddenType = 'tool_call';
+        continue;
+      }
     }
   }
 }

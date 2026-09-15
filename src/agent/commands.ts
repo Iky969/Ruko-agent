@@ -1,10 +1,11 @@
+import { existsSync } from 'node:fs';
 import { Confirmer, guardedExecute } from '../core/approval.js';
 import { join, relative as relativeFromCwd, resolve as resolvePath } from 'node:path';
 import { Context } from '../core/context.js';
 import { isPrivateOrLocalHost, saveConfig } from '../core/config.js';
 import { execute } from '../core/executor.js';
 import { promptSetup, SetupResult } from '../core/wizard.js';
-import { bold, cyan, dim, formatK, green, renderBox, red, yellow } from '../core/ui.js';
+import { bold, cyan, dim, formatDuration, formatK, green, renderBox, red, yellow } from '../core/ui.js';
 import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
@@ -53,6 +54,7 @@ interface CommandDef {
 const COMMANDS: CommandDef[] = [
   {
     name: 'help',
+    aliases: ['?'],
     help: 'Show this help.',
     run: () => {
       console.log(buildHelpText());
@@ -466,6 +468,189 @@ const COMMANDS: CommandDef[] = [
     },
   },
   {
+    name: 'settings',
+    aliases: ['setting', 'set'],
+    help: 'Dashboard konfigurasi: lihat & ubah budget context, max token, model, role, approval, dan mode.',
+    hint: '[context|max-tokens|role|mode|approval|anim|save] [nilai]',
+    run: async (args, env) => {
+      const parts = args.trim().split(/\s+/);
+      const sub = parts[0]?.toLowerCase();
+      const val = parts.slice(1).join(' ').trim();
+
+      if (!sub) {
+        const budgetChars = env.config.maxContextChars;
+        const budgetTokens = Math.round(budgetChars / 4);
+        const usedChars = env.ctx.totalChars;
+        const usedTokens = Math.round(usedChars / 4);
+        const pct = budgetChars > 0 ? Math.min(100, Math.round((usedChars / budgetChars) * 100)) : 0;
+        const maxOut = env.config.maxOutputTokens ?? 4096;
+
+        const lines = [
+          `MODEL & PROVIDER:`,
+          `  • Model:            ${env.llm.model || '(belum dikonfigurasi)'}`,
+          `  • Provider:         ${env.llm.name} ${env.config.baseUrl ? `(${env.config.baseUrl})` : ''}`,
+          `  • Profile:          ${env.config.activeProfile || env.config.defaultProfile || 'default'}`,
+          ``,
+          `TOKEN & CONTEXT BUDGET:`,
+          `  • Context Window:   ${budgetChars.toLocaleString()} chars (~${budgetTokens.toLocaleString()} tokens)`,
+          `  • Status Konteks:   ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}% terpakai`,
+          `  • Max Output:       ${maxOut.toLocaleString()} tokens per-turn (max_tokens)`,
+          ``,
+          `BEHAVIOR & SAFETY:`,
+          `  • Role:             ${env.config.role ?? 'default'}`,
+          `  • Mode:             ${env.config.mode ?? 'beginner'}`,
+          `  • Approval Gate:    ${env.config.approvalEnabled ? 'ON (konfirmasi perintah berisiko)' : 'OFF (YOLO mode)'}`,
+          `  • Exec Timeout:     ${Math.round(env.config.execTimeoutMs / 1000)} detik`,
+          `  • Fun Animations:   ${env.config.funAnimations ?? true ? 'ON (Pac-Man spinner)' : 'OFF'}`,
+          `───────────────────────────────────────────────────────`,
+          `Ubah pengaturan dengan perintah:`,
+          `  • /settings context <128k|500k|unlimited>   Atur limit context window`,
+          `  • /settings max-tokens <jumlah|4096>       Atur limit token output per-turn`,
+          `  • /settings role <default|reviewer|teacher> Atur peran aktif`,
+          `  • /settings mode <beginner|pro>             Ganti mode UI`,
+          `  • /settings approval <on|off|yolo>          Atur konfirmasi perintah`,
+          `  • /settings anim <on|off>                   Animasi berpikir Pac-Man`,
+          `  • /settings save                            Simpan ke .ruko/config.json`,
+        ];
+
+        console.log(renderBox('Settings & Configuration Dashboard', lines));
+        return;
+      }
+
+      if (sub === 'context' || sub === 'ctx') {
+        if (!val) {
+          const activeTokens = Math.round(env.ctx.totalChars / 4);
+          const budgetTokens = Math.round(env.config.maxContextChars / 4);
+          console.log(
+            renderBox('Context Budget', [
+              `Karakter aktif: ${env.ctx.totalChars.toLocaleString()} chars (~${activeTokens.toLocaleString()} tokens)`,
+              `Budget limit: ${env.config.maxContextChars.toLocaleString()} chars (~${budgetTokens.toLocaleString()} tokens)`,
+              `Penggunaan: ${Math.round((env.ctx.totalChars / Math.max(env.config.maxContextChars, 1)) * 100)}%`,
+              `Hint: /settings context <128k|500k|unlimited|angka>`,
+            ]),
+          );
+          return;
+        }
+        if (val.toLowerCase() === 'unlimited' || val.toLowerCase() === 'inf' || val.toLowerCase() === 'bebas') {
+          const unlimitedChars = 2_000_000;
+          env.updateConfig({ maxContextChars: unlimitedChars });
+          console.log(green(`✔ Context window diatur bebas/unlimited (~${Math.round(unlimitedChars / 4).toLocaleString()} token / ${unlimitedChars.toLocaleString()} karakter).`));
+          return;
+        }
+        let tokens: number;
+        if (/^\d+[kK]$/.test(val)) {
+          tokens = parseInt(val.slice(0, -1), 10) * 1_000;
+        } else if (/^\d+[mM]$/.test(val)) {
+          tokens = parseInt(val.slice(0, -1), 10) * 1_000_000;
+        } else {
+          tokens = Number(val.replace(/_/g, ''));
+        }
+        if (!Number.isFinite(tokens) || tokens <= 0) {
+          console.log('Error: nilai context harus berupa angka positif (contoh: /settings context 128k, /settings context 500k, atau unlimited).');
+          return;
+        }
+        const newChars = (val.endsWith('k') || val.endsWith('K') || val.endsWith('m') || val.endsWith('M'))
+          ? tokens * 4
+          : (tokens < 50_000 ? tokens * 4 : tokens);
+        if (newChars < env.ctx.totalChars) {
+          console.log(
+            `Error: budget ${newChars.toLocaleString()} karakter tidak boleh lebih rendah dari jumlah karakter aktif saat ini (${env.ctx.totalChars.toLocaleString()} karakter / ~${Math.round(env.ctx.totalChars / 4).toLocaleString()} token).`,
+          );
+          return;
+        }
+        env.updateConfig({ maxContextChars: newChars });
+        console.log(green(`✔ Limit context window diperbarui menjadi ${newChars.toLocaleString()} karakter (~${Math.round(newChars / 4).toLocaleString()} token).`));
+        return;
+      }
+
+      if (sub === 'max-tokens' || sub === 'maxtokens' || sub === 'tokens' || sub === 'output') {
+        if (!val) {
+          console.log(`Max output tokens saat ini: ${env.config.maxOutputTokens ?? 4096} token.`);
+          console.log(`Gunakan: /settings max-tokens <jumlah> (contoh: /settings max-tokens 4096)`);
+          return;
+        }
+        let count = Number(val.replace(/[kK]/, '000'));
+        if (!Number.isFinite(count) || count <= 0 || !Number.isInteger(count)) {
+          console.log('Error: nilai max-tokens harus berupa bilangan bulat positif (contoh: 2048, 4096, 8192).');
+          return;
+        }
+        env.updateConfig({ maxOutputTokens: count });
+        console.log(green(`✔ Max output tokens per-turn diperbarui menjadi ${count.toLocaleString()} token.`));
+        return;
+      }
+
+      if (sub === 'role') {
+        if (!val) {
+          console.log(`Peran aktif saat ini: ${env.config.role ?? 'default'}.`);
+          console.log(`Pilihan: default, reviewer, teacher, minimal`);
+          return;
+        }
+        const allowedRoles = ['default', 'reviewer', 'teacher', 'minimal'];
+        const chosen = val.toLowerCase();
+        if (!allowedRoles.includes(chosen)) {
+          console.log(`Error: peran tidak dikenal "${val}". Pilihan: ${allowedRoles.join(', ')}`);
+          return;
+        }
+        env.updateConfig({ role: chosen });
+        console.log(green(`✔ Peran aktif diubah menjadi "${chosen}".`));
+        return;
+      }
+
+      if (sub === 'mode') {
+        if (!val) {
+          console.log(`Mode UI saat ini: ${env.config.mode ?? 'beginner'}. Pilihan: beginner, pro`);
+          return;
+        }
+        const chosen = val.toLowerCase();
+        if (chosen !== 'beginner' && chosen !== 'pro') {
+          console.log('Error: mode hanya dapat berupa "beginner" atau "pro".');
+          return;
+        }
+        env.updateConfig({ mode: chosen as UiMode });
+        console.log(green(`✔ Mode UI diubah menjadi "${chosen}".`));
+        return;
+      }
+
+      if (sub === 'approval') {
+        const v = val.toLowerCase();
+        if (v === 'on' || v === '1' || v === 'true') {
+          env.updateConfig({ approvalEnabled: true });
+          console.log(green('✔ Approval gate diaktifkan (perintah berisiko memerlukan konfirmasi).'));
+        } else if (v === 'off' || v === 'yolo' || v === '0' || v === 'false') {
+          env.updateConfig({ approvalEnabled: false });
+          console.log(yellow('⚠ Approval gate dinonaktifkan (YOLO mode aktif — perintah berisiko langsung dieksekusi).'));
+        } else {
+          console.log('Gunakan: /settings approval <on|off|yolo>');
+        }
+        return;
+      }
+
+      if (sub === 'anim') {
+        const v = val.toLowerCase();
+        if (v === 'on' || v === '1' || v === 'true') {
+          env.updateConfig({ funAnimations: true });
+          console.log(green('✔ Animasi terminal (Pac-Man spinner) diaktifkan.'));
+        } else if (v === 'off' || v === '0' || v === 'false') {
+          env.updateConfig({ funAnimations: false });
+          console.log(green('✔ Animasi terminal dinonaktifkan (spinner titik minimalis).'));
+        } else {
+          console.log('Gunakan: /settings anim <on|off>');
+        }
+        return;
+      }
+
+      if (sub === 'save') {
+        const ws = getWorkspaceRoot();
+        const configPath = join(ws, '.ruko', 'config.json');
+        saveConfig(env.config, configPath);
+        console.log(green(`✔ Konfigurasi aktif disimpan ke ${configPath}.`));
+        return;
+      }
+
+      console.log(`Perintah settings tidak dikenal: "${sub}". Ketik /settings untuk melihat daftar opsi.`);
+    },
+  },
+  {
     name: 'setctx',
     help: 'Atur batas karakter context window (/setctx <jumlah_karakter|50k>).',
     hint: '[jumlah|50k]',
@@ -477,7 +662,7 @@ const COMMANDS: CommandDef[] = [
             `Karakter aktif: ${env.ctx.totalChars} chars`,
             `Budget limit: ${env.config.maxContextChars} chars (~${Math.round(env.config.maxContextChars / 4)} tokens)`,
             `Penggunaan: ${Math.round((env.ctx.totalChars / Math.max(env.config.maxContextChars, 1)) * 100)}%`,
-            `Hint: /setctx <angka|50k> atau /settoken <token|16k>`,
+            `Hint: /settings context <128k|500k|unlimited> atau /setctx <angka|50k>`,
           ]),
         );
         return;
@@ -520,7 +705,7 @@ const COMMANDS: CommandDef[] = [
             `Estimasi token aktif: ~${activeTokens} tokens (${env.ctx.totalChars} chars)`,
             `Budget token: ~${budgetTokens} tokens (${env.config.maxContextChars} chars)`,
             `Penggunaan: ${Math.round((env.ctx.totalChars / Math.max(env.config.maxContextChars, 1)) * 100)}%`,
-            `Hint: /settoken 16k (menjadi 64,000 chars)`,
+            `Hint: /settings context <token|16k> atau /settoken 16k`,
           ]),
         );
         return;
@@ -548,6 +733,34 @@ const COMMANDS: CommandDef[] = [
 
       env.updateConfig({ maxContextChars: newChars });
       console.log(green(`✔ Budget context window diperbarui menjadi ${tokens} token (${newChars} karakter, rasio 1 token ≈ 4 karakter).`));
+    },
+  },
+  {
+    name: 'ctx',
+    aliases: ['status'],
+    help: 'Lihat limit context aktif, token budget, dan persentase penggunaan saat ini.',
+    run: (_args, env) => {
+      const budgetChars = env.config.maxContextChars;
+      const budgetTokens = Math.round(budgetChars / 4);
+      const usedChars = env.ctx.totalChars;
+      const usedTokens = Math.round(usedChars / 4);
+      const pct = budgetChars > 0 ? Math.min(100, Math.round((usedChars / budgetChars) * 100)) : 0;
+      const ws = getWorkspaceRoot();
+      const cfgPath = join(ws, '.ruko', 'config.json');
+      const isPersistent = existsSync(cfgPath);
+
+      console.log(
+        renderBox('Context Budget & Status Aktif', [
+          `Model aktif: ${env.llm.model} (${env.llm.name})`,
+          `Context window limit aktif: ${budgetChars.toLocaleString()} karakter (~${formatK(budgetChars)})`,
+          `Token budget aktif: ~${budgetTokens.toLocaleString()} tokens (1 token ≈ 4 karakter)`,
+          `Karakter aktif saat ini: ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}%`,
+          `Pesan dalam konteks: ${env.ctx.size} pesan`,
+          `Status konfigurasi: ${isPersistent ? 'Tersimpan di .ruko/config.json (survive lintas sesi)' : 'Menggunakan nilai default sesi (belum disimpan)'}`,
+          `───────────────────────────────────────────────────────`,
+          `Hint: Atur budget dengan /settings context <128k|500k|unlimited>`,
+        ]),
+      );
     },
   },
   {
@@ -608,19 +821,27 @@ const COMMANDS: CommandDef[] = [
       const s = env.agent?.sessionUsage;
       const totalPromptTokens = s?.promptTokens ?? 0;
       const totalCompTokens = s?.completionTokens ?? 0;
+      const totalCacheTokens = s?.cacheTokens ?? 0;
       const totalTokens = s?.totalTokens ?? 0;
       const totalTurns = s?.totalTurns ?? 0;
+      const activeMs = s?.activeWorkingMs ?? 0;
+      const avgMs = totalTurns > 0 ? activeMs / totalTurns : 0;
 
       const lines = [
-        `model: ${env.llm.model} (${env.llm.name})`,
+        `model: ${env.llm.model || '(none)'} (${env.llm.name})`,
         `role: ${env.config.role ?? 'default'}  |  mode: ${env.config.mode ?? 'beginner'}`,
         `backend: ${env.llm.isConfigured ? 'LLM mode' : 'manual mode'}`,
         `messages: ${env.ctx.size} pesan`,
-        `context window: ${used}/${budget} chars (${pct}% of ${formatK(budget)}) ~${activeCtxTokens}/${budgetTokens} tokens`,
+        `context window: ${used.toLocaleString()}/${budget.toLocaleString()} chars (${pct}%) ~${activeCtxTokens.toLocaleString()}/${budgetTokens.toLocaleString()} tokens`,
         `session id: ${env.handle.getSessionId() ?? '(belum disimpan)'}`,
+        `───────────────────────────────────────────────────────`,
+        `WAKTU KERJA AKTIF AGENT:`,
+        `  • Total waktu kerja:  ${formatDuration(activeMs)} (${totalTurns} turn)`,
+        `  • Rata-rata per turn: ${totalTurns > 0 ? formatDuration(avgMs) : '-'}`,
         `───────────────────────────────────────────────────────`,
         `total token sesi ini (${totalTurns} turn):`,
         `  ↑ prompt:     ~${totalPromptTokens} tokens (${formatK(s?.promptChars ?? 0)} chars)`,
+        `  ⚡ cache:      ~${totalCacheTokens} tokens`,
         `  ↓ completion: ~${totalCompTokens} tokens (${formatK(s?.completionChars ?? 0)} chars)`,
         `  Σ total:      ~${totalTokens} tokens (rasio estimasi 1 token ≈ 4 chars)`,
       ];
@@ -629,8 +850,9 @@ const COMMANDS: CommandDef[] = [
       if (u && (u.promptChars > 0 || u.completionChars > 0)) {
         const uPromptTok = Math.round(u.promptChars / 4);
         const uCompTok = Math.round(u.completionChars / 4);
+        const uDur = u.durationMs ? `⏱ ${formatDuration(u.durationMs)} · ` : '';
         lines.push(
-          `turn terakhir: ↑ ${formatK(u.promptChars)} chars (~${uPromptTok} tok) · ↓ ${formatK(u.completionChars)} chars (~${uCompTok} tok)`,
+          `turn terakhir: ${uDur}↑ ${formatK(u.promptChars)} chars (~${uPromptTok} tok) · ↓ ${formatK(u.completionChars)} chars (~${uCompTok} tok)`,
         );
       }
 

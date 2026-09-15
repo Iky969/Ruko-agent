@@ -350,12 +350,34 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       // Endpoint ignored `stream` — parse the plain JSON completion instead.
       const data = (await response.json()) as {
         choices?: Array<{
-          message?: { content?: string | null };
+          message?: {
+            content?: string | null;
+            tool_calls?: Array<{
+              id?: string;
+              type?: string;
+              function?: { name?: string; arguments?: string };
+            }>;
+          };
           finish_reason?: string | null;
         }>;
       };
       this.lastFinishReason = data.choices?.[0]?.finish_reason ?? 'stop';
-      const content = data.choices?.[0]?.message?.content ?? '';
+      let content = data.choices?.[0]?.message?.content ?? '';
+      const apiToolCalls = data.choices?.[0]?.message?.tool_calls;
+      if (Array.isArray(apiToolCalls) && apiToolCalls.length > 0) {
+        for (const tc of apiToolCalls) {
+          const fnName = tc.function?.name;
+          if (fnName) {
+            let fnArgs: Record<string, unknown> = {};
+            try {
+              fnArgs = JSON.parse(tc.function?.arguments || '{}');
+            } catch {
+              // fallback
+            }
+            content += `\n\`\`\`tool\n${JSON.stringify({ tool: fnName, ...fnArgs })}\n\`\`\`\n`;
+          }
+        }
+      }
       if (content) options?.onToken?.(content);
       return content;
     }
@@ -363,6 +385,8 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     let full = '';
     let buffer = '';
     const decoder = new TextDecoder();
+    const streamToolCalls: Map<number, { id?: string; name: string; args: string }> = new Map();
+
     const processLine = (line: string): void => {
       const trimmed = line.trim();
       if (!trimmed.startsWith('data:')) return;
@@ -371,7 +395,15 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       try {
         const parsed = JSON.parse(payload) as {
           choices?: Array<{
-            delta?: { content?: string | null };
+            delta?: {
+              content?: string | null;
+              tool_calls?: Array<{
+                index?: number;
+                id?: string;
+                type?: string;
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
             finish_reason?: string | null;
           }>;
         };
@@ -379,10 +411,21 @@ export class OpenAiCompatibleProvider implements LLMProvider {
         if (finishReason) {
           this.lastFinishReason = finishReason;
         }
-        const token = parsed.choices?.[0]?.delta?.content;
+        const delta = parsed.choices?.[0]?.delta;
+        const token = delta?.content;
         if (token) {
           full += token;
           options?.onToken?.(token);
+        }
+        if (Array.isArray(delta?.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            const existing = streamToolCalls.get(idx) ?? { name: '', args: '' };
+            if (tc.id) existing.id = tc.id;
+            if (tc.function?.name) existing.name += tc.function.name;
+            if (tc.function?.arguments) existing.args += tc.function.arguments;
+            streamToolCalls.set(idx, existing);
+          }
         }
       } catch {
         // Keep-alive or malformed SSE frame — ignore.
@@ -400,6 +443,19 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     buffer += decoder.decode();
     if (buffer.trim()) {
       for (const line of buffer.split(/\r?\n/)) processLine(line);
+    }
+    if (streamToolCalls.size > 0) {
+      for (const [, tc] of streamToolCalls) {
+        if (tc.name) {
+          let parsedArgs: Record<string, unknown> = {};
+          try {
+            parsedArgs = JSON.parse(tc.args || '{}');
+          } catch {
+            // fallback
+          }
+          full += `\n\`\`\`tool\n${JSON.stringify({ tool: tc.name, ...parsedArgs })}\n\`\`\`\n`;
+        }
+      }
     }
     if (!this.lastFinishReason) {
       this.lastFinishReason = 'stop';

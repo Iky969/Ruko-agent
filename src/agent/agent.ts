@@ -6,6 +6,9 @@ import {
   inferStepDescription,
   LineGate,
   RevealFilter,
+  stripThoughtBlocks,
+  ThoughtSlidingWindow,
+  ThoughtStreamParser,
   WorkflowTree,
   yellow,
 } from '../core/ui.js';
@@ -34,6 +37,8 @@ const LOOP_REPEAT_LIMIT = 2;
 export interface TurnUsage {
   promptChars: number;
   completionChars: number;
+  durationMs?: number;
+  cacheTokens?: number;
 }
 
 /** Cumulative token usage tracked across an entire interactive session. */
@@ -42,8 +47,11 @@ export interface SessionUsage {
   completionChars: number;
   promptTokens: number;
   completionTokens: number;
+  cacheTokens: number;
   totalTokens: number;
   totalTurns: number;
+  activeWorkingMs: number;
+  lastTurnDurationMs: number;
 }
 
 /**
@@ -70,8 +78,11 @@ export class Agent {
     completionChars: 0,
     promptTokens: 0,
     completionTokens: 0,
+    cacheTokens: 0,
     totalTokens: 0,
     totalTurns: 0,
+    activeWorkingMs: 0,
+    lastTurnDurationMs: 0,
   };
   /** Plan mode toggle — enforced at the tool layer, not just in the prompt. */
   planMode = false;
@@ -112,8 +123,11 @@ export class Agent {
       completionChars: 0,
       promptTokens: 0,
       completionTokens: 0,
+      cacheTokens: 0,
       totalTokens: 0,
       totalTurns: 0,
+      activeWorkingMs: 0,
+      lastTurnDurationMs: 0,
     };
     this.lastUsage = null;
   }
@@ -143,12 +157,23 @@ export class Agent {
 
   /** Returns the assistant's textual response ('' when nothing to say). */
   async handleInstruction(instruction: string, signal?: AbortSignal): Promise<string> {
+    const startTime = Date.now();
     this.callCounts.clear();
     this.lastCallSignature = null;
     this.lastUsage = null;
-    return this.llmProvider.isConfigured
-      ? this.runWithLlm(instruction, signal)
-      : this.runManual(instruction);
+    try {
+      return await (this.llmProvider.isConfigured
+        ? this.runWithLlm(instruction, signal)
+        : this.runManual(instruction));
+    } finally {
+      const elapsed = Date.now() - startTime;
+      this.sessionUsage.activeWorkingMs += elapsed;
+      this.sessionUsage.lastTurnDurationMs = elapsed;
+      const u = this.lastUsage as TurnUsage | null;
+      if (u) {
+        u.durationMs = elapsed;
+      }
+    }
   }
 
   /** Manual mode: heuristic instruction handling without an AI backend. */
@@ -205,6 +230,16 @@ export class Agent {
     });
 
     let emptyFollowUpSent = false;
+    let actionNudgeSent = false;
+    const executedMutatingTools = new Set<string>();
+    const MUTATING_TOOLS = new Set([
+      'write_file',
+      'edit_file',
+      'patch_file',
+      'delete_file',
+      'move_file',
+      'revert_file',
+    ]);
 
     try {
       for (let i = 0; i < MAX_TOOL_ITERATIONS; i += 1) {
@@ -221,17 +256,36 @@ export class Agent {
         usage.promptChars += messages.reduce((s, m) => s + m.content.length, 0);
         const usePacman = this.config.funAnimations ?? (this.config.mode !== 'pro');
         const spinner = createSpinner('Thinking', { pacman: usePacman });
+        const slidingWindow = new ThoughtSlidingWindow({
+          maxWords: 12,
+          onRender: (line) => {
+            spinner.stop();
+            process.stdout.write(line);
+          },
+        });
         const gate = new LineGate((text) => {
+          slidingWindow.clear();
           spinner.stop();
           process.stdout.write('\r\u001b[2K');
           process.stdout.write(formatTerminalMarkdown(text));
         });
         const reveal = new RevealFilter((text) => gate.push(text));
+        const thoughtParser = new ThoughtStreamParser({
+          onText: (text) => reveal.feed(text),
+          onThought: (thoughtChunk) => {
+            spinner.stop();
+            slidingWindow.feed(thoughtChunk);
+          },
+          onThoughtEnd: () => {
+            slidingWindow.clear();
+          },
+        });
         let raw: string;
         try {
           raw = await this.llmProvider.chat(messages, {
-            onToken: (token) => reveal.feed(token),
+            onToken: (token) => thoughtParser.feed(token),
             signal,
+            maxTokens: this.config.maxOutputTokens ?? 4096,
           });
         } catch (err) {
           // v0.7: an interrupted stream rejects with AbortError — that is a
@@ -246,6 +300,8 @@ export class Agent {
           }
           throw err;
         } finally {
+          thoughtParser.end();
+          slidingWindow.clear();
           reveal.end();
           spinner.stop();
         }
@@ -255,7 +311,29 @@ export class Agent {
         // preamble that sat right before the hidden ```tool block (§2).
         const iterStreamed = gate.finish(calls.length === 0);
         if (calls.length === 0) {
-          const text = stripToolBlocks(raw);
+          const text = stripThoughtBlocks(stripToolBlocks(raw));
+
+          // Multi-step task completion guard:
+          // If the instruction requested modification (edit/fix/write), but only inspection tools ran,
+          // nudge the agent to apply the requested edit instead of prematurely halting.
+          const isActionTask = /\b(perbaiki|edit|ubah|ganti|tulis|buat|hapus|fix|patch|write|modify|repair|update|implement|resolve)\b/i.test(instruction);
+          const hasMutated = executedMutatingTools.size > 0;
+
+          if (isActionTask && !hasMutated && (tree.currentStep > 0 || i > 0) && !actionNudgeSent && i < MAX_TOOL_ITERATIONS - 1) {
+            actionNudgeSent = true;
+            messages.push({
+              role: 'assistant',
+              content: raw.trim(),
+              timestamp: new Date().toISOString(),
+            });
+            messages.push({
+              role: 'user',
+              content: 'Instruksi meminta untuk memperbaiki/mengubah kode atau berkas, namun sejauh ini baru tahap pemeriksaan/pembacaan dan belum ada tool modifikasi (seperti patch_file, edit_file, atau write_file) yang dipanggil. Silakan bernalar dalam <thought> dan lanjutkan dengan memanggil tool yang sesuai untuk menerapkan perbaikan tersebut sekarang.',
+              timestamp: new Date().toISOString(),
+            });
+            continue;
+          }
+
           // Tangani Empty Content: Jika respons model setelah eksekusi tool menghasilkan
           // text/content kosong padahal finish_reason adalah "stop", jangan langsung mencetak "(no response)".
           // Kirimkan follow-up message internal (role: "user") untuk meminta model merangkum hasil tool yang baru dijalankan.
@@ -286,6 +364,12 @@ export class Agent {
           }
           this.lastResponseStreamed = iterStreamed;
           return finalText;
+        }
+
+        for (const call of calls) {
+          if (MUTATING_TOOLS.has(call.tool)) {
+            executedMutatingTools.add(call.tool);
+          }
         }
 
         // Text streamed before a tool call needs a line break before the logs.
@@ -397,6 +481,11 @@ export class Agent {
       if (usage.promptChars > 0 || usage.completionChars > 0) {
         const pTok = Math.round(usage.promptChars / 4);
         const cTok = Math.round(usage.completionChars / 4);
+        const cached = (this.llmProvider as any)?.lastUsage?.cachedTokens ?? 0;
+        if (cached > 0) {
+          usage.cacheTokens = cached;
+          this.sessionUsage.cacheTokens += cached;
+        }
         this.sessionUsage.promptChars += usage.promptChars;
         this.sessionUsage.completionChars += usage.completionChars;
         this.sessionUsage.promptTokens += pTok;

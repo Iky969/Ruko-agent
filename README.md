@@ -1,10 +1,10 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-1.7.1-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.7.2-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-464%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-482%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
@@ -241,7 +241,7 @@ Ketik `/` di terminal untuk memunculkan menu interaktif, atau gunakan perintah b
 
 | Perintah | Fungsi |
 | :--- | :--- |
-| `/help` | Menampilkan panduan bantuan lengkap. |
+| `/help` (atau `/?`) | Menampilkan panduan bantuan perintah slash. |
 | `/exit` | Keluar dari aplikasi (sesi otomatis tersimpan). |
 | `/login` | Membuka wizard konfigurasi provider dan tes koneksi langsung. |
 | `/new` | Menyimpan sesi saat ini lalu memulai sesi percakapan baru. |
@@ -253,6 +253,7 @@ Ketik `/` di terminal untuk memunculkan menu interaktif, atau gunakan perintah b
 | `/compact` | Memaksa kompresi riwayat percakapan saat ini. |
 | `/plan on \| off` | Mode rencana: mengunci tool penulisan dan eksekusi di level kode. |
 | `/undo [path]` | Membatalkan perubahan berkas terakhir atau berkas spesifik dari jurnal `.ruko/undo/`. |
+| `/settings` | Dashboard konfigurasi terpadu: context window, max tokens, role, mode, approval, anim. |
 | `/role [nama]` | Mengganti peran sistem AI (`default`, `reviewer`, `teacher`, `minimal`). |
 | `/mode beginner \| pro` | Mode pengguna: panduan mendalam (`beginner`) atau ringkas (`pro`). |
 | `/anim [on\|off]` | Mengaktifkan/menonaktifkan animasi Pac-Man saat AI berpikir. |
@@ -260,10 +261,9 @@ Ketik `/` di terminal untuk memunculkan menu interaktif, atau gunakan perintah b
 | `/exec <perintah>` | Menjalankan perintah shell langsung dari baris perintah Ruko. |
 | `/history [n]` | Menampilkan *n* pesan riwayat percakapan terakhir. |
 | `/context [set <n>]` | Menampilkan kapasitas memori aktif atau menyetel batas budget karakter baru. |
-| `/setctx [jumlah]` | Menampilkan statistik atau menyetel budget karakter context window (`50k`, `80000`). |
-| `/settoken [token]` | Menampilkan statistik atau menyetel budget context window berbasis estimasi token (`16k`, `32000`, rasio 1:4). |
+| `/ctx` | Memeriksa limit context window aktif, token budget, dan persentase penggunaan. |
 | `/memory [clear]` | Menampilkan isi memori persisten atau mereset (`.ruko/memory.md`). |
-| `/usage` | Menampilkan statistik konsumsi karakter dan token sesi. |
+| `/usage` | Menampilkan statistik pemakaian token (prompt, cache, output) dan waktu kerja aktif agen. |
 | `/config [set <k> <v> \| setup]` | Menampilkan atau memperbarui konfigurasi sistem. |
 | `/model [nama]` | Melihat daftar model yang tersedia atau beralih model aktif. |
 

@@ -4,6 +4,67 @@
 
 ---
 
+### v1.7.2 (15 September 2026) — Thought Stream Sliding Window, System Prompt Reasoning Contract, DeepSeek DSML Tool Parser (BUG A), Multi-Step Task Completion Guard (BUG B), Active Context Command /ctx (BUG C), & Responsive Status Bar (BUG D)
+
+#### Ditambahkan & Diperbarui
+- **Thought Stream Live Sliding Window (`src/core/ui.ts`, `src/agent/agent.ts`)**:
+  * Mengimplementasikan `ThoughtSlidingWindow`: buffer kata FIFO aktif (default 12–15 kata) yang dirender live ke terminal menggunakan warna abu-abu redup (ANSI code `\x1b[90m` / `dim`), carriage return (`\r`), dan pembersihan baris ANSI (`\x1b[2K`). Teks penalaran ter-update di tempat tanpa mencemari terminal dengan baris baru.
+  * Mengimplementasikan `ThoughtStreamParser`: memisahkan token stream penalaran (`<thought>...</thought>` atau `<think>...</think>`) dan teks jawaban biasa secara real-time.
+  * Begitu fase penalaran selesai atau model memanggil tool, baris sliding window dibersihkan secara otomatis (`onClear` / `clear()`).
+  * Interupsi tombol ESC tetap responsif dan membatalkan turn secara bersih saat pemikiran sedang mengalir.
+- **Pembaruan Kontrak Penalaran System Prompt (`src/agent/roles.ts`)**:
+  * Mewajibkan model mengeluarkan blok penalaran ringkas di dalam `<thought>...</thought>` sebelum memanggil tool atau menyimpulkan jawaban.
+  * Mewajibkan model menyertakan rencana cadangan dan analisis penyebab di dalam `<thought>` jika tool mengembalikan error atau hasil kosong.
+  * Melarang keras menyimpulkan task sebagai "tuntas" / "selesai" tanpa pengujian atau eksekusi mutasi konkret jika instruksi meminta perbaikan/edit kode.
+- **BUG A: Parser Tool-Call DeepSeek DSML & XML (`src/core/ui.ts`, `src/agent/llm.ts`, `src/agent/tools.ts`)**:
+  * *Root Cause*: Model DeepSeek (`deepseek-v4.1-flash`) memancarkan tool call dalam format DeepSeek DSML (`<|DSML|invoke name="...">` atau varian unicode full-width `<｜DSML｜invoke name="...">`) serta `<tool_call>...`, yang sebelumnya tidak dikenali parser internal Ruko dan bocor ke layar pengguna.
+  * *Solusi*:
+    - `RevealFilter` (`src/core/ui.ts`) diperbarui untuk menahan dan menyembunyikan tag DSML dan XML `<tool_call>` selama proses streaming teks ke terminal, dengan regex penutup yang presisi (`<\/(?:\||｜)DSML(?:\||｜)(?:invoke|tool_calls)[^>]*>`).
+    - `parseToolCalls` dan `stripToolBlocks` (`src/agent/tools.ts`) diperkaya dengan parser DSML dan XML untuk mengekstrak nama tool dan parameter (string, boolean, angka) menjadi objek `ToolCall` standar.
+    - `OpenAiCompatibleProvider` (`src/agent/llm.ts`) diperbarui untuk merekonstruksi delta `tool_calls` pada response streaming native.
+- **BUG B: Multi-Step Task Completion Guard / Anti-Premature Halt (`src/agent/agent.ts`)**:
+  * *Root Cause*: Pada instruksi seperti "baca file dan perbaiki bug", LLM membaca file pada turn 1, lalu pada turn 2 memberikan penalaran awal atau analisis temuan tanpa memanggil tool. Pada implementasi lama, ketiadaan tool call langsung dianggap sebagai sinyal selesai sehingga loop berhenti dan menampilkan `[Selesai] Semua langkah tuntas` sebelum tool edit dipanggil.
+  * *Solusi*:
+    - Menambahkan pelacak mutating tools yang sudah dieksekusi (`executedMutatingTools`: `write_file`, `edit_file`, `patch_file`, `delete_file`, `move_file`, `revert_file`).
+    - Mendeteksi tugas modifikasi (`isActionTask`: `perbaiki`, `edit`, `ubah`, `ganti`, `tulis`, `buat`, `hapus`, `fix`, `patch`, `modify`, `repair`, dsb.).
+    - Jika tugas meminta aksi mutasi tetapi baru tahap inspeksi (belum ada mutating tool yang jalan) dan model mengeluarkan teks biasa tanpa tool, Ruko menyuntikkan *internal nudge message* (`actionNudgeSent`) yang menginstruksikan model untuk bernalar dalam `<thought>` dan melanjutkan memanggil tool modifikasi yang sesuai (seperti `patch_file`/`edit_file`).
+- **BUG C: Perintah Slash /ctx & /status untuk Verifikasi Context Budget (`src/agent/commands.ts`)**:
+  * *Root Cause*: Perintah `/setctx` dan `/settoken` hanya dapat menyetel nilai, tetapi tidak ada perintah read-only untuk memverifikasi context limit, token budget aktif, dan persentase penggunaan saat ini.
+  * *Solusi*:
+    - Menambahkan perintah `/ctx` (dan alias `/status`) yang menampilkan tabel informatif: Model aktif, Provider, Context Window Limit (karakter & estimasi token), Penggunaan Saat Ini (karakter, token, persentase), Batas Peringatan (Warn Threshold), dan Status Persistensi Konfigurasi.
+- **BUG D: Status Bar Clamping & Responsivitas Layar Sempit Termux (`src/core/ui.ts`)**:
+  * *Root Cause*: Perhitungan padding dan pemotongan kolom terminal pada layar sempit (< 40 kolom, misal Termux Android) memotong bagian kanan status bar yang memuat informasi persentase konteks `ctx X%`.
+  * *Solusi*:
+    - Menata ulang layout rendering status bar: memprioritaskan persentase konteks `ctx X%` dan badge status penting di sisi kanan, serta memotong nama model secara proporsional jika lebar terminal sangat sempit (<= 40 kolom), menjamin `ctx X%` selalu terlihat utuh.
+- **Kebebasan Konteks di Awal (Uncapped / Unbounded Context Window) (`src/types.ts`)**:
+  * Mengubah default `maxContextChars` dari 30.000 menjadi **512.000 karakter (~128.000 token)** dengan rasio standar 1:4.
+  * Memberikan kebebasan penuh di awal kepada pengguna tanpa pemotongan atau kompresi riwayat percakapan secara agresif dan diam-diam.
+  * Menambahkan opsi `maxOutputTokens` (default: 4096) pada `AgentConfig` dan meneruskannya ke opsi `maxTokens` panggilan LLM per-turn.
+- **Dashboard Pengaturan Terpadu `/settings` (`src/agent/commands.ts`)**:
+  * Menyatukan konfigurasi sistem ke dalam satu pintu `/settings` (alias: `/setting`, `/set`):
+    - `/settings`: Menampilkan overview dashboard berisikan status Model & Provider, Token & Context Budget (Context Window, Karakter Aktif, Max Output Tokens), Behavior & Safety (Role, Mode, Approval Gate, Exec Timeout, Fun Animations).
+    - `/settings context <128k|500k|unlimited>`: Mengatur limit context window (mendukung satuan k/m atau mode unlimited).
+    - `/settings max-tokens <jumlah>`: Mengatur batas maksimum output token LLM per-turn.
+    - `/settings role <default|reviewer|teacher|minimal>`: Beralih peran sistem.
+    - `/settings mode <beginner|pro>`: Beralih mode UI.
+    - `/settings approval <on|off|yolo>`: Mengatur approval gate.
+    - `/settings anim <on|off>`: Mengatur animasi Pac-Man spinner.
+    - `/settings save`: Menyimpan konfigurasi aktif ke `.ruko/config.json`.
+  * Mempertahankan kompatibilitas `/setctx` dan `/settoken` tanpa merusak skrip atau kebiasaan lama.
+- **Peningkatan Metrik `/usage`: Waktu Kerja Aktif Agen & Cache Tokens (`src/agent/commands.ts`, `src/agent/agent.ts`, `src/core/ui.ts`)**:
+  * **Waktu Kerja Aktif Agen (`activeWorkingMs`)**: Menghitung murni durasi kerja agen saat berpikir, streaming inferensi LLM, dan mengeksekusi tool (bukan waktu pengguna idle membaca layar).
+  * Menampilkan total waktu kerja aktif agen dan rata-rata durasi per-turn dengan format durasi yang ramah pembaca via helper `formatDuration` (misal: `500ms`, `4.2s`, `1m 24s`).
+  * **Metrik Token Lengkap**: Menampilkan rincian token `prompt`, `cache (read/hit)`, `output (generated)`, dan `total akumulasi`.
+  * Menampilkan durasi spesifik turn terakhir pada baris ringkasan giliran.
+- **Peningkatan UX Prompt Placeholder & Bantuan: `/? for help, ask anything...` (`src/core/loop.ts`, `src/agent/commands.ts`)**:
+  * Mengubah teks placeholder kolom ketik terminal menjadi `/? for help, ask anything...` untuk meningkatkan *discoverability* bagi pengguna baru.
+  * Mendaftarkan shortcut `/?` sebagai alias resmi dari perintah `/help`.
+- **Pengujian & Verifikasi Komprehensif (`src/tests/thought_and_feedback_bugs.test.ts`, `src/tests/context_commands_v17.test.ts`)**:
+  * Menambahkan unit test baru untuk memvalidasi dashboard `/settings` beserta sub-perintahnya (`context`, `max-tokens`, `role`, `mode`, `approval`, `anim`), helper `formatDuration`, pelacakan waktu kerja aktif agen pada `Agent.sessionUsage.activeWorkingMs`, dan alias `/?`.
+  * Total unit test meningkat menjadi **482 tests passed** (0 fail, 0 errors), dan `npm run typecheck` 100% bersih tanpa galat.
+
+---
+
 ### v1.7.1 (15 September 2026) — Security Hardening (feedback.txt Audit VULN-01–05), Workspace Trust, HTTP Protocol Confirmation, Context Commands (/setctx, /settoken, /usage), Subagent Deadlines, & Terminal Sanitization
 
 #### Ditambahkan & Diperbarui

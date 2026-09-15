@@ -78,10 +78,16 @@ export interface ToolCall {
 }
 
 const TOOL_BLOCK_RE = /```tool\s*\n([\s\S]*?)```/g;
+const DSML_INVOKE_RE = /<(?:\||｜)DSML(?:\||｜)invoke\s+name=["']?([^"'>\s]+)["']?[^>]*>([\s\S]*?)<\/(?:\||｜)DSML(?:\||｜)invoke>/gi;
+const DSML_INVOKE_SELF_RE = /<(?:\||｜)DSML(?:\||｜)invoke\s+name=["']?([^"'>\s]+)["']?[^>]*\/>/gi;
+const DSML_PARAM_RE = /<(?:\||｜)DSML(?:\||｜)parameter\s+name=["']?([^"'>\s]+)["']?(?:\s+string=["']?(true|false)["']?)?[^>]*>([\s\S]*?)<\/(?:\||｜)DSML(?:\||｜)parameter>/gi;
+const XML_TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
 
-/** Extracts all tool-call blocks from a model reply. */
+/** Extracts all tool-call blocks from a model reply (markdown fence, DeepSeek DSML, or XML). */
 export function parseToolCalls(text: string): ToolCall[] {
   const calls: ToolCall[] = [];
+
+  // 1. Standard markdown ```tool ... ``` fences
   for (const match of text.matchAll(TOOL_BLOCK_RE)) {
     try {
       const parsed = JSON.parse(match[1].trim()) as ToolCall;
@@ -92,12 +98,78 @@ export function parseToolCalls(text: string): ToolCall[] {
       // Malformed block — ignore it, the model may still have answered in text.
     }
   }
+
+  // 2. DeepSeek DSML (<|DSML|invoke name="...">... or full-width <｜DSML｜invoke...>)
+  for (const match of text.matchAll(DSML_INVOKE_RE)) {
+    const tool = match[1].trim();
+    const body = match[2];
+    const params: Record<string, unknown> = {};
+
+    for (const pMatch of body.matchAll(DSML_PARAM_RE)) {
+      const pName = pMatch[1].trim();
+      const isString = pMatch[2]?.toLowerCase() === 'true';
+      const pValRaw = pMatch[3].trim();
+      if (isString) {
+        params[pName] = pValRaw;
+      } else {
+        try {
+          params[pName] = JSON.parse(pValRaw);
+        } catch {
+          params[pName] = pValRaw;
+        }
+      }
+    }
+
+    if (tool) {
+      calls.push({ tool, ...params });
+    }
+  }
+
+  for (const match of text.matchAll(DSML_INVOKE_SELF_RE)) {
+    const tool = match[1].trim();
+    if (tool) {
+      calls.push({ tool });
+    }
+  }
+
+  // 3. Generic XML <tool_call>...</tool_call> (Qwen / GLM / OpenAI-in-XML)
+  for (const match of text.matchAll(XML_TOOL_CALL_RE)) {
+    try {
+      const rawJson = match[1].trim();
+      const parsed = JSON.parse(rawJson);
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.name === 'string' && parsed.name.length > 0) {
+          let args = parsed.arguments ?? {};
+          if (typeof args === 'string') {
+            try {
+              args = JSON.parse(args);
+            } catch {
+              // fallback raw string
+            }
+          }
+          calls.push({ tool: parsed.name, ...(typeof args === 'object' && args ? args : {}) });
+        } else if (typeof parsed.tool === 'string' && parsed.tool.length > 0) {
+          calls.push(parsed as ToolCall);
+        }
+      }
+    } catch {
+      // Malformed block — ignore.
+    }
+  }
+
   return calls;
 }
 
-/** Removes tool-call blocks from a model reply, keeping any surrounding text. */
+/** Removes all tool-call blocks (markdown, DSML, XML) from a model reply, keeping surrounding text. */
 export function stripToolBlocks(text: string): string {
-  return text.replace(TOOL_BLOCK_RE, '').trim();
+  if (!text) return '';
+  return text
+    .replace(TOOL_BLOCK_RE, '')
+    .replace(DSML_INVOKE_RE, '')
+    .replace(DSML_INVOKE_SELF_RE, '')
+    .replace(/<\/?(?:\||｜)DSML(?:\||｜)[^>]*>/gi, '')
+    .replace(XML_TOOL_CALL_RE, '')
+    .trim();
 }
 
 /** Dependencies a tool call may need (approval gate, UI logger). */
