@@ -446,6 +446,15 @@ export function isSensitivePath(targetPath: string, workspaceRoot: string = getW
     ) {
       return true;
     }
+
+    // 8. /proc/*/environ (Linux process environment pseudofiles)
+    if (
+      /(?:^|\/)proc\/(?:self|\$\$|\$ppid|[0-9]+|\*|[a-z0-9_$]+)\/environ\b/i.test(candLower) ||
+      /(?:^|\/)proc\/(?:self|\$\$|\$ppid|[0-9]+|\*|[a-z0-9_$]+)\/environ\b/i.test(relLower) ||
+      /(?:^|\/)proc\/(?:self|\$\$|\$ppid|[0-9]+|\*|[a-z0-9_$]+)\/environ\b/i.test(absLower)
+    ) {
+      return true;
+    }
   }
 
   return false;
@@ -826,6 +835,91 @@ function checkEnvSegment(segment: string): boolean {
   return !hasCommand;
 }
 
+/** Helper to detect runtime scripting inline commands attempting to dump or access environment variables. */
+function checkRuntimeInlineEnv(segment: string): boolean {
+  const trimmed = segment.trim();
+
+  // Node / Bun / Deno: node -e / --eval "..."
+  if (/\b(?:node|nodejs|bun|deno)\s+(?:-[a-z]*e\b|--eval\b)/i.test(trimmed)) {
+    if (/\b(?:process\.env|Deno\.env)\b/.test(trimmed)) {
+      return true;
+    }
+  }
+
+  // Python: python -c "..."
+  if (/\bpython[23]?\s+(?:-[a-z]*c\b)/i.test(trimmed)) {
+    if (/\b(?:os\.)?(?:environ|getenv)\b/.test(trimmed)) {
+      return true;
+    }
+  }
+
+  // Ruby: ruby -e "..."
+  if (/\bruby\s+(?:-[a-z]*e\b)/i.test(trimmed)) {
+    if (/\bENV\b/.test(trimmed)) {
+      return true;
+    }
+  }
+
+  // Perl: perl -e "..."
+  if (/\bperl\s+(?:-[a-z]*e\b)/i.test(trimmed)) {
+    if (/%ENV|\$ENV\{/.test(trimmed)) {
+      return true;
+    }
+  }
+
+  // PHP: php -r "..."
+  if (/\bphp\s+(?:-[a-z]*r\b)/i.test(trimmed)) {
+    if (/\$(?:_ENV|_SERVER)\b|\bgetenv\b/.test(trimmed)) {
+      return true;
+    }
+  }
+
+  // PowerShell: pwsh -c / powershell -Command "..."
+  if (/\b(?:pwsh|powershell)\s+(?:-[a-z]*(?:c|command)\b)/i.test(trimmed)) {
+    if (/\$env:|Get-ChildItem\s+env:/i.test(trimmed)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Helper to extract subshell substitutions: $(cmd), `cmd`, <(cmd),
+ * and dynamic evaluation targets: eval "cmd", sh -c "cmd", bash -c "cmd"
+ */
+function extractSubshellAndEvalCommands(cmd: string): string[] {
+  const extracted: string[] = [];
+
+  // $(cmd)
+  const dollarParen = /\$\(([^)]+)\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = dollarParen.exec(cmd)) !== null) {
+    if (m[1]?.trim()) extracted.push(m[1].trim());
+  }
+
+  // `cmd`
+  const backtick = /`([^`]+)`/g;
+  while ((m = backtick.exec(cmd)) !== null) {
+    if (m[1]?.trim()) extracted.push(m[1].trim());
+  }
+
+  // <(cmd)
+  const procSub = /<\(([^)]+)\)/g;
+  while ((m = procSub.exec(cmd)) !== null) {
+    if (m[1]?.trim()) extracted.push(m[1].trim());
+  }
+
+  // eval "cmd" or eval 'cmd' or eval cmd
+  const evalPattern = /\beval\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gi;
+  while ((m = evalPattern.exec(cmd)) !== null) {
+    const target = m[1] ?? m[2] ?? m[3];
+    if (target?.trim()) extracted.push(target.trim());
+  }
+
+  return extracted;
+}
+
 /**
  * Detects if a shell command in exec attempts to dump environment variables
  * broadly or target sensitive environment variables specifically.
@@ -833,12 +927,35 @@ function checkEnvSegment(segment: string): boolean {
 export function isSensitiveEnvCommand(command: string): boolean {
   if (!command || typeof command !== 'string') return false;
 
-  const variants = extractAndResolveShellVariables(command);
+  // 1. Direct or indirect access to /proc/*/environ pseudofiles
+  if (/(?:^|[\s"'`|&;<>()])\/?proc\/(?:self|\$\$|\$ppid|[0-9]+|\*|[a-z0-9_$]+)\/environ\b/i.test(command)) {
+    return true;
+  }
+
+  const resolved = extractAndResolveShellVariables(command);
   const allVariants = new Set<string>();
-  for (const v of variants) {
-    allVariants.add(v);
-    const unescaped = v.replace(/\\([^\s])/g, '$1');
+  allVariants.add(command);
+  if (resolved) {
+    allVariants.add(resolved);
+    const unescaped = resolved.replace(/\\([^\s])/g, '$1');
     if (unescaped) allVariants.add(unescaped);
+  }
+  const unescapedCmd = command.replace(/\\([^\s])/g, '$1');
+  if (unescapedCmd) allVariants.add(unescapedCmd);
+
+  const subCommands = extractSubshellAndEvalCommands(command);
+  for (const sc of subCommands) {
+    allVariants.add(sc);
+    const unescSub = sc.replace(/\\([^\s])/g, '$1');
+    if (unescSub) allVariants.add(unescSub);
+  }
+  if (resolved && resolved !== command) {
+    const subResolved = extractSubshellAndEvalCommands(resolved);
+    for (const sc of subResolved) {
+      allVariants.add(sc);
+      const unescSub = sc.replace(/\\([^\s])/g, '$1');
+      if (unescSub) allVariants.add(unescSub);
+    }
   }
 
   for (const variant of allVariants) {
@@ -896,12 +1013,69 @@ export function isSensitiveEnvCommand(command: string): boolean {
           }
         }
 
+        // declare or declare -p
+        if (/^(?:declare)(?:\s+-[a-zA-Z]*p[a-zA-Z]*)?$/i.test(ts)) {
+          return true;
+        }
+
         // Bare set (without flags) dumps all shell variables in bash
-        if (/^set(?:\s*[><|].*)?$/i.test(ts)) {
+        if (/^set(?:\s*[><|].*)?$/i.test(ts) || /^(?:set)(?:\s+[><].*)?$/i.test(ts)) {
+          return true;
+        }
+
+        // awk / gawk / mawk / nawk ENVIRON access
+        if (/\b(?:g|m|n)?awk\b/i.test(ts) && /\bENVIRON\b/.test(ts)) {
+          return true;
+        }
+
+        // Runtime scripting inline execution accessing environment variables (VULN-03)
+        if (checkRuntimeInlineEnv(ts)) {
           return true;
         }
       }
     }
+  }
+
+  return false;
+}
+
+/**
+ * VULN-02: Detects if a token contains wildcard/glob characters (*, ?, [...])
+ * that target sensitive paths (.ruko/**, .env*, id_rsa*, *.pem, *.key, etc.)
+ */
+export function isSensitiveWildcardPattern(candidate: string): boolean {
+  if (!candidate || typeof candidate !== 'string') return false;
+  if (!/[*?[\]]/.test(candidate)) return false;
+
+  const normalized = candidate.replace(/\\/g, '/');
+  const base = path.posix.basename(normalized).toLowerCase();
+
+  // 1. Any wildcard touching .ruko (e.g. .ruko/*, .ruko/conf*, */.ruko/*, .ruko*)
+  if (/(?:^|\/)\.ruko(?:\/|[?*]|$)/i.test(normalized)) {
+    return true;
+  }
+
+  // 2. Wildcard targeting .env files (e.g. .env*, .env.*, *.env, path/to/.env*)
+  if (
+    /(?:^|\/)\.env[*?.]/i.test(normalized) ||
+    base === '.env*' ||
+    base.startsWith('.env') ||
+    base.endsWith('.env')
+  ) {
+    return true;
+  }
+
+  // 3. Wildcard targeting private keys or certificates (id_rsa*, id_ed25519*, id_*, *.pem, *.key, ~/.ssh/*)
+  if (
+    /(?:^|\/)id_rsa/i.test(normalized) ||
+    /(?:^|\/)id_ed25519/i.test(normalized) ||
+    /(?:^|\/)id_[*?]/i.test(normalized) ||
+    /(?:^|\/)\.ssh(?:\/|$)/i.test(normalized) ||
+    /\.(?:pem|key)[*?]?$/i.test(normalized) ||
+    base.endsWith('.pem') ||
+    base.endsWith('.key')
+  ) {
+    return true;
   }
 
   return false;
@@ -915,7 +1089,22 @@ export function detectSensitiveFileAccessInExec(
   command: string,
   workspaceRoot: string = getWorkspaceRoot(),
 ): { blocked: boolean; message?: string; target?: string } {
-  const variants = extractAndResolveShellVariables(command);
+  const resolved = extractAndResolveShellVariables(command);
+  const variants = new Set<string>();
+  variants.add(command);
+  if (resolved) {
+    variants.add(resolved);
+  }
+  const subCommands = extractSubshellAndEvalCommands(command);
+  for (const sc of subCommands) {
+    variants.add(sc);
+  }
+  if (resolved && resolved !== command) {
+    const subResolved = extractSubshellAndEvalCommands(resolved);
+    for (const sc of subResolved) {
+      variants.add(sc);
+    }
+  }
 
   for (const variant of variants) {
     const segments = chainedSegments(variant);
@@ -959,7 +1148,7 @@ export function detectSensitiveFileAccessInExec(
         candidates.add(decUnesc);
 
         for (const cand of candidates) {
-          if (isSensitivePath(cand, workspaceRoot)) {
+          if (isSensitivePath(cand, workspaceRoot) || isSensitiveWildcardPattern(cand)) {
             return {
               blocked: true,
               target: candidate,

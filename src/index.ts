@@ -10,6 +10,7 @@ import { SystemLoop } from './core/loop.js';
 import { summarizeLog } from './core/summarizer.js';
 import { needsSetup, runSetupWizard } from './core/wizard.js';
 import { loadDotenv } from './core/dotenv.js';
+import { isWorkspaceTrusted, promptWorkspaceTrust } from './core/trust.js';
 
 const USAGE = `Ruko — AI Coding Agent CLI
 
@@ -94,6 +95,29 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Workspace / Folder trust verification:
+  // Di awal setelah install atau saat pertama kali dijalankan di folder ini,
+  // tanya konfirmasi kepercayaan folder sebelum membaca berkas atau menjalankan shell.
+  const configPath = defaultConfigPath();
+  const bypassTrust =
+    args.includes('--yes') ||
+    args.includes('--trust-folder') ||
+    process.env.RUKO_TRUST_FOLDER === '1' ||
+    process.env.RUKO_TRUST_FOLDER === 'true';
+
+  if (process.stdin.isTTY && !bypassTrust && !isWorkspaceTrusted(process.cwd(), configPath)) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const trusted = await promptWorkspaceTrust(rl, process.cwd(), configPath);
+      if (!trusted) {
+        console.log('  ⚠ Akses dibatalkan: Folder ini tidak dipercayai demi keamanan.');
+        return;
+      }
+    } finally {
+      rl.close();
+    }
+  }
+
   // One-shot shell execution (through the approval gate).
   const execIndex = args.indexOf('--exec');
   if (execIndex !== -1 && args[execIndex + 1]) {
@@ -130,8 +154,6 @@ async function main(): Promise<void> {
   }
 
   // Interactive mode.
-  const configPath = defaultConfigPath();
-
   // First-time setup: wizard when no API key is available yet (TTY only),
   // with a live connection test before saving (§2).
   if (process.stdin.isTTY && needsSetup(config)) {

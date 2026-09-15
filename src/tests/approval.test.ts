@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { detectRisk, guardedExecute } from '../core/approval.js';
+import { detectRisk, extractAndResolveShellVariables, guardedExecute } from '../core/approval.js';
 import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
 
 function config(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -355,4 +355,47 @@ test('Point 6: approval gate detects all forms of rm (with or without flags)', (
   // Ensure false positives are avoided
   assert.equal(detectRisk('echo rm', config()).risk, 'none');
   assert.equal(detectRisk('pnpm test', config()).risk, 'none');
+});
+
+// ── VULN-01: Shell Variable Substitution Adversarial Tests ──────────────────
+test('VULN-01: extractAndResolveShellVariables resolves variable assignments and expansions', () => {
+  assert.equal(extractAndResolveShellVariables('DIR=/etc; rm -rf $DIR'), 'DIR=/etc; rm -rf /etc');
+  assert.equal(extractAndResolveShellVariables('TARGET=/; rm -rf $TARGET'), 'TARGET=/; rm -rf /');
+  assert.equal(extractAndResolveShellVariables('TARGET="/" ; rm -rf "$TARGET"'), 'TARGET="/" ; rm -rf "/"');
+  assert.equal(extractAndResolveShellVariables("TARGET='/' ; rm -rf '${TARGET}'"), "TARGET='/' ; rm -rf '/'");
+  assert.equal(extractAndResolveShellVariables('export DIR=/etc && rm -rf $DIR'), 'export DIR=/etc && rm -rf /etc');
+  assert.equal(extractAndResolveShellVariables('A=/; B=$A; rm -rf $B'), 'A=/; B=/; rm -rf /');
+  assert.equal(extractAndResolveShellVariables('rm -rf ${DIR:-/etc}'), 'rm -rf /etc');
+});
+
+test('VULN-01: DIR=/etc; rm -rf $DIR is BLOCKED by detectRisk and guardedExecute', async () => {
+  const cmd = 'DIR=/etc; rm -rf $DIR';
+  const verdict = detectRisk(cmd, config());
+  assert.equal(verdict.risk, 'blocked', `Expected BLOCKED for: ${cmd}`);
+  assert.match(verdict.reason ?? '', /rm destruktif ke path sistem\/home kritis/i);
+
+  // Even with approvalEnabled: false (H4 / YOLO check)
+  const yoloVerdict = detectRisk(cmd, config({ approvalEnabled: false }));
+  assert.equal(yoloVerdict.risk, 'blocked', `Expected BLOCKED in YOLO mode for: ${cmd}`);
+
+  // guardedExecute must reject without prompt
+  const res = await guardedExecute(cmd, { confirm: async () => true }, config());
+  assert.equal(res.code, null);
+  assert.match(res.output, /\[BLOCKED oleh Ruko:/);
+});
+
+test('VULN-01: TARGET=/; rm -rf $TARGET is BLOCKED by detectRisk and guardedExecute', async () => {
+  const cmd = 'TARGET=/; rm -rf $TARGET';
+  const verdict = detectRisk(cmd, config());
+  assert.equal(verdict.risk, 'blocked', `Expected BLOCKED for: ${cmd}`);
+  assert.match(verdict.reason ?? '', /rm destruktif ke path sistem\/home kritis/i);
+
+  // Even with approvalEnabled: false (H4 / YOLO check)
+  const yoloVerdict = detectRisk(cmd, config({ approvalEnabled: false }));
+  assert.equal(yoloVerdict.risk, 'blocked', `Expected BLOCKED in YOLO mode for: ${cmd}`);
+
+  // guardedExecute must reject without prompt
+  const res = await guardedExecute(cmd, { confirm: async () => true }, config());
+  assert.equal(res.code, null);
+  assert.match(res.output, /\[BLOCKED oleh Ruko:/);
 });

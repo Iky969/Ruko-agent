@@ -276,6 +276,24 @@ test('user message is not duplicated in prompt history when context already has 
   assert.equal(userMsgs[0].content, 'baca kode');
 });
 
+test('loop breaker (item 7): terminates early on repeated identical tool calls without running to max iterations', async () => {
+  const repeatedTool = '```tool\n{"tool": "exec", "command": "echo loop"}\n```';
+  const provider = new RecordingProvider([
+    repeatedTool,
+    repeatedTool,
+    repeatedTool,
+    repeatedTool,
+    repeatedTool,
+    repeatedTool,
+  ]);
+  const ctx = new Context(config);
+  const agent = new Agent(ctx, provider, config);
+  const { result } = await captureStdout(() => agent.handleInstruction('stuck loop'));
+  assert.ok(result.includes('[deteksi loop]'));
+  assert.ok(provider.receivedMessages.length <= 5, `Expected <= 5 iterations, got ${provider.receivedMessages.length}`);
+});
+
+
 
 
 

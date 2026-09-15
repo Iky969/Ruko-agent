@@ -328,6 +328,18 @@ export class Agent {
             }
             return '';
           }
+          // §5: loop breaker — identical tool call repeated is a stuck model.
+          if (this.seenRepeat(call)) {
+            if (tree.isTreeActive) {
+              tree.finish('Dihentikan karena deteksi loop');
+            }
+            return (
+              `[deteksi loop] tool "${call.tool}" dengan argumen sama sudah dipanggil ` +
+              `> ${LOOP_REPEAT_LIMIT}× — eksekusi dihentikan. Ulangi dengan instruksi lain, ` +
+              `atau jalankan manual lewat /exec.`
+            );
+          }
+
           // §5: Guard mekanis — tolak eksekusi ganda jika tool call berturut-turut persis identik
           const sig = this.getCallSignature(call);
           if (this.lastCallSignature === sig) {
@@ -348,15 +360,6 @@ export class Agent {
           }
           this.lastCallSignature = sig;
 
-          // §5: loop breaker — identical tool call repeated is a stuck model.
-          if (this.seenRepeat(call)) {
-            tree.finish('Dihentikan karena deteksi loop');
-            return (
-              `[deteksi loop] tool "${call.tool}" dengan argumen sama sudah dipanggil ` +
-              `> ${LOOP_REPEAT_LIMIT}× — eksekusi dihentikan. Ulangi dengan instruksi lain, ` +
-              `atau jalankan manual lewat /exec.`
-            );
-          }
           const result = await runToolCall(call, {
             confirm: this.confirm,
             config: this.config,

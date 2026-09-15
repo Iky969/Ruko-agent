@@ -105,6 +105,8 @@ export interface AgentConfig {
   guardianEnabled?: boolean;
   /** Timeout in ms for the guardian LLM call (default 5000). */
   guardianTimeoutMs?: number;
+  /** Whether the workspace folder is explicitly trusted by the user. */
+  trustedWorkspace?: boolean;
 }
 
 export const DEFAULT_CONFIG: AgentConfig = {

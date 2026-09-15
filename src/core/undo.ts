@@ -8,6 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { Buffer } from 'node:buffer';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 /**

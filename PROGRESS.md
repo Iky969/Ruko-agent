@@ -4,9 +4,27 @@
 
 ---
 
-### v1.7.1 (15 September 2026) — Context Window Slash Commands (/setctx, /settoken, /usage session tokens), Subagent Resource Deadlines, Terminal Injection Sanitization, & Known Bugs Resolution
+### v1.7.1 (15 September 2026) — Security Hardening (feedback.txt Audit VULN-01–05), Workspace Trust, HTTP Protocol Confirmation, Context Commands (/setctx, /settoken, /usage), Subagent Deadlines, & Terminal Sanitization
 
 #### Ditambahkan & Diperbarui
+- **VULN-01 (Critical): Ekspansi Shell Variable Sebelum Evaluasi Regex Bahaya (`src/core/approval.ts`)**:
+  * Mengintegrasikan `extractAndResolveShellVariables` ke `detectRisk` dan `checkBlockedOnly`. Variabel shell (seperti `DIR=/etc; rm -rf $DIR` dan `TARGET=/; rm -rf $TARGET`) diekspansi terlebih dahulu sebelum dicocokkan ke regex pencegah perintah destruktif (`RM_CRITICAL_RE`). Mencegah bypass destruktif 100%.
+- **VULN-02 (High): Pencegahan Pembocoran Berkas Sensitif via Shell Wildcard Expansion (`src/agent/tools.ts`)**:
+  * Menambahkan `isSensitiveWildcardPattern` pada `detectSensitiveFileAccessInExec`. Token dengan karakter wildcard/glob (`*`, `?`, `[...]`) yang menargetkan direktori `.ruko/**`, `.env*`, `id_rsa*`, `*.pem`, `*.key` langsung diblokir secara preventif di tool `exec`.
+- **VULN-03 (Medium-High): Mitigasi Eksfiltrasi Environment Variable via Runtime Scripting (`src/agent/tools.ts`, `README.md`)**:
+  * Menambahkan deteksi pola inline interpreter (`node -e`, `python3 -c`, `ruby -e`, `perl -e`, `php -r`, `pwsh`, `declare -p`, `set`) di `isSensitiveEnvCommand` untuk memblokir pembacaan environment runtime. Mendokumentasikan boundary limits di README.
+- **VULN-04 (Medium): Proteksi Cleartext HTTP BaseURL & Dukungan Local LLM / Private LAN IP (`src/agent/commands.ts`, `src/core/config.ts`)**:
+  * Menambahkan fungsi `isPrivateOrLocalHost` untuk memvalidasi hostname. Base URL dengan skema HTTP remote ke internet publik ditolak kecuali disertai flag `--insecure`. Sebaliknya, endpoint local LLM dan LAN privat (`localhost`, `127.0.0.1`, RFC 1918 `192.168.*`, `10.*`, `172.16-31.*`, serta domain lokal `.local`, `.lan`) diizinkan sepenuhnya menggunakan HTTP untuk mendukung Ollama, LM Studio, vLLM, dan gateway internal.
+- **Konfirmasi Trust Protokol HTTP (`src/core/wizard.ts`, `src/agent/commands.ts`)**:
+  * Khusus URL berprotokol HTTP (`http://`), sistem secara eksplisit menanyakan konfirmasi kepercayaan: `Apakah kamu mempercayai protokol/URL ini? (y/n)`. Jika pengguna menolak, proses setup atau penyimpanan dibatalkan demi menjaga keamanan kredensial.
+- **Workspace / Folder Trust Saat Startup (`src/core/trust.ts`, `src/index.ts`, `src/types.ts`, `src/core/config.ts`)**:
+  * Menambahkan verifikasi kepercayaan folder (`Apakah kamu mempercayai folder ini? y/n`) saat pertama kali Ruko dijalankan di suatu direktori proyek. Mencegah agen membaca atau mengeksekusi berkas pada repositori yang tidak dipercayai. Status trust dicatat secara persisten di `.ruko/trusted` dan `trustedWorkspace` di konfigurasi lokal.
+- **VULN-05 (Low-Medium): Proteksi Path Traversal pada Perintah Slash `/undo <path>` (`src/agent/commands.ts`)**:
+  * Menerapkan `assertInsideWorkspace` pada jalur perintah manual terminal `/undo <path>`, menyelaraskannya dengan pengamanan tool agen `revert_file`.
+- **Point 2: Mitigasi Eksfiltrasi Environment Tidak Langsung (`src/agent/tools.ts`)**:
+  * Memblokir akses pseudofile `/proc/*/environ` (Linux process environment) pada `isSensitivePath`, `detectSensitiveFileAccessInExec`, dan `isSensitiveEnvCommand`.
+  * Memblokir eksfiltrasi variabel lingkungan via awk script array `ENVIRON` (`awk`, `gawk`, `mawk`, `nawk`).
+  * Mengekstrak dan memvalidasi perintah di dalam command substitution subshell (`$(...)`, `...`, `<(...)`, `eval "..."`), mencegah bypass env dump terbungkus subshell.
 - **Dedicated Context Window & Session Token Commands (`src/agent/commands.ts`, `src/agent/agent.ts`, `README.md`)**:
   * Menambahkan pelacakan akumulasi token sesi (`SessionUsage`) pada kelas `Agent`, mencakup total prompt tokens, completion tokens, total tokens, dan total turn pada sesi aktif.
   * Memperkaya perintah `/usage` (alias: `/stats`, `/tokens`) untuk menampilkan akumulasi token sesi, estimasi karakter, statistik turn terakhir, serta sub-perintah `/usage clear` untuk mereset counter sesi.
@@ -32,9 +50,14 @@
   * **Finding 1 (Proteksi File Startup & Profile Shell)**: Menambahkan deteksi dan pencegahan akses/modifikasi terhadap berkas konfigurasi shell pengguna (`.bashrc`, `.bash_profile`, `.bash_login`, `.bash_logout`, `.zshrc`, `.zprofile`, `.zshenv`, `.zlogin`, `.zlogout`, `.profile`) pada `isSensitivePath` dan `containsSensitiveFilePattern`.
   * **Finding 2 (Batas Maksimum Ukuran Berkas 5MB)**: Menetapkan konstanta `MAX_FILE_WRITE_BYTES = 5 * 1024 * 1024` (5MB) dan memvalidasi `byteLength` payload di `writeWithDiff` dan `runToolCall` (`write_file`, `edit_file`, `patch_file`), mencegah memory exhaustion dan infinite text loop output.
   * **Finding 3 (Preservasi Timestamp Asli pada Ekspor Trajectory)**: Memperbarui `exportSessionTrajectory` di `src/core/session.ts` untuk memelihara timestamp pesan asli (`m.timestamp`) dan timestamp awal sesi pada nama berkas ekspor dan dokumen trajectory hasil export bukannya menimpa dengan waktu sistem saat ekspor.
+- **Engine Bug Fixes & Refinement (Item 6, 7, 8, 9) (`src/agent/filetools.ts`, `src/agent/agent.ts`, `src/agent/llm.ts`, `src/core/undo.ts`)**:
+  * **Item 6**: Memastikan proteksi berkas internal `SECURITY_CORE_FILES` berbasis direktori instalasi riil Ruko, tidak memicu false positive pada berkas proyek pengguna.
+  * **Item 7**: Memindahkan evaluasi loop breaker `seenRepeat(call)` sebelum penetapan `lastCallSignature`, memutus perulangan tool berulang lebih awal.
+  * **Item 8**: Mengganti fallback `||` menjadi nullish coalescing `??` pada `GeminiProvider`, `AnthropicProvider`, dan `OpenAiCompatibleProvider` untuk menghormati nilai API key kosong eksplisit.
+  * **Item 9**: Menambahkan impor eksplisit `Buffer` dari `node:buffer` untuk kompatibilitas penuh dengan versi terbaru compiler TypeScript Node 20+.
 - **Rangkaian Pengujian & Baseline Baru**:
-  * Menambahkan test suite baru `src/tests/context_commands_v17.test.ts` (13 unit test) yang memvalidasi `/setctx`, `/settoken`, `/usage` session token stats, `sanitizeTerminalOutput`, best-effort compression fallback, subagent timeout, `declare -p`/bare `set` blocking, SSH/cert pattern detection, sequential interleaved stream output, shell startup file blocking, payload 5MB limit, dan trajectory timestamp preservation.
-  * Total pengujian meningkat menjadi **446 passed** (100% lulus, 0 fail), E2E test lulus (1 passed), dan `npm run typecheck` bersih tanpa galat.
+  * Menambahkan test suite baru `src/tests/context_commands_v17.test.ts` (13 unit test) dan `src/tests/trust.test.ts` (11 unit test).
+  * Total pengujian meningkat menjadi 464 passed (100% lulus, 0 fail), E2E test lulus (1 passed), dan `npm run typecheck` bersih tanpa galat.
 
 ---
 
@@ -64,6 +87,8 @@
 - **Pengujian Komprehensif & Nol Regresi (`src/tests/sensitive_protection.test.ts`)**:
   * Menambahkan suite uji Bagian D (Security Core), Bagian E (SSRF alternative IP & redirect hop), Bagian F (Encoding bypass & exec variable tracking), dan Bagian G (Symlink consistency & broken symlink write escape).
   * Seluruh suite pengujian berjalan 100% sukses: **433 tests passed** (0 fail, 0 errors), dan `npm run typecheck` bersih tanpa galat.
+
+---
 
 ### v1.7.0 (14 September 2026) — Universal Tool Security Hardening, Symlink Sandboxing, SSRF Redirect Defense, Subagent Recursion Guard, & UI Step Enrichment
 

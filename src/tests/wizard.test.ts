@@ -60,12 +60,25 @@ test('setup banner carries the welcome text', () => {
 });
 
 test('promptSetup keeps custom base url and model (no provider default)', async () => {
-  const rl = fakeRl(['sk-1', 'http://localhost:11434/v1', 'llama3']);
+  const rl = fakeRl(['sk-1', 'http://localhost:11434/v1', 'y', 'llama3']);
   const result = await promptSetup(rl);
   assert.deepEqual(result, { apiKey: 'sk-1', baseUrl: 'http://localhost:11434/v1', model: 'llama3' });
   // Prompts must NOT advertise a provider-specific example/default.
   assert.equal(stripAnsi(rl.asked[1]).includes('api.b.ai'), false);
-  assert.equal(stripAnsi(rl.asked[2]).includes('qwen'), false);
+  assert.equal(stripAnsi(rl.asked[3]).includes('qwen'), false);
+});
+
+test('promptSetup asks for HTTP protocol trust and aborts on rejection', async () => {
+  const rl = fakeRl(['sk-1', 'http://localhost:11434/v1', 'n']);
+  const result = await promptSetup(rl);
+  assert.equal(result, null);
+});
+
+test('promptSetup does not ask for trust confirmation when using HTTPS', async () => {
+  const rl = fakeRl(['sk-1', 'https://api.openai.com/v1', 'gpt-4o']);
+  const result = await promptSetup(rl);
+  assert.deepEqual(result, { apiKey: 'sk-1', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o' });
+  assert.equal(rl.asked.some((q) => q.includes('mempercayai protokol/URL')), false);
 });
 
 test('promptSetup aborts on empty API key', async () => {
@@ -79,12 +92,12 @@ test('promptSetup aborts when base URL is blank', async () => {
 });
 
 test('promptSetup aborts when model is blank', async () => {
-  const rl = fakeRl(['sk-1', 'http://x/v1', '']);
+  const rl = fakeRl(['sk-1', 'http://x/v1', 'y', '']);
   assert.equal(await promptSetup(rl), null);
 });
 
 test('promptSetup probes the connection and reports success (§2.8)', async () => {
-  const rl = fakeRl(['sk-probe', 'http://x/v1', 'probe-model']);
+  const rl = fakeRl(['sk-probe', 'http://x/v1', 'y', 'probe-model']);
   const probes: unknown[] = [];
   const result = await promptSetup(rl, {
     probe: async (r) => {
@@ -98,7 +111,7 @@ test('promptSetup probes the connection and reports success (§2.8)', async () =
 });
 
 test('promptSetup on failed probe: save-anyway keeps the result (§2.11 retry path)', async () => {
-  const rl = fakeRl(['sk-bad', 'http://x/v1', 'm', '']); // 4th answer = "" → save anyway
+  const rl = fakeRl(['sk-bad', 'http://x/v1', 'y', 'm', '']); // 5th answer = "" → save anyway
   const result = await promptSetup(rl, {
     probe: async () => ({ ok: false, message: 'API key salah atau kedaluwarsa' }),
   });
@@ -107,7 +120,7 @@ test('promptSetup on failed probe: save-anyway keeps the result (§2.11 retry pa
 });
 
 test('promptSetup probe cancel (b) aborts setup', async () => {
-  const rl = fakeRl(['sk-bad', 'http://x/v1', 'm', 'b']);
+  const rl = fakeRl(['sk-bad', 'http://x/v1', 'y', 'm', 'b']);
   const result = await promptSetup(rl, {
     probe: async () => ({ ok: false, message: 'gagal' }),
   });

@@ -348,11 +348,10 @@ test('guardian scenario: python3 -c safe payload → regex DANGEROUS, guardian s
   assert.match(result.output, /2/);
 });
 
-test('guardian scenario: variable indirection X=/etc; rm -rf $X → regex DANGEROUS', async () => {
-  // Regex catches rm -rf as DANGEROUS but can't resolve $X.
-  // Guardian should identify the variable indirection.
+test('guardian scenario: variable indirection X=/etc; rm -rf $X → regex BLOCKED (VULN-01 fix)', async () => {
+  // VULN-01 fix: extractAndResolveShellVariables resolves $X to /etc, so RM_CRITICAL_RE catches it as BLOCKED.
   const verdict = detectRisk('X=/etc; rm -rf $X', config());
-  assert.equal(verdict.risk, 'dangerous', 'Regex should at least be DANGEROUS');
+  assert.equal(verdict.risk, 'blocked', 'Regex with variable resolution should be BLOCKED');
 
   const result = await guardedExecute(
     'X=/etc; rm -rf $X',

@@ -26,11 +26,23 @@ test('AnthropicProvider testConnection handles missing config', async () => {
   assert.match(res.message, /belum diatur/i);
 });
 
-test('GeminiProvider testConnection handles missing config', async () => {
-  const p = new GeminiProvider({ apiKey: '' });
-  const res = await p.testConnection();
-  assert.equal(res.ok, false);
-  assert.match(res.message, /belum diatur/i);
+test('GeminiProvider testConnection handles missing config even with env vars set (Item 8 fix)', async () => {
+  const prevGemini = process.env.GEMINI_API_KEY;
+  const prevOpenAi = process.env.OPENAI_API_KEY;
+  try {
+    process.env.GEMINI_API_KEY = 'env-gemini-key';
+    process.env.OPENAI_API_KEY = 'env-openai-key';
+    const p = new GeminiProvider({ apiKey: '' });
+    assert.equal(p.isConfigured, false);
+    const res = await p.testConnection();
+    assert.equal(res.ok, false);
+    assert.match(res.message, /belum diatur/i);
+  } finally {
+    if (prevGemini !== undefined) process.env.GEMINI_API_KEY = prevGemini;
+    else delete process.env.GEMINI_API_KEY;
+    if (prevOpenAi !== undefined) process.env.OPENAI_API_KEY = prevOpenAi;
+    else delete process.env.OPENAI_API_KEY;
+  }
 });
 
 test('AnthropicProvider listModels returns standard Claude models', async () => {

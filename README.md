@@ -4,7 +4,7 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-446%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-464%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
@@ -43,6 +43,8 @@ chmod +x $PREFIX/bin/ruko
 
 - 🛡️ **Dual-Layer Approval Gate & Workspace Sandboxing**:
   Perlindungan komprehensif dua lapis untuk eksekusi perintah shell. *Layer 1* (deteksi regex instan) dan *Layer 2* (**Guardian LLM** untuk analisis semantik cerdas). Seluruh tool filesystem dikunci oleh sandbox anti-*path traversal*.
+- 🤝 **Workspace / Folder Trust**:
+  Konfirmasi keamanan saat pertama kali Ruko dijalankan di suatu folder proyek (`Apakah kamu mempercayai folder ini? y/n`), menjamin Ruko tidak membaca atau mengeksekusi berkas pada repositori yang tidak dipercayai.
 - ⚡ **Zero Runtime Dependencies**:
   100% menggunakan API standar Node.js (`node:fs`, `node:child_process`, `node:readline`, dll.). Sangat ringan, waktu startup instan, dan bebas kerentanan rantai pasok (*supply chain attack*).
 - 🔍 **Eksplorasi & Manipulasi Kode Cerdas**:
@@ -52,31 +54,23 @@ chmod +x $PREFIX/bin/ruko
 - 🎮 **Modern Terminal UX & Ambient Input**:
   REPL interaktif dengan status bar *real-time*, menu navigasi `/`, animasi Pac-Man *Thinking...* rata kiri, serta mode *ambient input* yang memungkinkan pengguna mengetik, mengantre, atau membatalkan instruksi saat AI sedang bekerja.
 - 🔑 **Multi-Provider & Privasi Utama**:
-  Wizard interaktif untuk konfigurasi mudah (dengan tes koneksi langsung). Mendukung model cloud (OpenAI, OpenRouter, DeepSeek, Groq, Together) maupun server lokal (Ollama, LM Studio, vLLM). Kredensial disimpan dengan izin berkas ketat `0600`.
+  Wizard interaktif untuk konfigurasi mudah (dengan tes koneksi langsung dan konfirmasi eksplisit untuk protokol HTTP unencrypted). Mendukung model cloud (OpenAI, OpenRouter, DeepSeek, Groq, Together) maupun server lokal (Ollama, LM Studio, vLLM). Kredensial disimpan dengan izin berkas ketat `0600`.
 
 ---
 
 ## 🚀 Instalasi & Memulai Cepat
 
 ### Kebutuhan Sistem
-- **Node.js**: versi `18.0.0` atau yang lebih baru.
-- **Terminal**: mendukung emulasi VT100 / ANSI color.
+- Node.js versi 18.0.0 atau lebih baru.
+- Sistem operasi Linux (termasuk Android Termux), macOS, atau Windows WSL.
 
-### 1. Instalasi dari Sumber
+### 1. Kloning & Kompilasi Lokal
 
 ```bash
-# Clone repositori
 git clone https://github.com/Iky969/Ruko-agent.git
 cd Ruko-agent
-
-# Install dependensi pengembangan (TypeScript & type definitions)
 npm install
-
-# Build TypeScript ke JavaScript ESM (dist/)
 npm run build
-
-# Jalankan Ruko
-npm start
 ```
 
 ### 2. Instalasi Global (Perintah `ruko` di Mana Saja)
@@ -98,11 +92,24 @@ ruko
 
 Semua data (konfigurasi, riwayat percakapan, jurnal undo) akan otomatis terisolasi di folder `./.ruko/` di dalam direktori kerja aktif.
 
-### 3. Wizard Konfigurasi Awal (First-Run Setup)
+### 3. Keamanan Folder (Workspace Trust)
+
+Saat pertama kali dijalankan di suatu folder proyek, Ruko akan meminta konfirmasi:
+```text
+  [Keamanan Workspace Ruko]
+  Folder aktif: /path/to/project
+  Ruko dapat membaca berkas dan menjalankan perintah shell di folder ini.
+
+  Apakah kamu mempercayai folder ini? (y/n):
+```
+Status kepercayaan disimpan di `.ruko/trusted` dan konfigurasi lokal sehingga Anda tidak akan ditanya berulang kali di folder yang sama. Gunakan flag `--trust-folder` atau environment variable `RUKO_TRUST_FOLDER=1` untuk otomatisasi/CI.
+
+### 4. Wizard Konfigurasi Awal (First-Run Setup)
 
 Saat pertama kali dijalankan tanpa kredensial, Ruko akan memandu Anda melalui **Interactive Setup Wizard**:
 1. Masukkan **API Key** (input disamarkan `*` demi privasi).
 2. Masukkan **Base URL** (contoh: `https://api.openai.com/v1`, `https://openrouter.ai/api/v1`, atau `http://localhost:11434/v1`).
+   - *Khusus HTTP*: Ruko akan meminta konfirmasi eksplisit (`Apakah kamu mempercayai protokol/URL ini? y/n`) sebelum melanjutkan demi mencegah kebocoran data cleartext.
 3. Masukkan **Model Name** (contoh: `gpt-4o`, `deepseek-chat`, `qwen2.5-coder`, dll.).
 4. Ruko melakukan pengujian koneksi langsung (*live probe*). Jika berhasil, konfigurasi disimpan ke `.ruko/config.json` dengan izin berkas **600** (*owner read/write only*).
 
@@ -155,10 +162,12 @@ Ruko dirancang dengan pertahanan mendalam (*defense-in-depth*) untuk memastikan 
 4. **Dedicated Audit Trail**:
    Setiap evaluasi Guardian LLM dicatat secara persisten ke berkas `.ruko/guardian-audit.log` dengan izin `0600` untuk keperluan audit keamanan.
 5. **Perlindungan Kredensial & Berkas/Environment Sensitif**:
-   - **Isolasi Berkas Sensitif**: Fungsi `assertNotSensitivePath()` memblokir akses ke berkas sensitif (`.ruko/config.json`, `.ruko/undo/**`, `.env`, `.env.*`, `id_rsa`, `id_ed25519`, `*.pem`, `*.key`) pada seluruh tool baca (`read_file`), pencarian (`glob`, `code_search`), manipulasi berkas, maupun `exec` (deteksi perintah eksplisit seperti `cat .ruko/config.json`).
-   - **Pencegahan Dump Environment**: Fungsi `isSensitiveEnvCommand()` mendeteksi dan menolak upaya pembocoran kredensial via environment (`printenv`, `env`, ekspansi `$<NAMA>` atau `${<NAMA>}` yang cocok dengan pola token/secret/password/key), sembari tetap mengizinkan variabel biasa non-sensitif (`$PATH`, `$HOME`) untuk menghindari *overblocking*.
+   - **Isolasi Berkas Sensitif**: Fungsi `assertNotSensitivePath()` memblokir akses ke berkas sensitif (`.ruko/config.json`, `.ruko/undo/**`, `.env`, `.env.*`, `id_rsa`, `id_ed25519`, `*.pem`, `*.key`) pada seluruh tool baca (`read_file`), pencarian (`glob`, `code_search`), manipulasi berkas, maupun `exec` (mencakup pencocokan literal maupun ekspansi wildcard/glob shell seperti `cat .ruko/conf*` atau `cat .ruko/*`).
+   - **Pencegahan Dump Environment**: Fungsi `isSensitiveEnvCommand()` mendeteksi dan menolak upaya pembocoran kredensial via environment (`printenv`, `env`, `export -p`, `declare -p`, `set`, maupun eksekusi runtime inline seperti `node -e`, `python3 -c`, `ruby -e`, `perl -e`, dll. yang mengakses `process.env`, `os.environ`, `ENV`, atau `%ENV`), serta ekspansi `$<NAMA>` atau `${<NAMA>}` yang cocok dengan pola token/secret/password/key.
+   - *Known Limitation (Catatan Batasan)*: Skrip runtime eksternal independen yang dimuat dari file atau payload ter-obfuscate tingkat tinggi di luar jangkauan pencocokan statis dievaluasi secara semantik oleh Guardian LLM (Layer 2) sebelum dieksekusi.
    - **Cakupan Universal Subagent**: Seluruh proteksi ditegakkan di level protokol eksekusi tool (`runToolCall`), menjamin subagent (`delegate`) tunduk pada kebijakan keamanan yang sama persis dengan agen utama tanpa celah isolasi.
-   - Penolakan URL HTTP *cleartext* untuk server remote (mencegah eksfiltrasi token), penyamaran cerdas API key pada perintah `/config`, dan penegakan izin berkas `0o600` pada seluruh berkas konfigurasi dan sesi.
+   - Penolakan URL HTTP *cleartext* untuk server remote pada konfigurasi maupun perintah `/config set baseUrl` (mencegah eksfiltrasi token via MITM; host privat/LAN dan local LLM didukung dengan konfirmasi eksplisit `(y/n)`), penyamaran cerdas API key pada perintah `/config`, dan penegakan izin berkas `0o600` pada seluruh berkas konfigurasi dan sesi.
+   - **Workspace / Folder Trust**: Konfirmasi interaktif kepercayaan direktori kerja (`Apakah kamu mempercayai folder ini? y/n`) saat pertama kali Ruko dijalankan di proyek baru, mencegah eksekusi kode otomatis pada repositori asing tak tepercaya.
 6. **Batasan Keamanan yang Diketahui (Known Security Limitations)**:
    - **Filesystem TOCTOU (Time-of-Check to Time-of-Use)**: Meskipun mutasi berkas menolak penulisan menembus symbolic link via `lstatSync().isSymbolicLink()` dan `assertInsideWorkspace()`, secara POSIX standar tetap terdapat *micro-window* teoretis jika ada proses konkuren eksternal di tingkat OS yang melakukan pertukaran berkas (*symlink swap*) persis di antara verifikasi boundary dan pemanggilan I/O kernel (`fs.writeFile`/`fs.readFile`).
    - **Eliminasi Celah DNS Rebinding**: Seluruh potensi eksploitasi DNS Rebinding TOCTOU telah ditutup tuntas dengan mengimplementasikan transport `node:http` & `node:https` berbasis **Native IP-Pinning** yang mengunci socket TCP ke IP yang telah divalidasi aman pada setiap hop redirect.
@@ -307,7 +316,7 @@ Ruko diuji secara intensif menggunakan test runner bawaan Node.js (`node:test`) 
 # Verifikasi tipe data statis
 npm run typecheck
 
-# Menjalankan 443 unit test anti-regresi
+# Menjalankan 464 unit test anti-regresi
 npm test
 
 # Menjalankan end-to-end (E2E) integration test

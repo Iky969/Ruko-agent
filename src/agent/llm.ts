@@ -187,7 +187,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   lastFinishReason: string | null = null;
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
-    this.apiKey = cfg.apiKey || process.env.OPENAI_API_KEY || '';
+    this.apiKey = cfg.apiKey ?? process.env.OPENAI_API_KEY ?? '';
     this.baseUrl = (cfg.baseUrl || process.env.OPENAI_BASE_URL || '').replace(/\/+$/, '');
     this.currentModel = cfg.model || process.env.AGENT_MODEL || process.env.OPENAI_MODEL || '';
     this.retry = retry;
@@ -437,7 +437,7 @@ export class AnthropicProvider implements LLMProvider {
   lastFinishReason: string | null = null;
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
-    this.apiKey = cfg.apiKey || process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY || '';
+    this.apiKey = cfg.apiKey ?? process.env.ANTHROPIC_API_KEY ?? process.env.OPENAI_API_KEY ?? '';
     const rawBase = cfg.baseUrl || process.env.ANTHROPIC_BASE_URL || '';
     this.baseUrl = sanitizeAnthropicBaseUrl(rawBase);
     this.currentModel = cfg.model || process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022';
@@ -684,7 +684,7 @@ export class GeminiProvider implements LLMProvider {
   lastFinishReason: string | null = null;
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
-    this.apiKey = cfg.apiKey || process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY || '';
+    this.apiKey = cfg.apiKey ?? process.env.GEMINI_API_KEY ?? process.env.OPENAI_API_KEY ?? '';
     const rawBase = cfg.baseUrl || process.env.GEMINI_BASE_URL || '';
     this.baseUrl = sanitizeGeminiBaseUrl(rawBase);
     this.currentModel = cfg.model || process.env.GEMINI_MODEL || 'gemini-1.5-flash';

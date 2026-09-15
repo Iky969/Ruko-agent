@@ -1,14 +1,14 @@
 import { Confirmer, guardedExecute } from '../core/approval.js';
 import { join, relative as relativeFromCwd, resolve as resolvePath } from 'node:path';
 import { Context } from '../core/context.js';
-import { saveConfig } from '../core/config.js';
+import { isPrivateOrLocalHost, saveConfig } from '../core/config.js';
 import { execute } from '../core/executor.js';
 import { promptSetup, SetupResult } from '../core/wizard.js';
 import { bold, cyan, dim, formatK, green, renderBox, red, yellow } from '../core/ui.js';
 import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
-import { getWorkspaceRoot } from './tools.js';
+import { assertInsideWorkspace, getWorkspaceRoot } from './tools.js';
 import { AgentConfig, ProviderProfile, UiMode } from '../types.js';
 import { ConnectionResult, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
@@ -227,6 +227,12 @@ const COMMANDS: CommandDef[] = [
       if (target) {
         const ws = getWorkspaceRoot();
         const abs = resolvePath(ws, target);
+        try {
+          assertInsideWorkspace(abs, ws);
+        } catch (err) {
+          console.log(`(gagal membatalkan perubahan "${target}": ${err instanceof Error ? err.message : String(err)})`);
+          return;
+        }
         const result = revertFile(abs, { workspaceRoot: ws });
         if (!result.ok) {
           console.log(`(gagal membatalkan perubahan "${target}": ${result.error})`);
@@ -664,7 +670,7 @@ const COMMANDS: CommandDef[] = [
       if (parts[0] === 'set' && parts.length >= 3) {
         const key = parts[1];
         const value = parts.slice(2).join(' ');
-        applyConfigPatch(env, key, value);
+        await applyConfigPatch(env, key, value);
       } else {
         console.log('Usage: /config  |  /config set <key> <value>  |  /config setup (wizard)');
       }
@@ -773,7 +779,7 @@ async function runSetupFlow(env: CommandEnv): Promise<void> {
   console.log(`Konfigurasi tersimpan: baseUrl=${result.baseUrl}, model=${result.model} (API key di-mask).`);
 }
 
-function applyConfigPatch(env: CommandEnv, key: string, value: string): void {
+async function applyConfigPatch(env: CommandEnv, key: string, value: string): Promise<void> {
   const patch: Partial<AgentConfig> = {};
   switch (key) {
     case 'maxLogChars':
@@ -805,10 +811,64 @@ function applyConfigPatch(env: CommandEnv, key: string, value: string): void {
       patch.apiKey = value;
       env.llm.setCredentials?.(value, env.config.baseUrl ?? '');
       break;
-    case 'baseUrl':
-      patch.baseUrl = value;
-      env.llm.setCredentials?.(env.config.apiKey ?? '', value);
+    case 'baseUrl': {
+      const trimmedVal = value.trim();
+      const allowInsecure = /--(?:insecure|force|allow-http)\b/i.test(trimmedVal);
+      const cleanUrl = trimmedVal.replace(/--(?:insecure|force|allow-http)\b/gi, '').trim();
+
+      try {
+        const parsed = new URL(cleanUrl);
+        const isHttp = parsed.protocol === 'http:';
+        const isHttps = parsed.protocol === 'https:';
+        if (!isHttp && !isHttps) {
+          console.log('URL tidak valid: protokol harus http:// atau https://');
+          return;
+        }
+        const isSafeLocalOrLan = isPrivateOrLocalHost(parsed.hostname);
+
+        if (isHttp && !isSafeLocalOrLan && !allowInsecure) {
+          console.log(
+            yellow(
+              `Peringatan keamanan: Base URL "${cleanUrl}" menggunakan skema HTTP (cleartext) untuk host remote "${parsed.hostname}". ` +
+                'Risiko eksfiltrasi API key via MITM. Gunakan HTTPS atau tambahkan flag --insecure jika memang disengaja.',
+            ),
+          );
+          return;
+        }
+
+        if (isHttp && !allowInsecure) {
+          let trusted = true;
+          if (env.ask) {
+            const answer = (
+              await env.ask(
+                yellow(
+                  `Protokol HTTP (cleartext) terdeteksi untuk "${cleanUrl}". Apakah kamu mempercayai protokol/URL ini? (y/n): `,
+                ),
+              )
+            )
+              .trim()
+              .toLowerCase();
+            trusted = /^(y|yes|ya)$/i.test(answer);
+          } else if (env.confirm) {
+            trusted = await env.confirm(
+              `Set Base URL ke "${cleanUrl}" (HTTP cleartext)`,
+              'Apakah kamu mempercayai protokol/URL ini?',
+            );
+          }
+          if (!trusted) {
+            console.log(dim('  (Dibatalkan: protokol/URL HTTP tidak disetujui)'));
+            return;
+          }
+        }
+
+        patch.baseUrl = cleanUrl;
+        env.llm.setCredentials?.(env.config.apiKey ?? '', cleanUrl);
+      } catch {
+        console.log(`Nilai URL tidak valid: "${value}"`);
+        return;
+      }
       break;
+    }
     case 'model':
       patch.model = value;
       if (patch.model !== env.llm.model) env.llm.setModel(patch.model);

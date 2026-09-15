@@ -97,6 +97,16 @@ test('isSensitivePath & assertNotSensitivePath: mendeteksi path sensitif dan var
     assert.equal(isSensitivePath('ID_RSA', ws), true);
     assert.equal(isSensitivePath('KEY.PEM', ws), true);
 
+    // 5. /proc/*/environ
+    assert.equal(isSensitivePath('/proc/self/environ', ws), true);
+    assert.equal(isSensitivePath('/proc/1/environ', ws), true);
+    assert.equal(isSensitivePath('/proc/$$/environ', ws), true);
+    assert.equal(isSensitivePath('/proc/12345/environ', ws), true);
+    assert.throws(
+      () => assertNotSensitivePath('/proc/self/environ', ws),
+      /Akses ke file sensitif.*ditolak/,
+    );
+
     // Negative cases: file-file normal TIDAK boleh dianggap sensitif (anti-overblocking)
     assert.equal(isSensitivePath('package.json', ws), false);
     assert.equal(isSensitivePath('src/index.ts', ws), false);
@@ -628,6 +638,45 @@ test('webFetchTool: memblokir redirect hop yang mengarah ke target SSRF privat/m
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// VULN-02: Shell Wildcard Expansion pada exec
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('VULN-02: detectSensitiveFileAccessInExec memblokir wildcard yang menargetkan .ruko atau file sensitif', () => {
+  const blockedWildcards = [
+    'cat .ruko/conf*',
+    'cat .ruko/*',
+    'ls .ruko/*',
+    'head -n 10 .ruko/config.*',
+    'cat .env*',
+    'grep foo .env.*',
+    'cat *.pem',
+    'cat *.key',
+    'cat id_rsa*',
+    'cat id_ed25519*',
+    'cat ~/.ssh/*',
+  ];
+
+  for (const cmd of blockedWildcards) {
+    const res = detectSensitiveFileAccessInExec(cmd);
+    assert.equal(res.blocked, true, `Seharusnya diblokir: ${cmd}`);
+    assert.match(res.message ?? '', /akses ke file sensitif/i);
+  }
+
+  // Wildcard umum non-sensitif tetap diizinkan
+  const allowedWildcards = [
+    'ls *.ts',
+    'cat src/*.js',
+    'grep test docs/*.md',
+    'cat build/*.log',
+  ];
+
+  for (const cmd of allowedWildcards) {
+    const res = detectSensitiveFileAccessInExec(cmd);
+    assert.equal(res.blocked, false, `Seharusnya tidak diblokir: ${cmd}`);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Bagian F: Uji Bypass Encoding Path dan Command Filter Exec
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -747,5 +796,124 @@ test('symlink consistency: symlink ke berkas sensitif diblokir di readFileTool d
     assert.ok(parsedWrite.error && parsedWrite.error.includes('file sensitif'));
     assert.equal(readFileSync(join(ws, '.env'), 'utf8'), 'SECRET_SYMLINK_TOKEN=99999');
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VULN-03: Exfiltrasi Environment Variable via Runtime Scripting
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('VULN-03: isSensitiveEnvCommand memblokir eksekusi runtime inline yang membaca environment', () => {
+  const envDumpCommands = [
+    'node -e "console.log(process.env)"',
+    "node -e 'console.log(process.env)'",
+    'node --eval "process.stdout.write(JSON.stringify(process.env))"',
+    'python3 -c "import os; print(os.environ)"',
+    "python -c 'import os; print(os.environ)'",
+    'python3 -c "import os; print(os.getenv(\'API_KEY\'))"',
+    'ruby -e "p ENV"',
+    "ruby -e 'puts ENV.to_h'",
+    "perl -e 'print join(\" \", %ENV)'",
+    'perl -e "print $ENV{SECRET}"',
+    'php -r "print_r($_ENV);"',
+    'php -r "var_dump($_SERVER);"',
+    'declare -p',
+    'set',
+  ];
+
+  for (const cmd of envDumpCommands) {
+    assert.equal(isSensitiveEnvCommand(cmd), true, `Seharusnya terdeteksi sensitif: ${cmd}`);
+  }
+
+  // Perintah runtime normal tanpa akses env tetap aman
+  const harmlessCommands = [
+    'node -e "console.log(1 + 1)"',
+    'python3 -c "print(\'hello world\')"',
+    'ruby -e "puts 42"',
+    'perl -e "print 123"',
+    'php -r "echo 99;"',
+  ];
+
+  for (const cmd of harmlessCommands) {
+    assert.equal(isSensitiveEnvCommand(cmd), false, `Seharusnya tidak terdeteksi sensitif: ${cmd}`);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Point 2: Mitigasi Eksfiltrasi Environment Tidak Langsung (/proc/*/environ, awk ENVIRON, eval/subshell)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('Point 2: isSensitiveEnvCommand & detectSensitiveFileAccessInExec memblokir /proc/*/environ', () => {
+  const procCommands = [
+    'cat /proc/self/environ',
+    'strings /proc/self/environ',
+    'xxd /proc/self/environ',
+    'head -n 50 /proc/$$/environ',
+    'tail /proc/$PPID/environ',
+    'cat /proc/1234/environ',
+    'grep API_KEY /proc/self/environ',
+  ];
+
+  for (const cmd of procCommands) {
+    assert.equal(isSensitiveEnvCommand(cmd), true, `isSensitiveEnvCommand harus memblokir: ${cmd}`);
+    const fileAccess = detectSensitiveFileAccessInExec(cmd);
+    assert.equal(fileAccess.blocked, true, `detectSensitiveFileAccessInExec harus memblokir: ${cmd}`);
+  }
+
+  // File proc non-environ tetap diizinkan
+  assert.equal(isSensitiveEnvCommand('cat /proc/cpuinfo'), false);
+  assert.equal(isSensitiveEnvCommand('cat /proc/meminfo'), false);
+  assert.equal(detectSensitiveFileAccessInExec('cat /proc/cpuinfo').blocked, false);
+});
+
+test('Point 2: isSensitiveEnvCommand memblokir eksfiltrasi via awk ENVIRON array', () => {
+  const awkCommands = [
+    "awk 'BEGIN { for (k in ENVIRON) print k, ENVIRON[k] }'",
+    'gawk \'BEGIN { print ENVIRON["OPENAI_API_KEY"] }\'',
+    'mawk \'BEGIN { for (e in ENVIRON) printf("%s=%s\\n", e, ENVIRON[e]) }\'',
+    'nawk \'BEGIN { print ENVIRON["SECRET"] }\'',
+  ];
+
+  for (const cmd of awkCommands) {
+    assert.equal(isSensitiveEnvCommand(cmd), true, `Awk ENVIRON harus diblokir: ${cmd}`);
+  }
+
+  // Awk umum tanpa ENVIRON tetap diizinkan
+  const safeAwkCommands = [
+    "awk '{print $1}' data.csv",
+    "awk -F, 'NR>1 {print $2}' table.txt",
+    "gawk '{count++} END {print count}' log.txt",
+  ];
+
+  for (const cmd of safeAwkCommands) {
+    assert.equal(isSensitiveEnvCommand(cmd), false, `Awk normal tidak boleh diblokir: ${cmd}`);
+  }
+});
+
+test('Point 2: isSensitiveEnvCommand memblokir subshell / command substitution eksfiltrasi (eval, $(...), `...`)', () => {
+  const subshellCommands = [
+    'eval $(env)',
+    'eval "$(printenv)"',
+    'echo $(printenv)',
+    'echo `printenv`',
+    'eval "printenv"',
+    'cat <(printenv)',
+    'eval $(echo $API_KEY)',
+  ];
+
+  for (const cmd of subshellCommands) {
+    assert.equal(isSensitiveEnvCommand(cmd), true, `Subshell env exfiltration harus diblokir: ${cmd}`);
+  }
+
+  // Subshell normal tanpa pembocoran env tetap aman
+  const safeSubshellCommands = [
+    'echo $(date)',
+    'eval "echo 42"',
+    'echo `whoami`',
+    'cat <(ls -la)',
+  ];
+
+  for (const cmd of safeSubshellCommands) {
+    assert.equal(isSensitiveEnvCommand(cmd), false, `Subshell aman tidak boleh diblokir: ${cmd}`);
+  }
 });
 

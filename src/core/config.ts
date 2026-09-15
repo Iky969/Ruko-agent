@@ -31,10 +31,26 @@ export interface RukoConfigFile {
   activeProfile?: string;
   guardianEnabled?: boolean;
   guardianTimeoutMs?: number;
+  trustedWorkspace?: boolean;
 }
 
 export function defaultConfigPath(): string {
   return process.env.RUKO_CONFIG ?? join(process.cwd(), '.ruko', 'config.json');
+}
+
+/**
+ * Checks if a hostname belongs to localhost, loopback, mDNS, or RFC 1918 private LAN IP.
+ */
+export function isPrivateOrLocalHost(hostname: string): boolean {
+  if (!hostname) return false;
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '0.0.0.0') return true;
+  if (h.endsWith('.local') || h.endsWith('.lan') || h.endsWith('.home')) return true;
+  // RFC 1918 private IPv4:
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  return false;
 }
 
 /**
@@ -80,9 +96,9 @@ export function sanitizeConfigFile(raw: unknown): Partial<RukoConfigFile> {
       const isHttps = parsed.protocol === 'https:';
       if (!isHttp && !isHttps) {
         console.warn(`[config] Mengabaikan baseUrl "${trimmedUrl}": protokol harus http atau https.`);
-      } else if (isHttp && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
+      } else if (isHttp && !isPrivateOrLocalHost(parsed.hostname)) {
         // H3: Insecure remote HTTP transmits API key unencrypted over the wire
-        console.warn(`[config] Mengabaikan baseUrl "${trimmedUrl}": HTTP tidak aman untuk host remote (gunakan HTTPS atau localhost).`);
+        console.warn(`[config] Mengabaikan baseUrl "${trimmedUrl}": HTTP tidak aman untuk host remote (gunakan HTTPS, localhost, atau jaringan lokal).`);
       } else {
         clean.baseUrl = trimmedUrl;
       }
@@ -113,6 +129,9 @@ export function sanitizeConfigFile(raw: unknown): Partial<RukoConfigFile> {
   }
   if (typeof obj.activeProfile === 'string' && obj.activeProfile.trim()) {
     clean.activeProfile = obj.activeProfile.trim();
+  }
+  if (typeof obj.trustedWorkspace === 'boolean') {
+    clean.trustedWorkspace = obj.trustedWorkspace;
   }
 
   return clean;

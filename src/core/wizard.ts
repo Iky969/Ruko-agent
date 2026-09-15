@@ -109,6 +109,20 @@ export async function promptSetup(
       console.log(dim('  (Base URL wajib diisi — setup dibatalkan.)'));
       return null;
     }
+
+    if (/^http:\/\//i.test(baseUrl)) {
+      console.log(yellow(`\n  ⚠ Peringatan: Protokol HTTP (cleartext) terdeteksi untuk "${baseUrl}".`));
+      const trust = (
+        await rl.question(yellow('  Apakah kamu mempercayai protokol/URL ini? (y/n): '))
+      )
+        .trim()
+        .toLowerCase();
+      if (!/^(y|yes|ya)$/i.test(trust)) {
+        console.log(dim('  (Protokol/URL HTTP tidak disetujui — setup dibatalkan.)'));
+        return null;
+      }
+    }
+
     model = (await rl.question(`${green('  Model Name: ')}`)).trim();
     if (!model) {
       console.log(dim('  (Model wajib diisi — setup dibatalkan.)'));
@@ -143,7 +157,21 @@ export async function promptSetup(
           const newKey = (await readSecret(`${green('  API Key baru: ')}`)).trim();
           if (newKey) result.apiKey = newKey;
           const newUrl = (await rl.question(`${green(`  Base URL (sekarang: ${result.baseUrl}): `)}`)).trim();
-          if (newUrl) result.baseUrl = newUrl;
+          if (newUrl) {
+            if (/^http:\/\//i.test(newUrl)) {
+              console.log(yellow(`\n  ⚠ Peringatan: Protokol HTTP (cleartext) terdeteksi untuk "${newUrl}".`));
+              const trust = (
+                await rl.question(yellow('  Apakah kamu mempercayai protokol/URL ini? (y/n): '))
+              )
+                .trim()
+                .toLowerCase();
+              if (!/^(y|yes|ya)$/i.test(trust)) {
+                console.log(dim('  (Protokol/URL HTTP tidak disetujui — setup dibatalkan.)'));
+                return null;
+              }
+            }
+            result.baseUrl = newUrl;
+          }
           const newModel = (await rl.question(`${green(`  Model (sekarang: ${result.model}): `)}`)).trim();
           if (newModel) result.model = newModel;
         } catch {

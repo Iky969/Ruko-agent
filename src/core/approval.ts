@@ -158,38 +158,6 @@ export function extractSubshells(str: string): string[] {
   return subs;
 }
 
-/**
- * Extracts variable assignments from a command and resolves $VAR references.
- */
-export function extractAndResolveShellVariables(command: string): string[] {
-  const vars: Record<string, string> = {};
-  const assignRe = /(?:^|[;&|\s])([a-zA-Z_][a-zA-Z0-9_]*)=(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/g;
-  let m: RegExpExecArray | null;
-  while ((m = assignRe.exec(command)) !== null) {
-    const varName = m[1];
-    const varVal = m[2] ?? m[3] ?? m[4] ?? '';
-    vars[varName] = varVal;
-  }
-
-  if (Object.keys(vars).length === 0) {
-    return [command];
-  }
-
-  let expanded = command;
-  for (let pass = 0; pass < 3; pass++) {
-    let changed = false;
-    for (const [k, v] of Object.entries(vars)) {
-      const re = new RegExp(`\\$(?:\\{!?\\s*${k}\\s*\\}|${k}\\b)`, 'g');
-      if (re.test(expanded)) {
-        expanded = expanded.replace(re, v);
-        changed = true;
-      }
-    }
-    if (!changed) break;
-  }
-
-  return expanded !== command ? [command, expanded] : [command];
-}
 
 /**
  * Splits a shell command on chain operators (;  &&  ||  |) into individual
@@ -252,17 +220,87 @@ function testCandidates(segment: string): string[] {
   return Array.from(candidates);
 }
 
+/**
+ * VULN-01 fix: Extracts bash variable assignments (e.g. DIR=/etc, TARGET='/', export X=/bin)
+ * and resolves variable substitutions ($VAR, ${VAR}, ${VAR:-default}) throughout the command.
+ * Ensures destructive commands hiding behind variables are expanded and detected
+ * by regex gates.
+ */
+export function extractAndResolveShellVariables(command: string): string {
+  if (!command || typeof command !== 'string') return command;
+
+  const vars = new Map<string, string>();
+
+  // Match variable assignments: e.g. FOO=bar, export FOO="bar", TARGET='/'
+  const assignRegex = /(?:^|[;&|\s])(?:export\s+|readonly\s+|local\s+)?([a-zA-Z_][a-zA-Z0-9_]*)=(?:"([^"]*)"|'([^']*)'|([^;'"\s\t\n|&]+))/g;
+
+  let m: RegExpExecArray | null;
+  while ((m = assignRegex.exec(command)) !== null) {
+    const varName = m[1];
+    const val = m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : (m[4] ?? ''));
+    vars.set(varName, val);
+  }
+
+  if (vars.size === 0 && !command.includes('${')) {
+    return command;
+  }
+
+  // Resolve cross-variable references within variable values (up to 5 passes)
+  for (let pass = 0; pass < 5; pass++) {
+    let changed = false;
+    for (const [name, val] of vars.entries()) {
+      let resolvedVal = val;
+      for (const [k, v] of vars.entries()) {
+        const pattern = new RegExp(`\\$\\{${k}\\}|\\$${k}(?![a-zA-Z0-9_])`, 'g');
+        if (pattern.test(resolvedVal)) {
+          resolvedVal = resolvedVal.replace(pattern, v);
+          changed = true;
+        }
+      }
+      if (resolvedVal !== val) {
+        vars.set(name, resolvedVal);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  let resolvedCommand = command;
+
+  // First expand ${VAR:-default} and ${VAR:=default}
+  resolvedCommand = resolvedCommand.replace(
+    /\$\{([a-zA-Z_][a-zA-Z0-9_]*):-([^}]*)\}/g,
+    (_, varName, defVal) => {
+      const v = vars.get(varName);
+      return v && v.trim() ? v : defVal;
+    },
+  );
+
+  // Expand ${VAR} and $VAR for all extracted variables
+  for (const [k, v] of vars.entries()) {
+    resolvedCommand = resolvedCommand.replace(new RegExp(`\\$\\{${k}\\}`, 'g'), v);
+    resolvedCommand = resolvedCommand.replace(new RegExp(`\\$${k}(?![a-zA-Z0-9_])`, 'g'), v);
+  }
+
+  return resolvedCommand;
+}
+
 /** Classifies a shell command. */
 export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
+  const resolved = extractAndResolveShellVariables(command);
+
   if (!config.approvalEnabled || isYoloMode()) {
     // H4 fix: even when approval is disabled, BLOCKED patterns are still checked
     // to prevent catastrophic commands from ever executing.
-    return checkBlockedOnly(command);
+    return checkBlockedOnly(resolved);
   }
 
   let worst: RiskVerdict = { risk: 'none', reason: null };
 
-  const segments = chainedSegments(command);
+  const segments = [
+    ...chainedSegments(resolved),
+    ...(resolved !== command ? chainedSegments(command) : []),
+  ];
   for (const seg of segments) {
     const candidates = testCandidates(seg);
     for (const c of candidates) {
@@ -306,7 +344,11 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
  * are still refused even without the full approval gate.
  */
 function checkBlockedOnly(command: string): RiskVerdict {
-  const segments = chainedSegments(command);
+  const resolved = extractAndResolveShellVariables(command);
+  const segments = [
+    ...chainedSegments(resolved),
+    ...(resolved !== command ? chainedSegments(command) : []),
+  ];
   for (const seg of segments) {
     const candidates = testCandidates(seg);
     for (const c of candidates) {

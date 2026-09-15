@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs';
+import { Buffer } from 'node:buffer';
 import * as path from 'node:path';
 import { assertInsideWorkspace, assertNotSensitivePath, assertNotSecurityCore, getWorkspaceRoot, isPathInsideWorkspace, isSecurityCoreFile, isSensitivePath } from './tools.js';
 

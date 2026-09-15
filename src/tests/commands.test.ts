@@ -114,3 +114,111 @@ test('/context and /context set <jumlah> command works with validations', async 
   }
 });
 
+test('VULN-04: /config set baseUrl blocks cleartext remote HTTP unless overridden', async () => {
+  const { handleCommand } = await import('../agent/commands.js');
+  const { Context } = await import('../core/context.js');
+  const { DEFAULT_CONFIG } = await import('../types.js');
+
+  const config = { ...DEFAULT_CONFIG };
+  const ctx = new Context(config);
+
+  let updatedPatch: any = null;
+  const logged: string[] = [];
+  const origLog = console.log;
+  console.log = (msg: string) => logged.push(msg);
+
+  const env: any = {
+    ctx,
+    config,
+    llm: { model: 'test-model', isConfigured: true, setCredentials: () => {} },
+    confirm: async () => true,
+    updateConfig: (patch: any) => {
+      updatedPatch = patch;
+      Object.assign(config, patch);
+    },
+    handle: { stop: () => {}, getSessionId: () => null, setSessionId: () => {} },
+  };
+
+  try {
+    // 1. Remote HTTP without override -> rejected
+    logged.length = 0;
+    updatedPatch = null;
+    await handleCommand('/config set baseUrl http://attacker.com/v1', env);
+    assert.equal(updatedPatch, null);
+    assert.ok(logged.some((l) => l.includes('HTTP (cleartext) untuk host remote')));
+
+    // 2. Remote HTTP with --insecure -> allowed
+    logged.length = 0;
+    updatedPatch = null;
+    await handleCommand('/config set baseUrl http://attacker.com/v1 --insecure', env);
+    assert.equal(updatedPatch?.baseUrl, 'http://attacker.com/v1');
+
+    // 3. Localhost HTTP -> allowed
+    logged.length = 0;
+    updatedPatch = null;
+    await handleCommand('/config set baseUrl http://localhost:11434/v1', env);
+    assert.equal(updatedPatch?.baseUrl, 'http://localhost:11434/v1');
+
+    // 4. Remote HTTPS -> allowed
+    logged.length = 0;
+    updatedPatch = null;
+    await handleCommand('/config set baseUrl https://api.openai.com/v1', env);
+    assert.equal(updatedPatch?.baseUrl, 'https://api.openai.com/v1');
+
+    // 5. Private LAN IP / router HTTP -> allowed without --insecure
+    logged.length = 0;
+    updatedPatch = null;
+    await handleCommand('/config set baseUrl http://192.168.1.100:11434/v1', env);
+    assert.equal(updatedPatch?.baseUrl, 'http://192.168.1.100:11434/v1');
+
+    logged.length = 0;
+    updatedPatch = null;
+    await handleCommand('/config set baseUrl http://router.local:8000/v1', env);
+    assert.equal(updatedPatch?.baseUrl, 'http://router.local:8000/v1');
+
+    // 6. HTTP rejected by user trust check -> aborted
+    const untrustedEnv = {
+      ...env,
+      confirm: async () => false,
+    };
+    logged.length = 0;
+    updatedPatch = null;
+    await handleCommand('/config set baseUrl http://localhost:11434/v1', untrustedEnv);
+    assert.equal(updatedPatch, null);
+    assert.ok(logged.some((l) => l.includes('Dibatalkan: protokol/URL HTTP tidak disetujui')));
+  } finally {
+    console.log = origLog;
+  }
+});
+
+test('VULN-05: /undo <path> rejects path traversal outside workspace', async () => {
+  const { handleCommand } = await import('../agent/commands.js');
+  const { Context } = await import('../core/context.js');
+  const { DEFAULT_CONFIG } = await import('../types.js');
+
+  const config = { ...DEFAULT_CONFIG };
+  const ctx = new Context(config);
+
+  const logged: string[] = [];
+  const origLog = console.log;
+  console.log = (msg: string) => logged.push(msg);
+
+  const env: any = {
+    ctx,
+    config,
+    llm: { model: 'test-model', isConfigured: true },
+    confirm: async () => true,
+    updateConfig: () => {},
+    handle: { stop: () => {}, getSessionId: () => null, setSessionId: () => {} },
+  };
+
+  try {
+    logged.length = 0;
+    await handleCommand('/undo ../../../etc/passwd', env);
+    assert.ok(logged.some((l) => l.includes('di luar working directory')));
+  } finally {
+    console.log = origLog;
+  }
+});
+
+
