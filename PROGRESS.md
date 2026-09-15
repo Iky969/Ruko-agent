@@ -4,6 +4,22 @@
 
 ---
 
+### v1.7.3 (15 September 2026) — Perombakan Menu Bantuan /? & /help dengan Desain Chip/Badge Highlight Freebuff CLI & Kategorisasi ANSI Native
+
+#### Ditambahkan & Diperbarui
+- **Perombakan Menu Perintah Bantuan Chip/Badge Highlight (`src/agent/commands.ts`, `src/core/loop.ts`)**:
+  * Mengadopsi format badge pill modern bergaya Freebuff CLI: setiap nama perintah dibungkus badge berlatar belakang biru tua (ANSI `\x1b[48;5;18m\x1b[1;97m /command \x1b[0m`) dengan 1 spasi padding sebelum dan sesudah nama perintah (` /command `).
+  * Menyusun tata letak perataan kolom rata kiri yang presisi di mana seluruh deskripsi perintah dimulai pada kolom yang sama (indeks 17), menggunakan warna abu-abu terang netral (`\x1b[37m`) dan hint/alias (`\x1b[90m`).
+  * Mengelompokkan seluruh 27 perintah ke dalam 4 kategori terstruktur: `[ Sesi & Model ]`, `[ Konfigurasi & Budget ]`, `[ Operasi & Eksekusi ]`, dan `[ Sistem & Bantuan ]`, dengan badge header berlatar redup (`\x1b[48;5;236m\x1b[1;36m`) dan garis aksen tipis responsif (`\x1b[90m─\x1b[0m`).
+  * Memastikan tampilan responsif dan tidak merusak text wrap pada terminal layar sempit Android/Termux (40–60 kolom) dengan pembatasan lebar garis divider adaptif terhadap lebar terminal (`terminalWidth() - 1`).
+  * Mempertahankan zero third-party dependencies menggunakan escape sequence ANSI native murni.
+  * Menyelaraskan fallback non-TTY `printSlashMenu()` pada `src/core/loop.ts` agar menampilkan menu Chip/Badge yang identik.
+- **Rangkaian Pengujian Mandiri**:
+  * Menambahkan 4 unit test baru di `src/tests/commands.test.ts` untuk memvalidasi format badge ANSI navy blue, struktur kategori berbadge, presisi perataan kolom deskripsi, dan kepatuhan batas 40 kolom pada layar sempit.
+  * Total unit test meningkat menjadi **486 tests passed** (100% lulus, 0 fail), dan `npm run typecheck` 100% bersih tanpa galat.
+
+---
+
 ### v1.7.2 (15 September 2026) — Thought Stream Sliding Window, System Prompt Reasoning Contract, DeepSeek DSML Tool Parser (BUG A), Multi-Step Task Completion Guard (BUG B), Active Context Command /ctx (BUG C), & Responsive Status Bar (BUG D)
 
 #### Ditambahkan & Diperbarui
@@ -493,3 +509,9 @@ Status dan resolusi batasan arsitektural:
    - TypeScript strict mode, ESM format (`.js` extension pada relative imports).
    - Seluruh pesan interaksi CLI dan dokumentasi menggunakan Bahasa Indonesia.
    - Jangan membuat git tag baru sebelum diinstruksikan oleh pengguna.
+
+---
+
+## Gemini 3.8 Flash (High)
+- Kontribusi: Perombakan menu bantuan /? dan /help dengan gaya Chip/Badge Highlight modern Freebuff CLI & pengelompokan kategori ANSI
+- Tanggal: 15 September 2026

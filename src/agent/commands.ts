@@ -5,7 +5,7 @@ import { Context } from '../core/context.js';
 import { isPrivateOrLocalHost, saveConfig } from '../core/config.js';
 import { execute } from '../core/executor.js';
 import { promptSetup, SetupResult } from '../core/wizard.js';
-import { bold, cyan, dim, formatDuration, formatK, green, renderBox, red, yellow } from '../core/ui.js';
+import { bold, cyan, dim, formatDuration, formatK, green, renderBox, red, terminalWidth, visibleLength, yellow } from '../core/ui.js';
 import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
@@ -45,6 +45,7 @@ type CommandHandler = (args: string, env: CommandEnv) => Promise<void> | void;
 interface CommandDef {
   name: string;
   aliases?: string[];
+  category?: string;
   help: string;
   /** Argument hint shown by autocomplete/`/help` (§3.19). */
   hint?: string;
@@ -55,7 +56,8 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'help',
     aliases: ['?'],
-    help: 'Show this help.',
+    category: 'Sistem & Bantuan',
+    help: 'Tampilkan daftar perintah interaktif.',
     run: () => {
       console.log(buildHelpText());
     },
@@ -63,11 +65,13 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'exit',
     aliases: ['quit'],
+    category: 'Sistem & Bantuan',
     help: 'Keluar (sesi disimpan otomatis).',
     run: (_args, env) => env.handle.stop(),
   },
   {
     name: 'login',
+    category: 'Sesi & Model',
     help: 'Wizard provider: kredensial + tes koneksi langsung.',
     run: async (_args, env) => {
       await runSetupFlow(env);
@@ -76,6 +80,7 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'new',
     aliases: ['reset'],
+    category: 'Sesi & Model',
     help: 'Simpan sesi saat ini lalu mulai percakapan baru.',
     run: (_args, env) => {
       if (env.ctx.size > 0) {
@@ -88,6 +93,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'sessions',
+    category: 'Sesi & Model',
     help: 'Daftar sesi tersimpan.',
     run: () => {
       const dir = join(getWorkspaceRoot(), '.ruko', 'sessions');
@@ -108,6 +114,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'search',
+    category: 'Sesi & Model',
     help: 'Cari kata kunci lintas sesi tersimpan.',
     hint: '<query>',
     run: (args) => {
@@ -135,6 +142,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'resume',
+    category: 'Sesi & Model',
     help: 'Lanjutkan sesi tersimpan.',
     hint: '<id>  (lihat /sessions)',
     run: (args, env) => {
@@ -159,6 +167,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'export',
+    category: 'Sesi & Model',
     help: 'Ekspor log giliran percakapan dan jejak tool sesi aktif.',
     hint: '[json|markdown]',
     run: (args, env) => {
@@ -180,6 +189,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'clear',
+    category: 'Operasi & Eksekusi',
     help: 'Hapus konteks percakapan saat ini.',
     run: (_args, env) => {
       const removed = env.ctx.size;
@@ -189,6 +199,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'compact',
+    category: 'Konfigurasi & Budget',
     help: 'Paksa ringkas history lama sekarang (tanpa tunggu budget).',
     run: (_args, env) => {
       const before = env.ctx.totalChars;
@@ -203,6 +214,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'plan',
+    category: 'Operasi & Eksekusi',
     help: 'Mode rencana: hanya baca & usulkan, eksekusi diblokir di kode.',
     hint: 'on | off',
     run: (args, env) => {
@@ -222,7 +234,8 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'undo',
-    help: 'Batalkan perubahan file (snapshot .ruko/undo atau git rollback).',
+    category: 'Operasi & Eksekusi',
+    help: 'Batalkan perubahan berkas terakhir.',
     hint: '[path-file]',
     run: (args, _env) => {
       const target = args.trim();
@@ -265,6 +278,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'role',
+    category: 'Sistem & Bantuan',
     help: 'Lihat/ganti role AI (default, reviewer, teacher, minimal, kustom).',
     hint: '[nama role]',
     run: (args, env) => {
@@ -292,6 +306,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'mode',
+    category: 'Sistem & Bantuan',
     help: 'Mode pengguna: beginner (guide penuh) atau pro (ringkas).',
     hint: 'beginner | pro',
     run: (args, env) => {
@@ -327,6 +342,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'anim',
+    category: 'Sistem & Bantuan',
     help: 'Toggle animasi Pac-Man saat AI berpikir (on/off).',
     hint: '[on|off]',
     run: (args, env) => {
@@ -349,6 +365,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'profile',
+    category: 'Sesi & Model',
     help: 'Provider multi-profil: ganti cepat alias (hemat, kuat, lokal).',
     hint: '[alias]',
     run: async (args, env) => {
@@ -380,6 +397,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'exec',
+    category: 'Operasi & Eksekusi',
     help: 'Jalankan perintah shell (output di-summarize otomatis).',
     hint: '<command>',
     run: async (args, env) => {
@@ -401,6 +419,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'history',
+    category: 'Operasi & Eksekusi',
     help: 'Tampilkan n pesan konteks terakhir (default 5).',
     hint: '[n]',
     run: (args, env) => {
@@ -417,6 +436,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'context',
+    category: 'Konfigurasi & Budget',
     help: 'Lihat statistik atau ubah budget konteks (/context set <jumlah>).',
     hint: '[set <jumlah>]',
     run: (args, env) => {
@@ -470,6 +490,7 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'settings',
     aliases: ['setting', 'set'],
+    category: 'Konfigurasi & Budget',
     help: 'Dashboard konfigurasi: lihat & ubah budget context, max token, model, role, approval, dan mode.',
     hint: '[context|max-tokens|role|mode|approval|anim|save] [nilai]',
     run: async (args, env) => {
@@ -652,6 +673,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'setctx',
+    category: 'Konfigurasi & Budget',
     help: 'Atur batas karakter context window (/setctx <jumlah_karakter|50k>).',
     hint: '[jumlah|50k]',
     run: (args, env) => {
@@ -693,6 +715,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'settoken',
+    category: 'Konfigurasi & Budget',
     help: 'Atur budget context window berdasarkan estimasi token (/settoken <token|16k>).',
     hint: '[token|16k]',
     run: (args, env) => {
@@ -738,6 +761,7 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'ctx',
     aliases: ['status'],
+    category: 'Konfigurasi & Budget',
     help: 'Lihat limit context aktif, token budget, dan persentase penggunaan saat ini.',
     run: (_args, env) => {
       const budgetChars = env.config.maxContextChars;
@@ -765,6 +789,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'memory',
+    category: 'Operasi & Eksekusi',
     help: 'Lihat isi persistent memory (.ruko/memory.md) atau reset.',
     hint: '[clear]',
     run: (args) => {
@@ -802,6 +827,7 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'usage',
     aliases: ['stats', 'tokens'],
+    category: 'Konfigurasi & Budget',
     help: 'Statistik pemakaian sesi (context window, model, akumulasi token sesi).',
     hint: '[clear]',
     run: (args, env) => {
@@ -861,7 +887,8 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'config',
-    help: 'Tampilkan / ubah konfigurasi (.ruko/config.json).',
+    category: 'Konfigurasi & Budget',
+    help: 'Ubah parameter konfigurasi model/runtime.',
     hint: '[set <k> <v> | setup]',
     run: async (args, env) => {
       const parts = args.trim().split(/\s+/);
@@ -900,6 +927,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'model',
+    category: 'Sesi & Model',
     help: 'Lihat model aktif + daftar model, atau ganti.',
     hint: '[nama]',
     run: async (args, env) => {
@@ -1110,45 +1138,88 @@ export function isCommand(input: string): boolean {
 }
 
 /** Command registry exposed for the `/` menu + generated docs (§3.17). */
-export function listCommands(): Array<{ name: string; help: string; hint?: string }> {
-  return COMMANDS.map((c) => ({ name: c.name, help: c.help, hint: c.hint }));
+export function listCommands(): Array<{ name: string; help: string; hint?: string; category?: string }> {
+  return COMMANDS.map((c) => ({ name: c.name, help: c.help, hint: c.hint, category: c.category }));
 }
 
 /** Filtered registry for incremental autocomplete. */
-export function matchCommands(prefix: string): Array<{ name: string; help: string; hint?: string }> {
+export function matchCommands(prefix: string): Array<{ name: string; help: string; hint?: string; category?: string }> {
   const p = prefix.replace(/^\//, '').toLowerCase();
   return listCommands().filter((c) => c.name.startsWith(p));
 }
 
 /**
- * `/help` text GENERATED from the registry — the single source of truth also
- * used by autocomplete and README output, so they never drift (§3.17).
+ * `/help` text GENERATED from the registry — modern Chip/Badge Highlight layout
+ * with categorized command chips, precision left-alignment, and Termux-safe widths.
  */
 export function buildHelpText(): string {
-  const lines = [
-    'Ruko — AI Coding Agent CLI',
-    '===========================',
-    'Slash commands:',
-  ];
-  for (const c of COMMANDS) {
-    const names = `/${c.name}${(c.aliases ?? []).map((a) => `, /${a}`).join('')}`;
-    const usage = (names + (c.hint ? ` ${c.hint}` : '')).padEnd(24);
-    lines.push(`  ${usage} ${c.help}`);
-  }
+  const lines: string[] = [];
+  const termWidth = terminalWidth();
+  const maxLineWidth = Math.min(termWidth - 1, 72);
+
   lines.push(
+    `\x1b[1;36mRuko\x1b[0m \x1b[90m—\x1b[0m \x1b[37mAI Coding Agent CLI\x1b[0m`,
+    `\x1b[90mKetik perintah menggunakan chip badge di bawah atau \x1b[1;36m/\x1b[0m\x1b[90m untuk menu interaktif.\x1b[0m`,
     '',
-    'Input biasa:',
-    '  run <cmd>             Eksekusi perintah shell langsung (manual mode)',
-    '  lainnya               Disimpan ke konteks; dikirim ke AI backend jika aktif',
-    '                        (jawaban LLM di-stream real-time, tool pakai diff visual)',
-    '',
-    'Catatan:',
-    '  Perintah berisiko (rm -rf, sudo, git push, dll) butuh konfirmasi y/N.',
-    '  Tanpa API key: jalankan ruko → wizard /login tes koneksi langsung.',
-    '  Plan mode (/plan) memblokir eksekusi di level kode, bukan cuma prompt.',
-    '  Perubahan file bisa dibatalkan dengan /undo (snapshot .ruko/undo).',
-    '  Bypass persetujuan: RUKO_YOLO_MODE=1 atau approvalEnabled=false.',
   );
+
+  const categories = [
+    'Sesi & Model',
+    'Konfigurasi & Budget',
+    'Operasi & Eksekusi',
+    'Sistem & Bantuan',
+  ];
+
+  // Width allocated for the command badge column so descriptions line up with precision.
+  // Indent: 2 spaces ('  '). Badge: ' /command '.
+  // With BADGE_COL_WIDTH = 15, description begins at index 17 (column 18) for all commands.
+  const BADGE_COL_WIDTH = 15;
+
+  for (const cat of categories) {
+    const headerTitle = ` [ ${cat} ] `;
+    // Category badge with dim background (ANSI 256 #236) and bold cyan text
+    const headerBadge = `  \x1b[48;5;236m\x1b[1;36m${headerTitle}\x1b[0m`;
+    const remainingDash = Math.max(2, Math.min(28, maxLineWidth - (2 + headerTitle.length) - 1));
+    const accentLine = `\x1b[90m ${'─'.repeat(remainingDash)}\x1b[0m`;
+    lines.push(headerBadge + accentLine);
+
+    const cmds = COMMANDS.filter((c) => (c.category ?? 'Sistem & Bantuan') === cat);
+    for (const c of cmds) {
+      // Command pill badge: dark navy background (\x1b[48;5;18m), bold bright white (\x1b[1;97m)
+      // 1 space padding inside before and after command name
+      const badgeText = ` /${c.name} `;
+      const badge = `\x1b[48;5;18m\x1b[1;97m${badgeText}\x1b[0m`;
+      const padCount = Math.max(2, BADGE_COL_WIDTH - badgeText.length);
+      const padding = ' '.repeat(padCount);
+
+      // Description in neutral light gray (\x1b[37m)
+      let desc = `\x1b[37m${c.help}\x1b[0m`;
+      if (c.hint) {
+        desc += ` \x1b[90m(${c.hint})\x1b[0m`;
+      }
+      if (c.aliases && c.aliases.length > 0) {
+        desc += ` \x1b[90m[alias: ${c.aliases.map((a) => `/${a}`).join(', ')}]\x1b[0m`;
+      }
+
+      lines.push(`  ${badge}${padding}${desc}`);
+    }
+    lines.push('');
+  }
+
+  // Input guide & notes section with matching badge styling
+  lines.push(
+    `  \x1b[48;5;236m\x1b[1;36m [ Masukan & Eksekusi ] \x1b[0m\x1b[90m ───────────\x1b[0m`,
+    `  \x1b[48;5;18m\x1b[1;97m run <cmd> \x1b[0m     \x1b[37mEksekusi perintah shell langsung (manual mode)\x1b[0m`,
+    `  \x1b[48;5;18m\x1b[1;97m <pesan> \x1b[0m       \x1b[37mDisimpan ke konteks; dikirim ke AI backend jika aktif\x1b[0m`,
+    '',
+    `  \x1b[48;5;236m\x1b[1;36m [ Catatan & Keamanan ] \x1b[0m\x1b[90m ───────────\x1b[0m`,
+    `  \x1b[90m•\x1b[0m \x1b[37mPerintah berisiko (rm -rf, sudo, git push, dll) butuh konfirmasi y/N.\x1b[0m`,
+    `  \x1b[90m•\x1b[0m \x1b[37mTanpa API key: jalankan ruko → wizard /login tes koneksi langsung.\x1b[0m`,
+    `  \x1b[90m•\x1b[0m \x1b[37mPlan mode (/plan) memblokir eksekusi di level kode, bukan cuma prompt.\x1b[0m`,
+    `  \x1b[90m•\x1b[0m \x1b[37mPerubahan file bisa dibatalkan dengan /undo (snapshot .ruko/undo).\x1b[0m`,
+    `  \x1b[90m•\x1b[0m \x1b[37mBypass persetujuan: RUKO_YOLO_MODE=1 atau approvalEnabled=false.\x1b[0m`,
+  );
+
   return lines.join('\n');
 }
 

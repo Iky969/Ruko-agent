@@ -1,7 +1,7 @@
 import * as readline from 'node:readline';
 import { readFileSync } from 'node:fs';
 import { Agent } from '../agent/agent.js';
-import { handleCommand, listCommands } from '../agent/commands.js';
+import { buildHelpText, handleCommand, listCommands } from '../agent/commands.js';
 import { Confirmer } from './approval.js';
 import { saveConfig } from './config.js';
 import { AgentConfig } from '../types.js';
@@ -392,8 +392,7 @@ export class SystemLoop {
 
   /** Static command list (piped/non-TTY fallback); the TTY path uses an overlay. */
   private printSlashMenu(): void {
-    const items = listCommands().map((c) => `${cyan('/' + c.name + (c.hint ? ` ${c.hint}` : ''))}  ${c.help}`);
-    process.stdout.write(`${renderBox('Slash commands', items)}\n`);
+    process.stdout.write(`${buildHelpText()}\n`);
   }
 
   private refreshPrompt(): void {

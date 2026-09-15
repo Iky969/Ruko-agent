@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildHelpText, listCommands, matchCommands } from '../agent/commands.js';
+import { visibleLength } from '../core/ui.js';
 
 test('every core command from feedback §3.18 exists', () => {
   const names = new Set(listCommands().map((c) => c.name));
@@ -218,6 +219,89 @@ test('VULN-05: /undo <path> rejects path traversal outside workspace', async () 
     assert.ok(logged.some((l) => l.includes('di luar working directory')));
   } finally {
     console.log = origLog;
+  }
+});
+
+test('/help renders modern Freebuff-style Chip/Badge Highlight with navy background and 1 space inside', () => {
+  const help = buildHelpText();
+  // Navy background \x1b[48;5;18m and bold bright white \x1b[1;97m
+  assert.ok(help.includes('\x1b[48;5;18m\x1b[1;97m /help \x1b[0m'));
+  assert.ok(help.includes('\x1b[48;5;18m\x1b[1;97m /config \x1b[0m'));
+  assert.ok(help.includes('\x1b[48;5;18m\x1b[1;97m /undo \x1b[0m'));
+
+  // Every command must have 1 leading space and 1 trailing space inside badge
+  for (const c of listCommands()) {
+    assert.ok(
+      help.includes(`\x1b[48;5;18m\x1b[1;97m /${c.name} \x1b[0m`),
+      `Badge missing or incorrectly padded for /${c.name}`,
+    );
+  }
+
+  // Description must use neutral light gray \x1b[37m
+  assert.ok(help.includes('\x1b[37m'));
+});
+
+test('/help groups commands into elegant categorized badge headers', () => {
+  const help = buildHelpText();
+  const categories = [
+    '[ Sesi & Model ]',
+    '[ Konfigurasi & Budget ]',
+    '[ Operasi & Eksekusi ]',
+    '[ Sistem & Bantuan ]',
+  ];
+
+  for (const cat of categories) {
+    assert.ok(help.includes(cat), `Missing category header: ${cat}`);
+    // Dim background \x1b[48;5;236m with bold cyan \x1b[1;36m
+    assert.ok(
+      help.includes(`\x1b[48;5;236m\x1b[1;36m ${cat} \x1b[0m`),
+      `Category header badge style missing for ${cat}`,
+    );
+  }
+});
+
+test('/help aligns descriptions with precise column spacing', () => {
+  const help = buildHelpText();
+  const lines = help.split('\n');
+
+  for (const c of listCommands()) {
+    const line = lines.find((l) => l.includes(`/${c.name} `));
+    assert.ok(line, `Line for /${c.name} not found`);
+
+    // Match leading spaces, badge, padding, and the start of description \x1b[37m
+    const match = line.match(/^(\s*\x1b\[48;5;18m\x1b\[1;97m\s+\/[^\s]+\s+\x1b\[0m\s*)(?=\x1b\[37m)/);
+    assert.ok(match, `Invalid layout format for /${c.name}`);
+
+    // Visible length of leading indent + badge + padding must be exactly 17
+    const prefixVisible = visibleLength(match[1]);
+    assert.equal(
+      prefixVisible,
+      17,
+      `Expected prefix column visible width of 17 for /${c.name}, got ${prefixVisible}`,
+    );
+  }
+});
+
+test('/help header and badges fit safely within narrow 40-60 column terminals without wrapping issues', () => {
+  const origCols = process.env.COLUMNS;
+  try {
+    process.env.COLUMNS = '40';
+    const help40 = buildHelpText();
+    const lines = help40.split('\n');
+
+    for (const line of lines) {
+      // Category header line must not exceed 40 columns
+      if (line.includes('[ Sesi & Model ]') || line.includes('[ Konfigurasi & Budget ]')) {
+        const len = visibleLength(line);
+        assert.ok(
+          len <= 39,
+          `Category header line exceeds 39 cols on 40-col screen: ${len} (${line})`,
+        );
+      }
+    }
+  } finally {
+    if (origCols !== undefined) process.env.COLUMNS = origCols;
+    else delete process.env.COLUMNS;
   }
 });
 
