@@ -59,6 +59,8 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Tanggal: 2026-09-15
 - Kontribusi: Release v1.7.2 — Thought Stream live sliding window (FIFO 12-15 kata ANSI dim), kontrak penalaran system prompt (<thought>), parser tool-call DeepSeek DSML & XML (BUG A), multi-step task completion guard anti-premature halt (BUG B), command /ctx & /status inspeksi context budget (BUG C), responsive status bar layar sempit Termux (BUG D), default context window bebas (128k token / 512k chars), dashboard konfigurasi terpadu /settings (context, max-tokens, role, mode, approval, anim), pelacakan waktu kerja aktif agen & cache tokens pada /usage, placeholder prompt ' /? for help, ask anything...', dan alias /? untuk /help
 - Tanggal: 2026-09-15
+- Kontribusi: Comprehensive QA & Code Audit Remediation — Perbaikan stateful global RegExp lastIndex skip pada `codeSearchTool`, mitigasi path traversal & arbitrary file deletion/overwrite snapshot metadata `/undo` dengan validasi workspace sandboxing (`validateSnapshotPath`), restorasi persistensi `maxOutputTokens` & `provider` pada `sanitizeConfigFile` serta parsing multiplier `k`/`m` di `/config`, resolusi glitch visual responsive divider/approval header serta implementasi stateful `TerminalMarkdownFormatter` untuk streaming code blocks di `LineGate`, perbaikan seleksi menu "/" pada ambient mode di TUI, sanitasi quote stripping pada kredensial URL `OpenAiCompatibleProvider` & wizard, dan penambahan rangkaian unit test verifikasi (`audit_fixes.test.ts`).
+- Tanggal: 2026-09-17
 
 ## Claude Opus 4.6
 - Kontribusi: Audit keamanan pre-publish & inisiasi implementasi hardening

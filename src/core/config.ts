@@ -21,6 +21,7 @@ export interface RukoConfigFile {
   approvalEnabled?: boolean;
   approvalAllowlist?: string[];
   model?: string;
+  provider?: string;
   apiKey?: string;
   baseUrl?: string;
   mode?: UiMode;
@@ -29,6 +30,7 @@ export interface RukoConfigFile {
   profiles?: Record<string, ProviderProfile>;
   defaultProfile?: string;
   activeProfile?: string;
+  maxOutputTokens?: number;
   guardianEnabled?: boolean;
   guardianTimeoutMs?: number;
   trustedWorkspace?: boolean;
@@ -84,6 +86,12 @@ export function sanitizeConfigFile(raw: unknown): Partial<RukoConfigFile> {
   }
   if (typeof obj.model === 'string' && obj.model.trim()) {
     clean.model = obj.model.trim();
+  }
+  if (typeof obj.provider === 'string' && obj.provider.trim()) {
+    clean.provider = obj.provider.trim();
+  }
+  if (typeof obj.maxOutputTokens === 'number' && obj.maxOutputTokens > 0 && Number.isFinite(obj.maxOutputTokens)) {
+    clean.maxOutputTokens = Math.min(Math.trunc(obj.maxOutputTokens), 1_000_000);
   }
   if (typeof obj.apiKey === 'string') {
     clean.apiKey = obj.apiKey;

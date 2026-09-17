@@ -763,7 +763,7 @@ export async function codeSearchTool(
 
   const allowedExts = parseExtensionFilter(opts.extension);
 
-  let flags = 'g';
+  let flags = '';
   if (!opts.caseSensitive) flags += 'i';
 
   let matcher: RegExp;

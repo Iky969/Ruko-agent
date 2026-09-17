@@ -862,7 +862,11 @@ export class LineEditor {
     // Ambient Enter (AI busy): erase the region, hand the line to the loop
     // (which shows the queue modal), and redraw with an empty buffer.
     if (!this.pending && this.ambient) {
-      const value = this.buffer;
+      let value = this.buffer;
+      if (this.menuNavigated && this.menu.length > 0 && this.menu[this.selected]) {
+        const item = this.menu[this.selected];
+        value = (item.insert ?? item.label).trim();
+      }
       this.buffer = '';
       this.cursor = 0;
       this.menu = [];

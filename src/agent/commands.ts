@@ -9,7 +9,7 @@ import { bold, cyan, dim, formatDuration, formatK, green, renderBox, red, termin
 import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
-import { assertInsideWorkspace, getWorkspaceRoot } from './tools.js';
+import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot } from './tools.js';
 import { AgentConfig, ProviderProfile, UiMode } from '../types.js';
 import { ConnectionResult, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
@@ -239,11 +239,13 @@ const COMMANDS: CommandDef[] = [
     hint: '[path-file]',
     run: (args, _env) => {
       const target = args.trim();
+      const ws = getWorkspaceRoot();
       if (target) {
-        const ws = getWorkspaceRoot();
         const abs = resolvePath(ws, target);
         try {
           assertInsideWorkspace(abs, ws);
+          assertNotSecurityCore(abs, ws);
+          assertNotSensitivePath(abs, ws);
         } catch (err) {
           console.log(`(gagal membatalkan perubahan "${target}": ${err instanceof Error ? err.message : String(err)})`);
           return;
@@ -262,18 +264,22 @@ const COMMANDS: CommandDef[] = [
         );
         return;
       }
-      const result = undoLast();
-      if (!result) {
-        console.log('(tidak ada perubahan file yang bisa dibatalkan)');
-        return;
+      try {
+        const result = undoLast(undefined, ws);
+        if (!result) {
+          console.log('(tidak ada perubahan file yang bisa dibatalkan)');
+          return;
+        }
+        console.log(
+          result.action === 'restored'
+            ? `↩ File dikembalikan ke kondisi sebelum edit: ${shortPath(result.restored)}`
+            : `↩ File baru hasil edit terakhir dihapus: ${shortPath(result.restored)}`,
+        );
+        const remaining = listSnapshots().length;
+        if (remaining > 0) console.log(dim(`  (${remaining} snapshot tersisa — /undo lagi untuk mundur lebih jauh)`));
+      } catch (err) {
+        console.log(`(gagal membatalkan perubahan: ${err instanceof Error ? err.message : String(err)})`);
       }
-      console.log(
-        result.action === 'restored'
-          ? `↩ File dikembalikan ke kondisi sebelum edit: ${shortPath(result.restored)}`
-          : `↩ File baru hasil edit terakhir dihapus: ${shortPath(result.restored)}`,
-      );
-      const remaining = listSnapshots().length;
-      if (remaining > 0) console.log(dim(`  (${remaining} snapshot tersisa — /undo lagi untuk mundur lebih jauh)`));
     },
   },
   {
@@ -897,10 +903,12 @@ const COMMANDS: CommandDef[] = [
         const key = maskApiKey(c.apiKey);
         console.log(
           renderBox('Config', [
+            `provider: ${c.provider ?? env.llm.name}`,
             `apiKey: ${key}`,
             `baseUrl: ${maskBaseUrl(c)}`,
             `maxLogChars: ${c.maxLogChars}`,
             `maxContextChars: ${c.maxContextChars}`,
+            `maxOutputTokens: ${c.maxOutputTokens ?? 4096}`,
             `execTimeoutMs: ${c.execTimeoutMs}`,
             `approvalEnabled: ${c.approvalEnabled}`,
             `approvalAllowlist: ${c.approvalAllowlist.length > 0 ? c.approvalAllowlist.join(', ') : '(kosong)'}`,
@@ -1029,16 +1037,33 @@ async function runSetupFlow(env: CommandEnv): Promise<void> {
   console.log(`Konfigurasi tersimpan: baseUrl=${result.baseUrl}, model=${result.model} (API key di-mask).`);
 }
 
+function parseConfigNumber(val: string): number {
+  const match = val.trim().match(/^(\d+(?:\.\d+)?)\s*([kmg])?b?$/i);
+  if (!match) return NaN;
+  const num = parseFloat(match[1]);
+  const unit = (match[2] ?? '').toLowerCase();
+  const mult = unit === 'g' ? 1_000_000_000 : unit === 'm' ? 1_000_000 : unit === 'k' ? 1_000 : 1;
+  return Math.round(num * mult);
+}
+
 async function applyConfigPatch(env: CommandEnv, key: string, value: string): Promise<void> {
   const patch: Partial<AgentConfig> = {};
   switch (key) {
     case 'maxLogChars':
     case 'maxContextChars':
+    case 'maxOutputTokens':
     case 'execTimeoutMs': {
-      const n = parseInt(value, 10);
+      const n = parseConfigNumber(value);
       if (Number.isNaN(n) || n <= 0) {
         console.log(`Nilai tidak valid untuk ${key}: ${value}`);
         return;
+      }
+      if (key === 'maxContextChars' && env.ctx && env.ctx.totalChars > n) {
+        console.log(
+          yellow(
+            `Peringatan: total karakter memori saat ini (${env.ctx.totalChars}) melebihi limit baru (${n}). Percakapan akan terkompresi otomatis.`,
+          ),
+        );
       }
       patch[key] = n;
       break;
@@ -1061,6 +1086,15 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
       patch.apiKey = value;
       env.llm.setCredentials?.(value, env.config.baseUrl ?? '');
       break;
+    case 'provider': {
+      const p = value.trim();
+      if (!p) {
+        console.log('Nilai provider tidak boleh kosong.');
+        return;
+      }
+      patch.provider = p;
+      break;
+    }
     case 'baseUrl': {
       const trimmedVal = value.trim();
       const allowInsecure = /--(?:insecure|force|allow-http)\b/i.test(trimmedVal);
@@ -1124,7 +1158,7 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
       if (patch.model !== env.llm.model) env.llm.setModel(patch.model);
       break;
     default:
-      console.log(`Key tidak dikenal: ${key} (maxLogChars, maxContextChars, execTimeoutMs, approvalEnabled, funAnimations, apiKey, baseUrl, model)`);
+      console.log(`Key tidak dikenal: ${key} (provider, model, apiKey, baseUrl, maxLogChars, maxContextChars, maxOutputTokens, execTimeoutMs, approvalEnabled, funAnimations)`);
       return;
   }
   env.updateConfig(patch);

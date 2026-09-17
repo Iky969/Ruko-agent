@@ -195,7 +195,7 @@ export function printBox(title: string, lines: string[]): void {
  * Responsive to terminal width (fallback process.stdout.columns ?? 80).
  */
 export function renderDivider(char = '─', colorFn: (s: string) => string = dim): string {
-  const cols = process.stdout.columns ?? 80;
+  const cols = terminalWidth();
   const width = Math.max(20, cols - 1);
   return colorFn(char.repeat(width));
 }
@@ -205,7 +205,7 @@ export function renderDivider(char = '─', colorFn: (s: string) => string = dim
  * Clamped responsively to terminal width (fallback process.stdout.columns ?? 80).
  */
 export function renderApprovalBox(command: string, reason: string): string {
-  const cols = process.stdout.columns ?? 80;
+  const cols = terminalWidth();
   const maxInner = Math.max(16, cols - 4);
   const headerText = '⚠ KONFIRMASI PERINTAH BERISIKO';
   const reasonText = `Alasan  : ${reason}`;
@@ -219,7 +219,7 @@ export function renderApprovalBox(command: string, reason: string): string {
   const alertHeader = bold(red(headerText));
 
   const top = border(`┌${'─'.repeat(inner)}┐`);
-  const headerRow = `${border('│')} ${padVisible(alertHeader, inner - 2)} ${border('│')}`;
+  const headerRow = `${border('│')} ${padVisible(fit(alertHeader), inner - 2)} ${border('│')}`;
   const sep = border(`├${'─'.repeat(inner)}┤`);
   const reasonRow = `${border('│')} ${padVisible(fit(`${bold('Alasan  :')} ${yellow(reason)}`), inner - 2)} ${border('│')}`;
   const cmdRow = `${border('│')} ${padVisible(fit(`${bold('Perintah:')} ${cyan(command)}`), inner - 2)} ${border('│')}`;
@@ -1019,51 +1019,83 @@ export class RevealFilter {
  * - Fenced code blocks (` ```...``` `) pass through without inline modifications
  * - Non-TTY or NO_COLOR: cleanly strips `**` and ` ` ` without escape codes
  */
-export function formatTerminalMarkdown(text: string, forceColors?: boolean): string {
-  if (!text) return '';
-  const useColors = forceColors ?? colorsEnabled();
+export class TerminalMarkdownFormatter {
+  private inCodeBlock = false;
+  private prevLineWasBlank = true;
 
-  const lines = text.split('\n');
-  const result: string[] = [];
-  let inCodeBlock = false;
+  constructor(private forceColors?: boolean) {}
 
-  for (let i = 0; i < lines.length; i++) {
-    const rawLine = lines[i];
-    const trimmed = rawLine.trim();
+  public format(text: string): string {
+    if (!text) return '';
+    const useColors = this.forceColors ?? colorsEnabled();
+    const hasTrailingNewline = text.endsWith('\n');
+    const lines = text.split('\n');
+    if (hasTrailingNewline) {
+      lines.pop();
+    }
+    const result: string[] = [];
 
-    // Track fenced code blocks
-    if (trimmed.startsWith('```')) {
-      inCodeBlock = !inCodeBlock;
-      result.push(useColors ? dim(rawLine) : rawLine);
-      continue;
+    for (let i = 0; i < lines.length; i++) {
+      const rawLine = lines[i];
+      const trimmed = rawLine.trim();
+
+      // Track fenced code blocks
+      if (trimmed.startsWith('```')) {
+        this.inCodeBlock = !this.inCodeBlock;
+        result.push(useColors ? dim(rawLine) : rawLine);
+        this.prevLineWasBlank = false;
+        continue;
+      }
+
+      // Inside code fences, pass content through untouched
+      if (this.inCodeBlock) {
+        result.push(rawLine);
+        this.prevLineWasBlank = trimmed === '';
+        continue;
+      }
+
+      // Add vertical breathing room before standalone bold section headings if previous line wasn't blank
+      const isBoldHeading = /^\*\*[^*]+\*\*/.test(trimmed);
+      if (isBoldHeading && !this.prevLineWasBlank) {
+        result.push('');
+      }
+
+      // Tokenize inline code first to protect inline code containing asterisks
+      const codeTokens: string[] = [];
+      let formatted = rawLine.replace(/`([^`]+)`/g, (_match, p1) => {
+        const token = `\x00RUKO_CODE_${codeTokens.length}\x00`;
+        codeTokens.push(useColors ? `\u001b[33m${p1}\u001b[0m` : p1);
+        return token;
+      });
+
+      // Replace **bold** with Bold Cyan (\u001b[1;36m)
+      formatted = formatted.replace(/\*\*([^*]+)\*\*/g, (_match, p1) => {
+        return useColors ? `\u001b[1;36m${p1}\u001b[0m` : p1;
+      });
+
+      // Restore inline code tokens
+      if (codeTokens.length > 0) {
+        formatted = formatted.replace(/\x00RUKO_CODE_(\d+)\x00/g, (_match, idx) => {
+          return codeTokens[Number(idx)] ?? '';
+        });
+      }
+
+      result.push(formatted);
+      this.prevLineWasBlank = trimmed === '';
     }
 
-    // Inside code fences, pass content through untouched
-    if (inCodeBlock) {
-      result.push(rawLine);
-      continue;
-    }
-
-    // Add vertical breathing room before standalone bold section headings if previous line wasn't blank
-    const isBoldHeading = /^\*\*[^*]+\*\*/.test(trimmed);
-    if (isBoldHeading && result.length > 0 && result[result.length - 1].trim() !== '') {
-      result.push('');
-    }
-
-    // Replace **bold** with Bold Cyan (\u001b[1;36m)
-    let formatted = rawLine.replace(/\*\*([^*]+)\*\*/g, (_match, p1) => {
-      return useColors ? `\u001b[1;36m${p1}\u001b[0m` : p1;
-    });
-
-    // Replace `inline code` with Yellow (\u001b[33m)
-    formatted = formatted.replace(/`([^`]+)`/g, (_match, p1) => {
-      return useColors ? `\u001b[33m${p1}\u001b[0m` : p1;
-    });
-
-    result.push(formatted);
+    return result.join('\n') + (hasTrailingNewline ? '\n' : '');
   }
 
-  return result.join('\n');
+  public reset(): void {
+    this.inCodeBlock = false;
+    this.prevLineWasBlank = true;
+  }
+}
+
+export function formatTerminalMarkdown(text: string, forceColors?: boolean): string {
+  const formatter = new TerminalMarkdownFormatter(forceColors);
+  return formatter.format(text);
 }
 
 export interface ToolCallLike {

@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -76,13 +77,48 @@ export interface UndoResult {
 }
 
 /**
+ * Validates that a snapshot target path is strictly inside the workspace
+ * and does not point to sensitive or protected files/directories.
+ */
+export function validateSnapshotPath(targetAbs: string, workspaceRoot: string = process.cwd()): void {
+  const normWs = resolve(workspaceRoot);
+  const normTarget = resolve(targetAbs);
+  const rel = relative(normWs, normTarget);
+
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`Akses dibatalkan: Target snapshot "${targetAbs}" berada di luar workspace ("${normWs}").`);
+  }
+
+  const relNorm = rel.split('\\').join('/').toLowerCase();
+  if (
+    relNorm === '.ruko/config.json' ||
+    relNorm.startsWith('.ruko/undo') ||
+    relNorm === '.env' ||
+    relNorm.startsWith('.env.') ||
+    relNorm.startsWith('.git') ||
+    relNorm.includes('/.git') ||
+    /(^|\/)(id_rsa|id_ed25519|.*\.pem|.*\.key)$/i.test(relNorm)
+  ) {
+    throw new Error(`Akses dibatalkan: Target snapshot "${targetAbs}" mengarah ke berkas atau direktori terproteksi.`);
+  }
+
+  if (existsSync(normTarget)) {
+    const stat = lstatSync(normTarget);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Akses dibatalkan: Target snapshot "${targetAbs}" adalah symbolic link.`);
+    }
+  }
+}
+
+/**
  * Reverts the most recent (not-yet-undone) snapshot. Returns null when the
  * undo journal is empty. Consumes the snapshot pair after applying it.
  */
-export function undoLast(dir = defaultUndoDir()): UndoResult | null {
+export function undoLast(dir = defaultUndoDir(), workspaceRoot: string = process.cwd()): UndoResult | null {
   const snapshots = listSnapshots(dir);
   const last = snapshots[snapshots.length - 1];
   if (!last) return null;
+  validateSnapshotPath(last.abs, workspaceRoot);
   const contentPath = join(dir, `${last.id}.content`);
   if (last.existed) {
     mkdirSync(dirname(last.abs), { recursive: true });
@@ -135,7 +171,8 @@ export interface RevertResult {
  * Returns null if no snapshot exists for that file.
  * Consumes the matched snapshot pair upon restoration.
  */
-export function revertFileSnapshot(abs: string, dir = defaultUndoDir()): UndoResult | null {
+export function revertFileSnapshot(abs: string, dir = defaultUndoDir(), workspaceRoot: string = process.cwd()): UndoResult | null {
+  validateSnapshotPath(abs, workspaceRoot);
   const normTarget = resolve(abs);
   const snapshots = listSnapshots(dir);
   let matchIndex = -1;
@@ -147,6 +184,7 @@ export function revertFileSnapshot(abs: string, dir = defaultUndoDir()): UndoRes
   }
   if (matchIndex === -1) return null;
   const target = snapshots[matchIndex];
+  validateSnapshotPath(target.abs, workspaceRoot);
   const contentPath = join(dir, `${target.id}.content`);
   if (target.existed) {
     mkdirSync(dirname(target.abs), { recursive: true });
@@ -184,11 +222,19 @@ export function revertFile(targetPath: string, options: RevertOptions = {}): Rev
   const dir = options.dir ?? defaultUndoDir();
   const ws = options.workspaceRoot ?? process.cwd();
   const abs = isAbsolute(targetPath) ? targetPath : resolve(ws, targetPath);
+  try {
+    validateSnapshotPath(abs, ws);
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
   const mode = options.mode ?? 'auto';
   const rel = relative(ws, abs) || targetPath;
 
   if (mode === 'snapshot' || mode === 'auto') {
-    const snapshotRes = revertFileSnapshot(abs, dir);
+    const snapshotRes = revertFileSnapshot(abs, dir, ws);
     if (snapshotRes) {
       return {
         ok: true,

@@ -7,6 +7,7 @@ import {
   LineGate,
   RevealFilter,
   stripThoughtBlocks,
+  TerminalMarkdownFormatter,
   ThoughtSlidingWindow,
   ThoughtStreamParser,
   WorkflowTree,
@@ -263,11 +264,12 @@ export class Agent {
             process.stdout.write(line);
           },
         });
+        const mdFormatter = new TerminalMarkdownFormatter();
         const gate = new LineGate((text) => {
           slidingWindow.clear();
           spinner.stop();
           process.stdout.write('\r\u001b[2K');
-          process.stdout.write(formatTerminalMarkdown(text));
+          process.stdout.write(mdFormatter.format(text));
         });
         const reveal = new RevealFilter((text) => gate.push(text));
         const thoughtParser = new ThoughtStreamParser({

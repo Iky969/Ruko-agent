@@ -2,6 +2,31 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### v1.7.4 (17 September 2026) — Comprehensive QA & Code Audit Remediation: Fix code_search Regex Stateful Skip, Undo Snapshot Sandboxing & Traversal Guard, Config Token/Provider Persistence, Terminal Streaming Markdown Formatter, & Interaction Polish
+
+#### Ditambahkan & Diperbarui
+- **Perbaikan Stateful Global RegExp pada `codeSearchTool` (`src/agent/filetools.ts`)**:
+  * Menghapus flag global `'g'` pada instansiasi RegExp per baris (`let flags = ''`).
+  * Mengeliminasi bug `matcher.lastIndex` di mana pengujian baris-baris berikutnya secara sporadis mengabaikan kecocokan yang valid (false negatives).
+- **Hardening Keamanan Sandboxing Snapshot `/undo` (`src/core/undo.ts`, `src/agent/commands.ts`)**:
+  * Mengimplementasikan `validateSnapshotPath()` untuk memvalidasi bahwa path target snapshot tidak melompat ke luar workspace sandbox.
+  * Memblokir symlink ke luar workspace serta jalur-jalur berkas terproteksi/sensitif (`.ruko/config.json`, `.ruko/undo/**`, `.env*`, `.git*`, SSH keys, git credentials).
+  * Mengintegrasikan pengecekan `assertNotSecurityCore` dan `assertNotSensitivePath` pada perintah `/undo <path>`.
+- **Persistensi `maxOutputTokens` & `provider` pada Konfigurasi (`src/core/config.ts`, `src/agent/commands.ts`)**:
+  * Menambahkan `maxOutputTokens` dan `provider` ke antarmuka `RukoConfigFile` dan whitelist sanitasi `sanitizeConfigFile()`.
+  * Memperbarui `applyConfigPatch()` di `commands.ts` dengan parser `parseConfigNumber()` yang mendukung suffix unit `k`/`m` (seperti `256k`, `1m`) dan validasi terhadap ukuran memori percakapan aktif.
+  * Menampilkan `provider` dan `maxOutputTokens` pada kotak ringkasan perintah `/config`.
+- **Perbaikan Visual Glitch & Stateful Markdown Streaming (`src/core/ui.ts`, `src/agent/agent.ts`)**:
+  * Mengganti pembacaan mentah `process.stdout.columns ?? 80` dengan `terminalWidth()` pada `renderDivider` dan `renderApprovalBox`, serta membungkus judul alert approval box dengan `fit(alertHeader)` agar tidak terpotong atau merusak border pada layar terminal sempit (< 35 kolom).
+  * Mengimplementasikan class `TerminalMarkdownFormatter` stateful untuk streaming `LineGate` di `src/agent/agent.ts`, mempertahankan status blok kode (fenced code blocks) antar-chunk streaming sehingga formatting tidak bocor ke dalam blok kode.
+  * Memproteksi token inline code sebelum pemrosesan formatting `**bold**` sehingga inline code yang memuat tanda bintang (misal `**kwargs` atau `*args`) tidak terdistorsi.
+- **Polish Interaksi TUI & Sanitasi Kredensial URL (`src/core/tui.ts`, `src/agent/llm.ts`, `src/core/wizard.ts`)**:
+  * Memperbaiki penanganan `submit()` pada ambient mode (saat AI sibuk) agar mengecek `this.menuNavigated` dan mengirim item menu yang dipilih via tombol panah.
+  * Membersihkan kutip pembungkus (`"` dan `'`) dan spasi pada input `baseUrl`, `apiKey`, dan `model` di `OpenAiCompatibleProvider` dan wizard interaktif `wizard.ts`.
+- **Rangkaian Pengujian Mandiri**:
+  * Menambahkan 7 unit test komprehensif pada `src/tests/audit_fixes.test.ts`.
+  * Total unit test meningkat menjadi **493 tests passed** (100% lulus, 0 fail), dan `npm run typecheck` 100% bersih tanpa galat.
+
 ---
 
 ### v1.7.3 (15 September 2026) — Perombakan Menu Bantuan /? & /help dengan Desain Chip/Badge Highlight Freebuff CLI & Kategorisasi ANSI Native

@@ -187,9 +187,12 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   lastFinishReason: string | null = null;
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
-    this.apiKey = cfg.apiKey ?? process.env.OPENAI_API_KEY ?? '';
-    this.baseUrl = (cfg.baseUrl || process.env.OPENAI_BASE_URL || '').replace(/\/+$/, '');
-    this.currentModel = cfg.model || process.env.AGENT_MODEL || process.env.OPENAI_MODEL || '';
+    const rawKey = cfg.apiKey ?? process.env.OPENAI_API_KEY ?? '';
+    this.apiKey = rawKey.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+    const rawBase = cfg.baseUrl || process.env.OPENAI_BASE_URL || '';
+    this.baseUrl = rawBase.trim().replace(/^["'`]+|["'`]+$/g, '').trim().replace(/\/+$/, '');
+    const rawModel = cfg.model || process.env.AGENT_MODEL || process.env.OPENAI_MODEL || '';
+    this.currentModel = rawModel.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
     this.retry = retry;
   }
 
@@ -223,12 +226,15 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   }
 
   setModel(model: string): void {
-    this.currentModel = model.trim() || this.currentModel;
+    const clean = model.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+    this.currentModel = clean || this.currentModel;
   }
 
   setCredentials(apiKey: string, baseUrl: string): void {
-    if (apiKey.trim()) this.apiKey = apiKey.trim();
-    if (baseUrl.trim()) this.baseUrl = baseUrl.trim().replace(/\/+$/, '');
+    const cleanKey = apiKey.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+    const cleanBase = baseUrl.trim().replace(/^["'`]+|["'`]+$/g, '').trim().replace(/\/+$/, '');
+    if (cleanKey) this.apiKey = cleanKey;
+    if (cleanBase) this.baseUrl = cleanBase;
   }
 
   private authHeaders(): Record<string, string> {

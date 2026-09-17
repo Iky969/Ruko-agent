@@ -88,10 +88,12 @@ export async function promptSetup(
   console.log(dim('  Konfigurasi disimpan ke .ruko/config.json (izin 600) — tanpa export manual.'));
   console.log('');
 
+  const cleanInput = (s: string) => s.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+
   let apiKey: string;
   try {
     // Masked input: the key never appears in plain text on screen (§5).
-    apiKey = (await readSecret(`${green('  API Key: ')}`)).trim();
+    apiKey = cleanInput(await readSecret(`${green('  API Key: ')}`));
   } catch {
     return null; // Ctrl+C / EOF
   }
@@ -104,7 +106,7 @@ export async function promptSetup(
   let model = '';
   try {
     // Neutral prompts: no example provider is suggested unless the user asks.
-    baseUrl = (await rl.question(`${green('  Base URL: ')}`)).trim();
+    baseUrl = cleanInput(await rl.question(`${green('  Base URL: ')}`));
     if (!baseUrl) {
       console.log(dim('  (Base URL wajib diisi — setup dibatalkan.)'));
       return null;
@@ -123,7 +125,7 @@ export async function promptSetup(
       }
     }
 
-    model = (await rl.question(`${green('  Model Name: ')}`)).trim();
+    model = cleanInput(await rl.question(`${green('  Model Name: ')}`));
     if (!model) {
       console.log(dim('  (Model wajib diisi — setup dibatalkan.)'));
       return null;
@@ -154,9 +156,9 @@ export async function promptSetup(
       }
       if (/^(c|cob|retry|ulang)$/.test(answer)) {
         try {
-          const newKey = (await readSecret(`${green('  API Key baru: ')}`)).trim();
+          const newKey = cleanInput(await readSecret(`${green('  API Key baru: ')}`));
           if (newKey) result.apiKey = newKey;
-          const newUrl = (await rl.question(`${green(`  Base URL (sekarang: ${result.baseUrl}): `)}`)).trim();
+          const newUrl = cleanInput(await rl.question(`${green(`  Base URL (sekarang: ${result.baseUrl}): `)}`));
           if (newUrl) {
             if (/^http:\/\//i.test(newUrl)) {
               console.log(yellow(`\n  ⚠ Peringatan: Protokol HTTP (cleartext) terdeteksi untuk "${newUrl}".`));
@@ -172,7 +174,7 @@ export async function promptSetup(
             }
             result.baseUrl = newUrl;
           }
-          const newModel = (await rl.question(`${green(`  Model (sekarang: ${result.model}): `)}`)).trim();
+          const newModel = cleanInput(await rl.question(`${green(`  Model (sekarang: ${result.model}): `)}`));
           if (newModel) result.model = newModel;
         } catch {
           return null;
