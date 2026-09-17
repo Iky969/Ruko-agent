@@ -119,7 +119,20 @@ export function renderSplashLines(info: SplashInfo, width = splashWidth()): stri
   }
 
   lines.push(blank);
-  lines.push(centre(info.hint));
+  // Responsive hint: short version for narrow terminals to avoid over-truncation
+  let hintText = info.hint;
+  if (inner < 35) {
+    // Very narrow: use compact hint
+    if (hintText.includes('Ketik /')) {
+      hintText = 'Ketik / untuk bantuan';
+    } else if (hintText.length > inner) {
+      hintText = hintText.slice(0, Math.max(10, inner - 1)) + '…';
+    }
+  } else if (inner < 45 && hintText.length > inner) {
+    // Narrow: slightly shorter
+    hintText = hintText.replace('Ctrl+C untuk keluar', 'Ctrl+C keluar');
+  }
+  lines.push(centre(hintText));
   lines.push(bottom);
 
   return lines;
