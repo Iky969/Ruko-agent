@@ -116,9 +116,30 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
 
     // v0.7: an interrupted turn kills its shell child (SIGKILL so grandchildren
     // die too) — the callback above still resolves with what was captured.
+    // Fix: track abort listener and remove it when child exits to prevent leak.
+    let abortHandler: (() => void) | null = null;
     if (options.signal) {
-      if (options.signal.aborted) child.kill('SIGKILL');
-      else options.signal.addEventListener('abort', () => child.kill('SIGKILL'), { once: true });
+      if (options.signal.aborted) {
+        child.kill('SIGKILL');
+      } else {
+        abortHandler = () => child.kill('SIGKILL');
+        options.signal.addEventListener('abort', abortHandler, { once: true });
+      }
     }
+
+    // Cleanup abort listener when child finishes (success or error)
+    const cleanupAbort = () => {
+      if (abortHandler && options.signal) {
+        try {
+          options.signal.removeEventListener('abort', abortHandler);
+        } catch {
+          // ignore
+        }
+        abortHandler = null;
+      }
+    };
+
+    child.on('exit', cleanupAbort);
+    child.on('error', cleanupAbort);
   });
 }

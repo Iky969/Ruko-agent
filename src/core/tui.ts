@@ -281,6 +281,10 @@ export class LineEditor {
 
   /** Restores the terminal and drops any in-flight line. */
   close(): void {
+    if (this.renderThrottleTimer) {
+      clearTimeout(this.renderThrottleTimer);
+      this.renderThrottleTimer = null;
+    }
     if (this.pending) this.finish(null);
     this.stopAmbient();
     this.detach();
@@ -307,6 +311,10 @@ export class LineEditor {
   }
 
   private finish(value: string | null): void {
+    if (this.renderThrottleTimer) {
+      clearTimeout(this.renderThrottleTimer);
+      this.renderThrottleTimer = null;
+    }
     const pending = this.pending;
     this.pending = null;
     this.buffer = '';
