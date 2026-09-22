@@ -34,6 +34,7 @@ export interface RukoConfigFile {
   guardianEnabled?: boolean;
   guardianTimeoutMs?: number;
   trustedWorkspace?: boolean;
+  maxToolIterations?: number;
 }
 
 export function defaultConfigPath(): string {
@@ -140,6 +141,9 @@ export function sanitizeConfigFile(raw: unknown): Partial<RukoConfigFile> {
   }
   if (typeof obj.trustedWorkspace === 'boolean') {
     clean.trustedWorkspace = obj.trustedWorkspace;
+  }
+  if (typeof obj.maxToolIterations === 'number' && obj.maxToolIterations > 0 && Number.isFinite(obj.maxToolIterations)) {
+    clean.maxToolIterations = Math.min(Math.trunc(obj.maxToolIterations), 1_000);
   }
 
   return clean;

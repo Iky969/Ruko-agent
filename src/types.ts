@@ -109,6 +109,8 @@ export interface AgentConfig {
   guardianTimeoutMs?: number;
   /** Whether the workspace folder is explicitly trusted by the user. */
   trustedWorkspace?: boolean;
+  /** Maximum tool iterations per instruction (default 30). */
+  maxToolIterations?: number;
 }
 
 export const DEFAULT_CONFIG: AgentConfig = {
@@ -126,6 +128,7 @@ export const DEFAULT_CONFIG: AgentConfig = {
   funAnimations: true,
   guardianEnabled: true,
   guardianTimeoutMs: 5_000,
+  maxToolIterations: 30,
 };
 
 /**

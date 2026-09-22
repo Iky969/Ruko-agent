@@ -463,6 +463,7 @@ export function promptGlyph(): string {
 
 export interface Spinner {
   stop(): void;
+  update?(label: string): void;
 }
 
 export interface SpinnerOptions {
@@ -483,7 +484,7 @@ export interface SpinnerOptions {
  * Always call `stop()` when the LLM answers.
  */
 export function createSpinner(label = 'Thinking', options: SpinnerOptions = {}): Spinner {
-  if (!colorsEnabled()) return { stop() {} };
+  if (!colorsEnabled()) return { stop() {}, update() {} };
 
   const usePacman = options.pacman ?? true;
   const width = Math.min(38, terminalWidth() - 1);
@@ -491,9 +492,12 @@ export function createSpinner(label = 'Thinking', options: SpinnerOptions = {}):
   // If width is too small or pacman is false, fall back to plain dot spinner
   if (!usePacman || width < 24) {
     let dots = 0;
+    let currentLabel = label;
+    let maxCleared = Math.max(24, label.length + 6);
     const render = () => {
-      const text = `▸ ${label}${'.'.repeat(dots)}`;
-      process.stdout.write(`\r${dim(text)}`.padEnd(24, ' '));
+      const text = `▸ ${currentLabel}${'.'.repeat(dots)}`;
+      if (text.length + 2 > maxCleared) maxCleared = text.length + 2;
+      process.stdout.write(`\r${dim(text)}`.padEnd(maxCleared, ' '));
     };
     render();
     const timer = setInterval(() => {
@@ -501,21 +505,26 @@ export function createSpinner(label = 'Thinking', options: SpinnerOptions = {}):
       render();
     }, 200);
     return {
+      update(newLabel: string) {
+        currentLabel = newLabel;
+        render();
+      },
       stop() {
         clearInterval(timer);
-        process.stdout.write(`\r\u001b[2K${' '.repeat(24)}\r`);
+        process.stdout.write(`\r\u001b[2K${' '.repeat(maxCleared)}\r`);
       },
     };
   }
 
   // Pac-Man eating "Thinking..." animation (left-aligned per feedback.txt & pac.cjs)
-  const text = label.length <= 11 ? (label.endsWith('...') ? label : `${label}...`) : label;
+  let currentLabel = label;
+  let text = currentLabel.length <= 11 ? (currentLabel.endsWith('...') ? currentLabel : `${currentLabel}...`) : currentLabel;
   let x = width - 1;
   let frame = 0;
-  let maxCleared = width;
+  let maxCleared = Math.max(width, text.length + 16);
 
   const render = () => {
-    const currentWidth = Math.min(38, terminalWidth() - 1);
+    const currentWidth = Math.min(Math.max(38, text.length + 16), terminalWidth() - 1);
     if (currentWidth > maxCleared) maxCleared = currentWidth;
     const cells: string[] = Array(currentWidth).fill(' ');
 
@@ -560,6 +569,11 @@ export function createSpinner(label = 'Thinking', options: SpinnerOptions = {}):
   render();
   const timer = setInterval(render, 100);
   return {
+    update(newLabel: string) {
+      currentLabel = newLabel;
+      text = currentLabel.length <= 11 ? (currentLabel.endsWith('...') ? currentLabel : `${currentLabel}...`) : currentLabel;
+      if (text.length + 16 > maxCleared) maxCleared = text.length + 16;
+    },
     stop() {
       clearInterval(timer);
       process.stdout.write(`\r\u001b[2K${' '.repeat(maxCleared)}\r`);

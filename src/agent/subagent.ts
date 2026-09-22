@@ -72,6 +72,7 @@ export async function runSubagent(
     ...deps.config,
     role: options.role ?? 'minimal',
     maxContextChars: Math.min(deps.config.maxContextChars, 20_000),
+    maxToolIterations: options.maxIterations ?? deps.config.maxToolIterations,
   };
 
   const subCtx = new Context(subConfig);

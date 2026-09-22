@@ -11,6 +11,7 @@ import { summarizeLog } from './core/summarizer.js';
 import { needsSetup, runSetupWizard } from './core/wizard.js';
 import { loadDotenv } from './core/dotenv.js';
 import { isWorkspaceTrusted, promptWorkspaceTrust } from './core/trust.js';
+import { initDefaultSkills } from './core/skills.js';
 import {
   colorsEnabled,
   bold,
@@ -487,6 +488,7 @@ async function main(): Promise<void> {
     }
   }
 
+  initDefaultSkills();
   const ctx = new Context(config);
   const llm = createProvider(config);
   const agent = new Agent(ctx, llm, config);

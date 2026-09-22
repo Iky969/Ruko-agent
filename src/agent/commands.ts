@@ -13,6 +13,7 @@ import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, g
 import { AgentConfig, ProviderProfile, UiMode } from '../types.js';
 import { ConnectionResult, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
+import { scanSkills } from '../core/skills.js';
 import type { Agent } from './agent.js';
 
 /** Loop internals a command may touch. */
@@ -370,6 +371,25 @@ const COMMANDS: CommandDef[] = [
     },
   },
   {
+    name: 'skills',
+    category: 'Sistem & Bantuan',
+    help: 'Tampilkan daftar skill yang sedang aktif.',
+    run: (_args, _env) => {
+      const skills = scanSkills(getWorkspaceRoot(), { includeGlobal: true });
+      if (skills.length === 0) {
+        console.log('Tidak ada skill yang aktif. Tambahkan file .md di .ruko/skills/ atau ~/.ruko/skills/.');
+        return;
+      }
+      console.log(
+        renderBox(
+          `Skills Aktif (${skills.length})`,
+          skills.map((s) => `${green('●')} ${bold(s.name.padEnd(20))} ${s.description}`),
+        ),
+      );
+      console.log(dim('Direktori: .ruko/skills/ (lokal) dan ~/.ruko/skills/ (global)'));
+    },
+  },
+  {
     name: 'profile',
     category: 'Sesi & Model',
     help: 'Provider multi-profil: ganti cepat alias (hemat, kuat, lokal).',
@@ -498,7 +518,7 @@ const COMMANDS: CommandDef[] = [
     aliases: ['setting', 'set'],
     category: 'Konfigurasi & Budget',
     help: 'Dashboard konfigurasi: lihat & ubah budget context, max token, model, role, approval, dan mode.',
-    hint: '[context|max-tokens|role|mode|approval|anim|save] [nilai]',
+    hint: '[context|max-tokens|iterations|role|mode|approval|anim|save] [nilai]',
     run: async (args, env) => {
       const parts = args.trim().split(/\s+/);
       const sub = parts[0]?.toLowerCase();
@@ -511,6 +531,7 @@ const COMMANDS: CommandDef[] = [
         const usedTokens = Math.round(usedChars / 4);
         const pct = budgetChars > 0 ? Math.min(100, Math.round((usedChars / budgetChars) * 100)) : 0;
         const maxOut = env.config.maxOutputTokens ?? 4096;
+        const maxIter = env.config.maxToolIterations ?? 30;
 
         const lines = [
           `MODEL & PROVIDER:`,
@@ -522,6 +543,7 @@ const COMMANDS: CommandDef[] = [
           `  • Context Window:   ${budgetChars.toLocaleString()} chars (~${budgetTokens.toLocaleString()} tokens)`,
           `  • Status Konteks:   ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}% terpakai`,
           `  • Max Output:       ${maxOut.toLocaleString()} tokens per-turn (max_tokens)`,
+          `  • Max Iterations:   ${maxIter} iterasi tool per-turn`,
           ``,
           `BEHAVIOR & SAFETY:`,
           `  • Role:             ${env.config.role ?? 'default'}`,
@@ -533,6 +555,7 @@ const COMMANDS: CommandDef[] = [
           `Ubah pengaturan dengan perintah:`,
           `  • /settings context <128k|500k|unlimited>   Atur limit context window`,
           `  • /settings max-tokens <jumlah|4096>       Atur limit token output per-turn`,
+          `  • /settings iterations <jumlah|30>         Atur limit iterasi tool per-turn`,
           `  • /settings role <default|reviewer|teacher> Atur peran aktif`,
           `  • /settings mode <beginner|pro>             Ganti mode UI`,
           `  • /settings approval <on|off|yolo>          Atur konfirmasi perintah`,
@@ -603,6 +626,22 @@ const COMMANDS: CommandDef[] = [
         }
         env.updateConfig({ maxOutputTokens: count });
         console.log(green(`✔ Max output tokens per-turn diperbarui menjadi ${count.toLocaleString()} token.`));
+        return;
+      }
+
+      if (sub === 'iterations' || sub === 'iteration' || sub === 'iter') {
+        if (!val) {
+          console.log(`Batas iterasi tool saat ini: ${env.config.maxToolIterations ?? 30} iterasi.`);
+          console.log(`Gunakan: /settings iterations <jumlah> (contoh: /settings iterations 30)`);
+          return;
+        }
+        const count = Number(val);
+        if (!Number.isFinite(count) || count <= 0 || !Number.isInteger(count)) {
+          console.log('Error: nilai iterations harus berupa bilangan bulat positif (contoh: /settings iterations 30).');
+          return;
+        }
+        env.updateConfig({ maxToolIterations: count });
+        console.log(green(`✔ Batas maksimal iterasi tool diperbarui menjadi ${count} iterasi.`));
         return;
       }
 

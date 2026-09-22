@@ -2,13 +2,14 @@ import { Confirmer, guardedExecute } from '../core/approval.js';
 import { Context } from '../core/context.js';
 import {
   createSpinner,
+  formatDuration,
   formatTerminalMarkdown,
+  green,
   inferStepDescription,
   LineGate,
   RevealFilter,
   stripThoughtBlocks,
   TerminalMarkdownFormatter,
-  ThoughtSlidingWindow,
   ThoughtStreamParser,
   WorkflowTree,
   yellow,
@@ -26,10 +27,10 @@ import {
   ToolCall,
 } from './tools.js';
 import { readMemorySafe } from '../core/memory.js';
-import { formatSkillsForPrompt, listSkills } from '../core/skills.js';
+import { formatSkillsForPrompt, initDefaultSkills, loadSkillsContext, scanSkills } from '../core/skills.js';
 
-/** Safety cap on how many tool iterations one instruction may trigger. */
-const MAX_TOOL_ITERATIONS = 6;
+/** Safety cap on how many tool iterations one instruction may trigger (default 30). */
+export const DEFAULT_MAX_TOOL_ITERATIONS = 30;
 
 /** §5.35 — same tool+args invoked more than this many times = likely loop. */
 const LOOP_REPEAT_LIMIT = 2;
@@ -146,13 +147,19 @@ export class Agent {
   /** Layered system prompt: identity + tools + role + AGENT.md + mode (§4) + memory + skills. */
   systemPrompt(): string {
     const ws = this.workspaceRoot ?? getWorkspaceRoot();
+    initDefaultSkills(ws);
+    const skills = scanSkills(ws, { includeGlobal: true });
+    const availableSkillsXml = formatSkillsForPrompt(skills);
+    const skillsInstructions = loadSkillsContext(skills);
+    const combinedSkills = [availableSkillsXml, skillsInstructions].filter(Boolean).join('\n\n');
+
     return buildSystemPrompt({
       role: this.activeRole(),
       planMode: this.planMode,
       mode: this.config.mode ?? 'beginner',
       agentDoc: readAgentDocSafe(),
       memory: readMemorySafe(ws),
-      skills: formatSkillsForPrompt(listSkills(ws)),
+      skills: combinedSkills,
     });
   }
 
@@ -242,8 +249,10 @@ export class Agent {
       'revert_file',
     ]);
 
+    const maxIterations = this.config.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
+
     try {
-      for (let i = 0; i < MAX_TOOL_ITERATIONS; i += 1) {
+      for (let i = 0; i < maxIterations; i += 1) {
         // v0.7: user chose "kirim sekarang" — stop before the next request so
         // the interrupted turn ends cleanly instead of starting new work.
         if (signal?.aborted) {
@@ -257,35 +266,53 @@ export class Agent {
         usage.promptChars += messages.reduce((s, m) => s + m.content.length, 0);
         const usePacman = this.config.funAnimations ?? (this.config.mode !== 'pro');
         const spinner = createSpinner('Thinking', { pacman: usePacman });
-        const slidingWindow = new ThoughtSlidingWindow({
-          maxWords: 12,
-          onRender: (line) => {
-            spinner.stop();
-            process.stdout.write(line);
-          },
-        });
         const mdFormatter = new TerminalMarkdownFormatter();
+
+        let bufferedThinking = '';
+        let thoughtStartTime = 0;
+        let thoughtTokenEstimate = 0;
+        let thinkingFinished = false;
+
+        const handleThoughtChunk = (chunk: string) => {
+          if (!chunk) return;
+          if (!thoughtStartTime) {
+            thoughtStartTime = Date.now();
+          }
+          bufferedThinking += chunk;
+          thoughtTokenEstimate += Math.max(1, Math.round(chunk.length / 4));
+          const elapsed = Date.now() - thoughtStartTime;
+          const status = `Thinking (${formatDuration(elapsed)} / ${thoughtTokenEstimate} token)...`;
+          spinner.update?.(status);
+        };
+
+        const finishThinking = () => {
+          if (bufferedThinking.length > 0 && !thinkingFinished) {
+            thinkingFinished = true;
+            spinner.stop();
+            process.stdout.write(`\r\u001b[2K${green('✔')} Selesai berpikir\n`);
+          } else {
+            spinner.stop();
+          }
+        };
+
         const gate = new LineGate((text) => {
-          slidingWindow.clear();
-          spinner.stop();
+          finishThinking();
           process.stdout.write('\r\u001b[2K');
           process.stdout.write(mdFormatter.format(text));
         });
         const reveal = new RevealFilter((text) => gate.push(text));
         const thoughtParser = new ThoughtStreamParser({
           onText: (text) => reveal.feed(text),
-          onThought: (thoughtChunk) => {
-            spinner.stop();
-            slidingWindow.feed(thoughtChunk);
-          },
+          onThought: (thoughtChunk) => handleThoughtChunk(thoughtChunk),
           onThoughtEnd: () => {
-            slidingWindow.clear();
+            finishThinking();
           },
         });
         let raw: string;
         try {
           raw = await this.llmProvider.chat(messages, {
             onToken: (token) => thoughtParser.feed(token),
+            onThought: (chunk) => handleThoughtChunk(chunk),
             signal,
             maxTokens: this.config.maxOutputTokens ?? 4096,
           });
@@ -303,7 +330,7 @@ export class Agent {
           throw err;
         } finally {
           thoughtParser.end();
-          slidingWindow.clear();
+          finishThinking();
           reveal.end();
           spinner.stop();
         }
@@ -312,6 +339,7 @@ export class Agent {
         // Final answers keep their trailing line; tool iterations drop the dangling
         // preamble that sat right before the hidden ```tool block (§2).
         const iterStreamed = gate.finish(calls.length === 0);
+        finishThinking();
         if (calls.length === 0) {
           const text = stripThoughtBlocks(stripToolBlocks(raw));
 
@@ -321,7 +349,7 @@ export class Agent {
           const isActionTask = /\b(perbaiki|edit|ubah|ganti|tulis|buat|hapus|fix|patch|write|modify|repair|update|implement|resolve)\b/i.test(instruction);
           const hasMutated = executedMutatingTools.size > 0;
 
-          if (isActionTask && !hasMutated && (tree.currentStep > 0 || i > 0) && !actionNudgeSent && i < MAX_TOOL_ITERATIONS - 1) {
+          if (isActionTask && !hasMutated && (tree.currentStep > 0 || i > 0) && !actionNudgeSent && i < maxIterations - 1) {
             actionNudgeSent = true;
             messages.push({
               role: 'assistant',

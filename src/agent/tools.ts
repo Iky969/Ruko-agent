@@ -383,6 +383,7 @@ export function assertNotSecurityCore(targetPath: string, workspaceRoot: string 
 /**
  * Checks if a target path points to a sensitive file or directory:
  * - .ruko/config.json (relative, in workspace, or absolute in home / termux home / system)
+ * - .ruko/trusted
  * - .ruko/undo/**
  * - .env, .env.*
  * - .git-credentials, .git-credentials.*
@@ -423,12 +424,16 @@ export function isSensitivePath(targetPath: string, workspaceRoot: string = getW
 
     const candLower = cand.toLowerCase().replace(/\\/g, '/');
 
-    // 1. .ruko/config.json (relative, in workspace, or absolute in home / termux home / system)
+    // 1. .ruko/config.json, .ruko/trusted (relative, in workspace, or absolute in home / termux home / system)
     if (
       candLower === '.ruko/config.json' ||
       candLower.endsWith('/.ruko/config.json') ||
       candLower.includes('/.ruko/config.json') ||
-      candLower.includes('.ruko/config.json')
+      candLower.includes('.ruko/config.json') ||
+      candLower === '.ruko/trusted' ||
+      candLower.endsWith('/.ruko/trusted') ||
+      candLower.includes('/.ruko/trusted') ||
+      candLower.includes('.ruko/trusted')
     ) {
       return true;
     }
@@ -440,11 +445,14 @@ export function isSensitivePath(targetPath: string, workspaceRoot: string = getW
     const baseLower = path.basename(abs).toLowerCase();
     const extLower = path.extname(abs).toLowerCase();
 
-    // 1b. Absolute or relative .ruko/config.json
+    // 1b. Absolute or relative .ruko/config.json, .ruko/trusted
     if (
       absLower.endsWith('/.ruko/config.json') ||
       relLower === '.ruko/config.json' ||
-      relLower.endsWith('/.ruko/config.json')
+      relLower.endsWith('/.ruko/config.json') ||
+      absLower.endsWith('/.ruko/trusted') ||
+      relLower === '.ruko/trusted' ||
+      relLower.endsWith('/.ruko/trusted')
     ) {
       return true;
     }

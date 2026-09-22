@@ -48,10 +48,10 @@
 ### v1.7.2 (15 September 2026) — Thought Stream Sliding Window, System Prompt Reasoning Contract, DeepSeek DSML Tool Parser (BUG A), Multi-Step Task Completion Guard (BUG B), Active Context Command /ctx (BUG C), & Responsive Status Bar (BUG D)
 
 #### Ditambahkan & Diperbarui
-- **Thought Stream Live Sliding Window (`src/core/ui.ts`, `src/agent/agent.ts`)**:
-  * Mengimplementasikan `ThoughtSlidingWindow`: buffer kata FIFO aktif (default 12–15 kata) yang dirender live ke terminal menggunakan warna abu-abu redup (ANSI code `\x1b[90m` / `dim`), carriage return (`\r`), dan pembersihan baris ANSI (`\x1b[2K`). Teks penalaran ter-update di tempat tanpa mencemari terminal dengan baris baru.
+- **Thought Stream Live Parsing & Status Representation (`src/core/ui.ts`, `src/agent/agent.ts`)**:
   * Mengimplementasikan `ThoughtStreamParser`: memisahkan token stream penalaran (`<thought>...</thought>` atau `<think>...</think>`) dan teks jawaban biasa secara real-time.
-  * Begitu fase penalaran selesai atau model memanggil tool, baris sliding window dibersihkan secara otomatis (`onClear` / `clear()`).
+  * Representasi status penalaran di `src/agent/agent.ts` menggunakan `createSpinner` (animasi Pac-Man atau dot spinner minimalis) yang menampilkan durasi dan estimasi token secara dinamis (`Thinking (1.2s / 45 token)...`) dan ditutup bersih dengan `✔ Selesai berpikir` tanpa merusak baris atau menimbulkan glitch line-wrap di terminal sempit (<40 kolom).
+  * Komponen `ThoughtSlidingWindow` disediakan di `src/core/ui.ts` sebagai utilitas buffer FIFO kata redup independen untuk kebutuhan UI modular.
   * Interupsi tombol ESC tetap responsif dan membatalkan turn secara bersih saat pemikiran sedang mengalir.
 - **Pembaruan Kontrak Penalaran System Prompt (`src/agent/roles.ts`)**:
   * Mewajibkan model mengeluarkan blok penalaran ringkas di dalam `<thought>...</thought>` sebelum memanggil tool atau menyimpulkan jawaban.

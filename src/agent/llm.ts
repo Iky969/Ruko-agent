@@ -57,6 +57,8 @@ export interface ChatOptions {
   maxTokens?: number;
   /** Called with every text token as it streams in (real-time reveal). */
   onToken?: (token: string) => void;
+  /** Called with reasoning / thinking token chunks (without logging per chunk). */
+  onThought?: (thought: string) => void;
   /**
    * v0.7 live input: aborts the in-flight request (fetch + stream reader)
    * when the user interrupts the turn.
@@ -73,6 +75,8 @@ export interface LLMProvider {
   readonly model: string;
   /** Finish reason of the most recent completion (e.g. 'stop', 'length', 'tool_calls'). */
   lastFinishReason?: string | null;
+  /** Buffered reasoning text from the most recent completion (if provider returns reasoning). */
+  lastReasoning?: string | null;
   /** Switches the active model at runtime (e.g. via /model). */
   setModel(model: string): void;
   /** Applies new API credentials at runtime (e.g. after `/config setup`). */
@@ -185,6 +189,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   private currentModel: string;
   private readonly retry: RetryOptions;
   lastFinishReason: string | null = null;
+  lastReasoning: string | null = null;
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     const rawKey = cfg.apiKey ?? process.env.OPENAI_API_KEY ?? '';
@@ -358,6 +363,8 @@ export class OpenAiCompatibleProvider implements LLMProvider {
         choices?: Array<{
           message?: {
             content?: string | null;
+            reasoning_content?: string | null;
+            reasoning?: string | null;
             tool_calls?: Array<{
               id?: string;
               type?: string;
@@ -368,8 +375,14 @@ export class OpenAiCompatibleProvider implements LLMProvider {
         }>;
       };
       this.lastFinishReason = data.choices?.[0]?.finish_reason ?? 'stop';
-      let content = data.choices?.[0]?.message?.content ?? '';
-      const apiToolCalls = data.choices?.[0]?.message?.tool_calls;
+      const msg = data.choices?.[0]?.message;
+      let content = msg?.content ?? '';
+      const reasoning = msg?.reasoning_content ?? msg?.reasoning;
+      this.lastReasoning = reasoning || null;
+      if (reasoning && options?.onThought) {
+        options.onThought(reasoning);
+      }
+      const apiToolCalls = msg?.tool_calls;
       if (Array.isArray(apiToolCalls) && apiToolCalls.length > 0) {
         for (const tc of apiToolCalls) {
           const fnName = tc.function?.name;
@@ -390,6 +403,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
 
     let full = '';
     let buffer = '';
+    let reasoningBuffer = '';
     const decoder = new TextDecoder();
     const streamToolCalls: Map<number, { id?: string; name: string; args: string }> = new Map();
 
@@ -403,6 +417,8 @@ export class OpenAiCompatibleProvider implements LLMProvider {
           choices?: Array<{
             delta?: {
               content?: string | null;
+              reasoning_content?: string | null;
+              reasoning?: string | null;
               tool_calls?: Array<{
                 index?: number;
                 id?: string;
@@ -418,6 +434,13 @@ export class OpenAiCompatibleProvider implements LLMProvider {
           this.lastFinishReason = finishReason;
         }
         const delta = parsed.choices?.[0]?.delta;
+        const reasoningToken = delta?.reasoning_content ?? delta?.reasoning;
+        if (reasoningToken) {
+          reasoningBuffer += reasoningToken;
+          if (options?.onThought) {
+            options.onThought(reasoningToken);
+          }
+        }
         const token = delta?.content;
         if (token) {
           full += token;
@@ -450,6 +473,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     if (buffer.trim()) {
       for (const line of buffer.split(/\r?\n/)) processLine(line);
     }
+    this.lastReasoning = reasoningBuffer || null;
     if (streamToolCalls.size > 0) {
       for (const [, tc] of streamToolCalls) {
         if (tc.name) {
@@ -497,6 +521,7 @@ export class AnthropicProvider implements LLMProvider {
   private currentModel: string;
   private readonly retry: RetryOptions;
   lastFinishReason: string | null = null;
+  lastReasoning: string | null = null;
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     this.apiKey = cfg.apiKey ?? process.env.ANTHROPIC_API_KEY ?? process.env.OPENAI_API_KEY ?? '';
@@ -665,6 +690,7 @@ export class AnthropicProvider implements LLMProvider {
 
     let full = '';
     let buffer = '';
+    let reasoningBuffer = '';
     const decoder = new TextDecoder();
     const processLine = (line: string): void => {
       const trimmed = line.trim();
@@ -675,14 +701,23 @@ export class AnthropicProvider implements LLMProvider {
         const parsed = JSON.parse(payloadStr) as {
           type?: string;
           error?: { type?: string; message?: string };
-          delta?: { type?: string; text?: string; stop_reason?: string };
-          content_block?: { type?: string; text?: string };
+          delta?: { type?: string; text?: string; thinking?: string; stop_reason?: string };
+          content_block?: { type?: string; text?: string; thinking?: string };
         };
         if (parsed.type === 'error' && parsed.error?.message) {
           throw new Error(`Anthropic stream error: ${parsed.error.message}`);
         }
         if (parsed.delta?.stop_reason) {
           this.lastFinishReason = parsed.delta.stop_reason;
+        }
+        const thinkingDelta =
+          parsed.delta?.thinking ??
+          (parsed.delta?.type === 'thinking_delta' ? (parsed.delta as any).thinking : undefined);
+        if (thinkingDelta) {
+          reasoningBuffer += thinkingDelta;
+          if (options?.onThought) {
+            options.onThought(thinkingDelta);
+          }
         }
         if (parsed.delta?.text) {
           full += parsed.delta.text;
@@ -710,6 +745,7 @@ export class AnthropicProvider implements LLMProvider {
       if (buffer.trim()) {
         for (const line of buffer.split(/\r?\n/)) processLine(line);
       }
+      this.lastReasoning = reasoningBuffer || null;
     } catch (err) {
       throw sanitizeError(err, this.apiKey);
     }
@@ -744,6 +780,7 @@ export class GeminiProvider implements LLMProvider {
   private currentModel: string;
   private readonly retry: RetryOptions;
   lastFinishReason: string | null = null;
+  lastReasoning: string | null = null;
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     this.apiKey = cfg.apiKey ?? process.env.GEMINI_API_KEY ?? process.env.OPENAI_API_KEY ?? '';
@@ -899,21 +936,38 @@ export class GeminiProvider implements LLMProvider {
     }
 
     this.lastFinishReason = null;
+    this.lastReasoning = null;
     const contentType = response.headers.get('content-type') ?? '';
     if (!contentType.includes('text/event-stream') || !response.body) {
       try {
         const data = (await response.json()) as {
           candidates?: Array<{
-            content?: { parts?: Array<{ text?: string }> };
+            content?: { parts?: Array<{ text?: string; thought?: boolean | string }> };
             finishReason?: string;
           }>;
         };
         this.lastFinishReason = data.candidates?.[0]?.finishReason ?? 'STOP';
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-        if (text) {
-          options?.onToken?.(text);
+        let reasoningBuffer = '';
+        let full = '';
+        const parts = data.candidates?.[0]?.content?.parts ?? [];
+        for (const part of parts) {
+          if (typeof part.thought === 'string' && part.thought) {
+            reasoningBuffer += part.thought;
+            options?.onThought?.(part.thought);
+            if (part.text && part.text !== part.thought) {
+              full += part.text;
+              options?.onToken?.(part.text);
+            }
+          } else if (part.thought === true && part.text) {
+            reasoningBuffer += part.text;
+            options?.onThought?.(part.text);
+          } else if (part.text) {
+            full += part.text;
+            options?.onToken?.(part.text);
+          }
         }
-        return text;
+        this.lastReasoning = reasoningBuffer || null;
+        return full;
       } catch (err) {
         throw sanitizeError(err, this.apiKey);
       }
@@ -921,6 +975,7 @@ export class GeminiProvider implements LLMProvider {
 
     let full = '';
     let buffer = '';
+    let reasoningBuffer = '';
     const decoder = new TextDecoder();
     const processLine = (line: string): void => {
       const trimmed = line.trim();
@@ -930,7 +985,7 @@ export class GeminiProvider implements LLMProvider {
       try {
         const parsed = JSON.parse(payloadStr) as {
           candidates?: Array<{
-            content?: { parts?: Array<{ text?: string }> };
+            content?: { parts?: Array<{ text?: string; thought?: boolean | string }> };
             finishReason?: string;
           }>;
         };
@@ -938,10 +993,22 @@ export class GeminiProvider implements LLMProvider {
         if (finishReason) {
           this.lastFinishReason = finishReason;
         }
-        const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text) {
-          full += text;
-          options?.onToken?.(text);
+        const parts = parsed.candidates?.[0]?.content?.parts ?? [];
+        for (const part of parts) {
+          if (typeof part.thought === 'string' && part.thought) {
+            reasoningBuffer += part.thought;
+            options?.onThought?.(part.thought);
+            if (part.text && part.text !== part.thought) {
+              full += part.text;
+              options?.onToken?.(part.text);
+            }
+          } else if (part.thought === true && part.text) {
+            reasoningBuffer += part.text;
+            options?.onThought?.(part.text);
+          } else if (part.text) {
+            full += part.text;
+            options?.onToken?.(part.text);
+          }
         }
       } catch {
         // ignore
@@ -965,6 +1032,7 @@ export class GeminiProvider implements LLMProvider {
     if (!this.lastFinishReason) {
       this.lastFinishReason = 'STOP';
     }
+    this.lastReasoning = reasoningBuffer || null;
 
     return full;
   }
