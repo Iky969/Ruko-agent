@@ -91,10 +91,12 @@ export class Agent {
   private callCounts = new Map<string, number>();
   /** Tracks the most recent executed tool call signature to guard against consecutive duplicates (§5). */
   private lastCallSignature: string | null = null;
+  /** Tracks consecutive repetitive calls with identical signature. */
+  private consecutiveRepeatCount = 0;
 
   constructor(
     private readonly ctx: Context,
-    private readonly llmProvider: LLMProvider,
+    private llmProvider: LLMProvider,
     private readonly config: AgentConfig,
     confirm?: Confirmer | null,
     private readonly workspaceRoot?: string,
@@ -106,6 +108,11 @@ export class Agent {
   /** Replaces the approval prompt hook (wired by the loop once stdin is open). */
   setConfirm(confirm: Confirmer | null): void {
     this.confirm = confirm ?? null;
+  }
+
+  /** Replaces the LLM provider instance live in memory (e.g. after /login). */
+  setLlmProvider(provider: LLMProvider): void {
+    this.llmProvider = provider;
   }
 
   /** The LLM backend in use (exposed so the loop can report status). */
@@ -168,6 +175,7 @@ export class Agent {
     const startTime = Date.now();
     this.callCounts.clear();
     this.lastCallSignature = null;
+    this.consecutiveRepeatCount = 0;
     this.lastUsage = null;
     try {
       return await (this.llmProvider.isConfigured
@@ -218,7 +226,9 @@ export class Agent {
 
   /** LLM mode: agent loop with tool calls, streaming the visible reply. */
   private async runWithLlm(instruction: string, signal?: AbortSignal): Promise<string> {
-    const history = this.ctx.window(this.config.maxContextChars);
+    const history = this.ctx.window(this.config.maxContextChars).filter(
+      (m) => m.role !== 'tool_call' && m.role !== 'tool'
+    );
     const last = history[history.length - 1];
     const userAlreadyInHistory = Boolean(
       last && last.role === 'user' && last.content === instruction
@@ -235,7 +245,7 @@ export class Agent {
     const tree = new WorkflowTree((line) => {
       process.stdout.write('\r\u001b[2K');
       console.log(line);
-    });
+    }, { compact: true });
 
     let emptyFollowUpSent = false;
     let actionNudgeSent = false;
@@ -250,6 +260,7 @@ export class Agent {
     ]);
 
     const maxIterations = this.config.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
+    let hasSeparatedFromTools = false;
 
     try {
       for (let i = 0; i < maxIterations; i += 1) {
@@ -289,7 +300,7 @@ export class Agent {
           if (bufferedThinking.length > 0 && !thinkingFinished) {
             thinkingFinished = true;
             spinner.stop();
-            process.stdout.write(`\r\u001b[2K${green('✔')} Selesai berpikir\n`);
+            process.stdout.write('\r\u001b[2K');
           } else {
             spinner.stop();
           }
@@ -298,6 +309,10 @@ export class Agent {
         const gate = new LineGate((text) => {
           finishThinking();
           process.stdout.write('\r\u001b[2K');
+          if (tree.currentStep > 0 && !hasSeparatedFromTools) {
+            hasSeparatedFromTools = true;
+            process.stdout.write('\n');
+          }
           process.stdout.write(mdFormatter.format(text));
         });
         const reveal = new RevealFilter((text) => gate.push(text));
@@ -335,11 +350,26 @@ export class Agent {
           spinner.stop();
         }
         usage.completionChars += raw.length;
-        const calls = parseToolCalls(raw);
+        const { calls, malformedBlocks } = parseToolCalls(raw);
         // Final answers keep their trailing line; tool iterations drop the dangling
         // preamble that sat right before the hidden ```tool block (§2).
         const iterStreamed = gate.finish(calls.length === 0);
         finishThinking();
+
+        if (malformedBlocks.length > 0 && calls.length === 0) {
+          messages.push({
+            role: 'assistant',
+            content: raw.trim(),
+            timestamp: new Date().toISOString(),
+          });
+          messages.push({
+            role: 'tool',
+            content: '[FORMAT ERROR: Tool call JSON tidak valid. Periksa format JSON Anda — pastikan tidak ada trailing commas, semua string menggunakan double quotes, dan struktur JSON valid. Coba ulangi tool call dengan format yang benar.]',
+            timestamp: new Date().toISOString(),
+          });
+          continue;
+        }
+
         if (calls.length === 0) {
           const text = stripThoughtBlocks(stripToolBlocks(raw));
 
@@ -386,6 +416,10 @@ export class Agent {
           }
 
           const finalText = text || (tree.currentStep > 0 ? 'Semua langkah tool telah selesai dijalankan.' : '');
+          if (tree.currentStep > 0 && !hasSeparatedFromTools) {
+            hasSeparatedFromTools = true;
+            process.stdout.write('\n');
+          }
           if (tree.isTreeActive || tree.currentStep > 0) {
             tree.finish('Semua langkah tuntas');
             process.stdout.write('\n');
@@ -395,6 +429,8 @@ export class Agent {
           this.lastResponseStreamed = iterStreamed;
           return finalText;
         }
+
+        hasSeparatedFromTools = false;
 
         for (const call of calls) {
           if (MUTATING_TOOLS.has(call.tool)) {
@@ -442,38 +478,42 @@ export class Agent {
             }
             return '';
           }
-          // §5: loop breaker — identical tool call repeated is a stuck model.
-          if (this.seenRepeat(call)) {
+          // Item 2: Deteksi pemanggilan tool berulang dengan argumen yang identik berturut-turut
+          const sig = this.getCallSignature(call);
+          if (sig === this.lastCallSignature) {
+            this.consecutiveRepeatCount += 1;
+          } else {
+            this.consecutiveRepeatCount = 1;
+            this.lastCallSignature = sig;
+          }
+
+          // Item 2: Jika perulangan identik masih dipanggil > 2 kali berturut-turut,
+          // paksa interupsi loop agen dan arahkan model untuk menyimpulkan/melanjutkan ke respons akhir.
+          if (this.consecutiveRepeatCount > 2 || this.seenRepeat(call)) {
             if (tree.isTreeActive) {
               tree.finish('Dihentikan karena deteksi loop');
             }
             return (
               `[deteksi loop] tool "${call.tool}" dengan argumen sama sudah dipanggil ` +
-              `> ${LOOP_REPEAT_LIMIT}× — eksekusi dihentikan. Ulangi dengan instruksi lain, ` +
-              `atau jalankan manual lewat /exec.`
+              `> ${LOOP_REPEAT_LIMIT}× — eksekusi dihentikan. Silakan simpulkan atau lanjutkan ke respons akhir berdasarkan data yang sudah ada di riwayat.`
             );
           }
 
-          // §5: Guard mekanis — tolak eksekusi ganda jika tool call berturut-turut persis identik
-          const sig = this.getCallSignature(call);
-          if (this.lastCallSignature === sig) {
+          // Item 2: Jika perintah terdeteksi identik berturut-turut, cegah eksekusi ulang I/O.
+          if (this.consecutiveRepeatCount === 2) {
             const warn = 'Perintah identik terdeteksi berulang, dilewati';
             tree.log(yellow(`⚠ ${warn}`));
             messages.push({
               role: 'tool',
-              content: `Result of tool "${call.tool}":\n${JSON.stringify({
-                skipped: true,
-                warning: warn,
-                message: `Tool "${call.tool}" dengan argumen identik baru saja dijalankan pada langkah sebelumnya dan hasilnya sudah ada di konteks percakapan di atas. Eksekusi kedua dilewati; silakan lanjutkan dengan menganalisis hasil yang sudah ada atau jalankan aksi berikutnya.`,
-              })}`,
+              content: `[WARNING: Tindakan ini baru saja dijalankan dengan hasil yang sama. Dilarang memanggil ulang tool ini. Gunakan data yang sudah ada di riwayat dan segera lanjutkan ke langkah analisis atau eksekusi berikutnya.]\n(Tool "${call.tool}" dengan argumen identik baru saja dijalankan pada langkah sebelumnya dan hasilnya sudah ada di konteks percakapan di atas. Eksekusi kedua dilewati; silakan lanjutkan dengan menganalisis hasil yang sudah ada atau jalankan aksi berikutnya.)`,
               timestamp: new Date().toISOString(),
               tool_call_id: toolCallId,
               name: call.tool,
             });
             continue;
           }
-          this.lastCallSignature = sig;
 
+          const toolStart = Date.now();
           const result = await runToolCall(call, {
             confirm: this.confirm,
             config: this.config,
@@ -484,6 +524,7 @@ export class Agent {
             workspaceRoot: this.workspaceRoot,
             subagentDepth: this.subagentDepth,
           });
+          const toolElapsedMs = Date.now() - toolStart;
           if (signal?.aborted) {
             if (tree.isTreeActive) {
               tree.finish('Dibatalkan oleh pengguna');
@@ -492,6 +533,8 @@ export class Agent {
             }
             return '';
           }
+          this.ctx.addToolCall(call.tool, call as Record<string, unknown>);
+          this.ctx.addToolResult(call.tool, result);
           messages.push({
             role: 'tool',
             content: `Result of tool "${call.tool}":\n${result}`,

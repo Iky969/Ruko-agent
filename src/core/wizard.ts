@@ -115,7 +115,7 @@ export async function promptSetup(
     if (/^http:\/\//i.test(baseUrl)) {
       console.log(yellow(`\n  ⚠ Peringatan: Protokol HTTP (cleartext) terdeteksi untuk "${baseUrl}".`));
       const trust = (
-        await rl.question(yellow('  Apakah kamu mempercayai protokol/URL ini? (y/n): '))
+        await rl.question(yellow('  Percayai URL ini? (y/n): '))
       )
         .trim()
         .toLowerCase();
@@ -163,7 +163,7 @@ export async function promptSetup(
             if (/^http:\/\//i.test(newUrl)) {
               console.log(yellow(`\n  ⚠ Peringatan: Protokol HTTP (cleartext) terdeteksi untuk "${newUrl}".`));
               const trust = (
-                await rl.question(yellow('  Apakah kamu mempercayai protokol/URL ini? (y/n): '))
+                await rl.question(yellow('  Percayai URL ini? (y/n): '))
               )
                 .trim()
                 .toLowerCase();

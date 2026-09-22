@@ -3,7 +3,7 @@
  */
 
 /** Role of a message inside the agent's conversation context. */
-export type ContextRole = 'system' | 'user' | 'assistant' | 'tool';
+export type ContextRole = 'system' | 'user' | 'assistant' | 'tool' | 'tool_call';
 
 /** One entry in the conversation context (the agent's memory). */
 export interface ContextMessage {

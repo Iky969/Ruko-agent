@@ -2,7 +2,7 @@ import * as readline from 'node:readline';
 import { readFileSync } from 'node:fs';
 import { Agent } from '../agent/agent.js';
 import { buildHelpText, handleCommand, listCommands } from '../agent/commands.js';
-import { Confirmer } from './approval.js';
+import { Confirmer, isYoloMode } from './approval.js';
 import { saveConfig } from './config.js';
 import { AgentConfig } from '../types.js';
 import { Context } from './context.js';
@@ -179,6 +179,7 @@ export class SystemLoop {
 
   /** Dark-green status bar, refreshed before every input (§3/§8). */
   private statusBarLine(width?: number): string {
+    const isYolo = !this.config.approvalEnabled || isYoloMode();
     return buildStatusBar({
       width,
       model: this.agent.llm.model,
@@ -186,6 +187,7 @@ export class SystemLoop {
       budgetChars: this.config.maxContextChars,
       role: this.config.role ?? 'default',
       planMode: this.agent.planMode,
+      yoloMode: isYolo,
       // v0.7: busy flag + queue badge live in the bar (same redraw machine).
       busy: this.busy,
       pending: this.queue.length,

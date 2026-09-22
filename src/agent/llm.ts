@@ -171,6 +171,61 @@ export function explainProviderError(err: unknown): string {
 }
 
 /**
+ * Item 4: Validasi Pesan OpenAI-Compatible
+ * Memastikan invariant struktur pesan terjaga: setiap pesan role `assistant` yang berisi array `tool_calls`
+ * wajib disusul secara lengkap dan berurutan oleh pesan role `tool` untuk setiap `tool_call_id` terkait
+ * sebelum pemanggilan completions berikutnya dilakukan.
+ */
+export function validateOpenAiMessages<T extends { role: string; content?: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>(
+  messages: T[],
+): T[] {
+  const result: T[] = [];
+  let i = 0;
+  while (i < messages.length) {
+    const msg = messages[i];
+    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+      result.push(msg);
+      i += 1;
+      // Kumpulkan seluruh pesan role tool yang langsung menyusul
+      const toolMsgs: T[] = [];
+      while (i < messages.length && messages[i].role === 'tool') {
+        toolMsgs.push(messages[i]);
+        i += 1;
+      }
+      // Pastikan setiap tool_call_id memiliki pesan tool yang berurutan sesuai urutan di tool_calls
+      for (const tc of msg.tool_calls) {
+        const id = tc.id;
+        const matchingIdx = toolMsgs.findIndex((tm) => tm.tool_call_id === id);
+        if (matchingIdx !== -1) {
+          result.push(toolMsgs[matchingIdx]);
+          toolMsgs.splice(matchingIdx, 1);
+        } else {
+          // Jika ada tool_call_id yang belum disusul, buat pesan tool pengganti yang valid
+          result.push({
+            role: 'tool',
+            tool_call_id: id,
+            content: `[Hasil tool "${tc.function?.name ?? id}" tidak ditemukan atau terlewat]`,
+            name: tc.function?.name,
+          } as T);
+        }
+      }
+      // Sisa pesan tool yang tidak memiliki pasangan id pada assistant ini dilewati agar tidak memicu error API
+      continue;
+    }
+
+    // Pesan role 'tool' tanpa didahului oleh pesan assistant dengan tool_calls yang valid dilewati (orphan tool message)
+    if (msg.role === 'tool') {
+      i += 1;
+      continue;
+    }
+
+    result.push(msg);
+    i += 1;
+  }
+  return result;
+}
+
+/**
  * OpenAI-compatible chat completions provider (works with OpenAI and any
  * compatible endpoint such as Ollama, LM Studio, vLLM, ...).
  *
@@ -316,9 +371,11 @@ export class OpenAiCompatibleProvider implements LLMProvider {
 
     this.lastFinishReason = null;
 
-    // Normalisasi Skema Tool Result: Pastikan payload pesan balik setelah tool execution
-    // sesuai dengan skema standar provider (role: "tool" dengan tool_call_id yang valid).
-    const formattedMessages = messages.map((m) => {
+    // Normalisasi & Validasi Skema Tool Result: Pastikan payload pesan balik setelah tool execution
+    // sesuai dengan skema standar provider (role: "tool" dengan tool_call_id yang valid)
+    // dan invariant struktur pesan OpenAI-compatible terjaga secara lengkap dan berurutan.
+    const validated = validateOpenAiMessages(messages);
+    const formattedMessages = validated.map((m) => {
       if (m.role === 'tool') {
         const toolCallId = (m.tool_call_id && m.tool_call_id.trim()) || `call_${Date.now()}`;
         return {
@@ -628,7 +685,7 @@ export class AnthropicProvider implements LLMProvider {
       if (m.role === 'system') {
         systemParts.push(m.content);
       } else {
-        const role: 'user' | 'assistant' = m.role === 'tool' ? 'user' : m.role;
+        const role: 'user' | 'assistant' = (m.role === 'tool' || m.role === 'tool_call') ? 'user' : m.role;
         if (nonSystem.length > 0 && nonSystem[nonSystem.length - 1].role === role) {
           nonSystem[nonSystem.length - 1].content += '\n\n' + m.content;
         } else {

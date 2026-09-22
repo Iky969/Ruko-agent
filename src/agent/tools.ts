@@ -78,33 +78,65 @@ export interface ToolCall {
 }
 
 const TOOL_BLOCK_RE = /```tool\s*\n([\s\S]*?)```/g;
-const DSML_INVOKE_RE = /<(?:\||｜)DSML(?:\||｜)invoke\s+name=["']?([^"'>\s]+)["']?[^>]*>([\s\S]*?)<\/(?:\||｜)DSML(?:\||｜)invoke>/gi;
-const DSML_INVOKE_SELF_RE = /<(?:\||｜)DSML(?:\||｜)invoke\s+name=["']?([^"'>\s]+)["']?[^>]*\/>/gi;
-const DSML_PARAM_RE = /<(?:\||｜)DSML(?:\||｜)parameter\s+name=["']?([^"'>\s]+)["']?(?:\s+string=["']?(true|false)["']?)?[^>]*>([\s\S]*?)<\/(?:\||｜)DSML(?:\||｜)parameter>/gi;
+const DSML_INVOKE_RE = /<\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*invoke\s+name=["']?([^"'>\s]+)["']?[^>]*>([\s\S]*?)<\/\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*invoke\s*>/gi;
+const DSML_INVOKE_SELF_RE = /<\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*invoke\s+name=["']?([^"'>\s]+)["']?[^>]*\/>/gi;
+const DSML_PARAM_RE = /<\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*parameter\s+name=["']?([^"'>\s]+)["']?(?:\s+string=["']?(true|false)["']?)?[^>]*>([\s\S]*?)<\/\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*parameter\s*>/gi;
 const XML_TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
 
+export interface ParseToolCallsResult {
+  calls: ToolCall[];
+  malformedBlocks: string[];
+}
+
 /** Extracts all tool-call blocks from a model reply (markdown fence, DeepSeek DSML, or XML). */
-export function parseToolCalls(text: string): ToolCall[] {
+export function parseToolCalls(text: string): ParseToolCallsResult {
   const calls: ToolCall[] = [];
+  const malformedBlocks: string[] = [];
 
   // 1. Standard markdown ```tool ... ``` fences
   for (const match of text.matchAll(TOOL_BLOCK_RE)) {
     try {
       const parsed = JSON.parse(match[1].trim()) as ToolCall;
       if (parsed && typeof parsed.tool === 'string' && parsed.tool.length > 0) {
+        parsed.tool = normalizeToolName(parsed.tool);
         calls.push(parsed);
       }
     } catch {
-      // Malformed block — ignore it, the model may still have answered in text.
+      malformedBlocks.push(match[1].trim());
+    }
+  }
+
+  // 1b. Markdown ```json ... ``` fences (when containing tool/name field)
+  const JSON_BLOCK_RE = /```json\s*\n([\s\S]*?)\n\s*```/gi;
+  for (const match of text.matchAll(JSON_BLOCK_RE)) {
+    try {
+      const parsed = JSON.parse(match[1].trim());
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.tool === 'string' && parsed.tool.length > 0) {
+          parsed.tool = normalizeToolName(parsed.tool);
+          calls.push(parsed as ToolCall);
+        } else if (typeof parsed.name === 'string' && parsed.name.length > 0) {
+          const toolName = normalizeToolName(parsed.name);
+          let args = parsed.arguments ?? parsed.parameters ?? {};
+          if (typeof args === 'string') {
+            try { args = JSON.parse(args); } catch { /* keep raw */ }
+          }
+          const { name: _n, arguments: _a, parameters: _p, ...rest } = parsed;
+          calls.push({ tool: toolName, ...rest, ...(typeof args === 'object' && args ? args : {}) });
+        }
+      }
+    } catch {
+      // Not a tool call JSON, just regular code — ignore
     }
   }
 
   // 2. DeepSeek DSML (<|DSML|invoke name="...">... or full-width <｜DSML｜invoke...>)
   for (const match of text.matchAll(DSML_INVOKE_RE)) {
-    const tool = match[1].trim();
+    const tool = normalizeToolName(match[1].trim());
     const body = match[2];
     const params: Record<string, unknown> = {};
 
+    let hasError = false;
     for (const pMatch of body.matchAll(DSML_PARAM_RE)) {
       const pName = pMatch[1].trim();
       const isString = pMatch[2]?.toLowerCase() === 'true';
@@ -126,7 +158,7 @@ export function parseToolCalls(text: string): ToolCall[] {
   }
 
   for (const match of text.matchAll(DSML_INVOKE_SELF_RE)) {
-    const tool = match[1].trim();
+    const tool = normalizeToolName(match[1].trim());
     if (tool) {
       calls.push({ tool });
     }
@@ -147,17 +179,50 @@ export function parseToolCalls(text: string): ToolCall[] {
               // fallback raw string
             }
           }
-          calls.push({ tool: parsed.name, ...(typeof args === 'object' && args ? args : {}) });
+          calls.push({ tool: normalizeToolName(parsed.name), ...(typeof args === 'object' && args ? args : {}) });
         } else if (typeof parsed.tool === 'string' && parsed.tool.length > 0) {
+          parsed.tool = normalizeToolName(parsed.tool);
           calls.push(parsed as ToolCall);
         }
       }
     } catch {
-      // Malformed block — ignore.
+      malformedBlocks.push(match[1].trim());
     }
   }
 
-  return calls;
+  // 4. Generic XML <tool>JSON</tool> (Nemotron / generic style)
+  const XML_TOOL_SIMPLE_RE = /<tool(?:[^>]*)>\s*([\s\S]*?)\s*(?:<\/tool>|$)/gi;
+  for (const match of text.matchAll(XML_TOOL_SIMPLE_RE)) {
+    // try extract name attribute
+    const attrMatch = match[0].match(/name=["']?([^"'>\s]+)["']?/i);
+    let nameAttr = attrMatch ? attrMatch[1] : null;
+    
+    try {
+      const parsed = JSON.parse(match[1].trim());
+      if (parsed && typeof parsed === 'object') {
+        let tName = parsed.tool ?? parsed.name ?? nameAttr;
+        if (typeof tName === 'string' && tName.length > 0) {
+          tName = normalizeToolName(tName);
+          let args = parsed.arguments ?? parsed.parameters ?? {};
+          if (typeof args === 'string') {
+            try { args = JSON.parse(args); } catch { /* keep raw */ }
+          }
+          const { tool: _t, name: _n, arguments: _a, parameters: _p, ...rest } = parsed;
+          calls.push({ tool: tName, ...rest, ...(typeof args === 'object' && args ? args : {}) });
+        }
+      }
+    } catch {
+      malformedBlocks.push(match[1].trim());
+    }
+  }
+
+  // Normalize parameters in all standard calls before returning
+  const normalizedCalls = calls.map(c => {
+    const norm = normalizeToolParams(c);
+    return { tool: c.tool, ...norm };
+  }) as ToolCall[];
+
+  return { calls: normalizedCalls, malformedBlocks };
 }
 
 /** Removes all tool-call blocks (markdown, DSML, XML) from a model reply, keeping surrounding text. */
@@ -167,8 +232,10 @@ export function stripToolBlocks(text: string): string {
     .replace(TOOL_BLOCK_RE, '')
     .replace(DSML_INVOKE_RE, '')
     .replace(DSML_INVOKE_SELF_RE, '')
-    .replace(/<\/?(?:\||｜)DSML(?:\||｜)[^>]*>/gi, '')
+    .replace(/<\/?(?:\|\|?|｜｜?)DSML(?:\|\|?|｜｜?)[^>]*>/gi, '')
     .replace(XML_TOOL_CALL_RE, '')
+    .replace(/<tool>\s*[\s\S]*?\s*<\/tool>/gi, '')
+    .replace(/<tool>\s*[\s\S]*$/gi, '')
     .trim();
 }
 
@@ -2115,4 +2182,140 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
     default:
       return JSON.stringify({ error: `unknown tool: ${call.tool}` });
   }
+}
+export function normalizeToolName(toolName: string): string {
+  const name = toolName.trim();
+  const lower = name.toLowerCase();
+  
+  // Read aliases
+  if (lower === 'read' || lower === 'readfile' || lower === 'read_file') return 'read_file';
+  
+  // Exec / Bash aliases  
+  if (lower === 'bash' || lower === 'shell' || lower === 'sh' || lower === 'terminal' || lower === 'execute_command' || lower === 'run_command') return 'exec';
+  
+  // Edit aliases
+  if (lower === 'edit' || lower === 'editfile' || lower === 'edit_file') return 'edit_file';
+  
+  // Write aliases
+  if (lower === 'write' || lower === 'writefile' || lower === 'write_file') return 'write_file';
+  
+  // Search aliases
+  if (lower === 'search' || lower === 'search_files' || lower === 'find_in_files' || lower === 'code_search') return 'code_search';
+  
+  // Glob aliases
+  if (lower === 'glob' || lower === 'glob_files' || lower === 'list_files') return 'glob';
+  
+  // ListDir aliases
+  if (lower === 'listdir' || lower === 'list_dir' || lower === 'ls') return 'list_dir';
+  
+  // Delete aliases
+  if (lower === 'delete' || lower === 'deletefile' || lower === 'delete_file') return 'delete_file';
+  
+  // Move aliases
+  if (lower === 'move' || lower === 'movefile' || lower === 'move_file' || lower === 'rename') return 'move_file';
+  
+  // Patch aliases
+  if (lower === 'patch' || lower === 'patchfile' || lower === 'patch_file') return 'patch_file';
+  
+  return name;
+}
+
+/** Regex for <tool>JSON</tool> or unclosed <tool>JSON (Nemotron/generic style). */
+const XML_TOOL_TAG_RE = /<tool>\s*([\s\S]*?)\s*(?:<\/tool>|$)/gi;
+/** Regex for <tool name="..." attr="..." /> or <tool name="..." attr="..."></tool> */
+const XML_TOOL_ATTR_RE = /<tool\s+([^>]*?)\s*\/?>/gi;
+/** Regex for ```json ... ``` blocks */
+const JSON_FENCE_RE = /```json\s*\n([\s\S]*?)\n\s*```/gi;
+
+/** Normalize common parameter key aliases. */
+function normalizeToolParams(params: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) {
+    const lk = key.toLowerCase();
+    if (lk === 'file_path' || lk === 'filepath' || lk === 'file') {
+      result.path = value;
+    } else if (lk === 'old_text' || lk === 'old_string') {
+      result.oldText = value;
+    } else if (lk === 'new_text' || lk === 'new_string') {
+      result.newText = value;
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+/** Extract a single fallback tool call from model output (handles many formats). */
+export function extractFallbackToolCall(content: string): ToolCall | null {
+  const calls = extractFallbackToolCalls(content);
+  return calls.length > 0 ? calls[0] : null;
+}
+
+/** Extract all fallback tool calls from model output (handles many non-standard formats). */
+export function extractFallbackToolCalls(content: string): ToolCall[] {
+  // First try standard parseToolCalls
+  const { calls: standardCalls } = parseToolCalls(content);
+  if (standardCalls.length > 0) return standardCalls;
+  
+  const calls: ToolCall[] = [];
+  
+  // 1. <tool>{JSON}</tool> format
+  for (const match of content.matchAll(XML_TOOL_TAG_RE)) {
+    try {
+      const parsed = JSON.parse(match[1].trim());
+      if (parsed && typeof parsed === 'object') {
+        let toolName = parsed.tool ?? parsed.name ?? '';
+        if (typeof toolName === 'string' && toolName) {
+          toolName = normalizeToolName(toolName);
+          const { tool: _t, name: _n, ...rest } = parsed;
+          const normalized = normalizeToolParams(rest);
+          calls.push({ tool: toolName, ...normalized });
+        }
+      }
+    } catch {
+      // ignore malformed
+    }
+  }
+  if (calls.length > 0) return calls;
+  
+  // 2. <tool name="..." path="..." /> attribute format
+  for (const match of content.matchAll(XML_TOOL_ATTR_RE)) {
+    const attrStr = match[1];
+    const attrs: Record<string, string> = {};
+    for (const am of attrStr.matchAll(/(\w+)=["']([^"']*)["']/g)) {
+      attrs[am[1]] = am[2];
+    }
+    const toolName = attrs.name;
+    if (toolName) {
+      const { name: _n, ...rest } = attrs;
+      const normalized = normalizeToolParams(rest as Record<string, unknown>);
+      calls.push({ tool: normalizeToolName(toolName), ...normalized });
+    }
+  }
+  if (calls.length > 0) return calls;
+  
+  // 3. ```json ... ``` blocks
+  for (const match of content.matchAll(JSON_FENCE_RE)) {
+    try {
+      const parsed = JSON.parse(match[1].trim());
+      if (parsed && typeof parsed === 'object') {
+        let toolName = parsed.tool ?? parsed.name ?? '';
+        if (typeof toolName === 'string' && toolName) {
+          toolName = normalizeToolName(toolName);
+          let args = parsed.arguments ?? parsed.parameters ?? {};
+          if (typeof args === 'string') {
+            try { args = JSON.parse(args); } catch { args = {}; }
+          }
+          const { tool: _t, name: _n, arguments: _a, parameters: _p, ...directRest } = parsed;
+          const merged = { ...directRest, ...(typeof args === 'object' && args ? args : {}) };
+          const normalized = normalizeToolParams(merged);
+          calls.push({ tool: toolName, ...normalized });
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  
+  return calls;
 }

@@ -100,7 +100,7 @@ test('E2E: Fake LLM server probe, streaming tool loop, and trajectory export', a
     ctx.add('assistant', reply);
 
     assert.ok(reply.includes('Semua tuntas dengan hasil: `halo-e2e-ruko`.'));
-    assert.equal(ctx.size, 2, 'Context records user and final assistant response');
+    assert.equal(ctx.size, 4, 'Context records user, tool call, tool result, and final assistant response');
 
     // 4. Trajectory export
     const exportDir = join(tmpWs, 'exports');

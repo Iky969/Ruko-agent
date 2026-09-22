@@ -293,7 +293,7 @@ test('renderApprovalBox renders equal-width rows with warning header and ANSI co
     const lines = box.split('\n');
     assert.ok(lines.length >= 6);
     assert.ok(lines[0].startsWith('┌') && lines[0].endsWith('┐'));
-    assert.ok(lines[1].includes('⚠ KONFIRMASI PERINTAH BERISIKO'));
+    assert.ok(lines[1].includes('⚠ KONFIRMASI BERISIKO'));
     assert.ok(lines[2].startsWith('├') && lines[2].endsWith('┤'));
     assert.ok(lines[3].includes('Alasan') && lines[3].includes('menghapus direktori dependensi'));
     assert.ok(lines[4].includes('Perintah') && lines[4].includes('rm -rf node_modules'));

@@ -4,7 +4,7 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-493%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-563%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
@@ -376,7 +376,7 @@ src/
 │   ├── roles.ts          # Manajemen system prompt berlapis & peran AI
 │   ├── subagent.ts       # Orkestrasi subagent delegasi terisolasi
 │   ├── tools.ts          # Handler tool call protocol & pembatas output
-│   └── webtools.ts       # Tool web_fetch & web_search dengan SSRF Native IP Pinning
+│   └── webtools.ts       # Tool web_fetch dengan SSRF Native IP Pinning
 └── core/
     ├── approval.ts       # Dual-Layer Approval Gate & Guardian LLM
     ├── compressor.ts     # Algoritma kompresi percakapan adaptif

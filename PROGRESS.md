@@ -2,6 +2,60 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### v1.7.6 (22 September 2026) — Universal Fallback Tool Parser, CLI Visual Spacing Polish, & /yolo Mode Integration
+
+#### Ditambahkan & Diperbarui
+- **Universal Fallback Tool Parser Terpadu (`src/agent/tools.ts`, `src/core/ui.ts`, `src/agent/agent.ts`)**:
+  * *Multi-Format Detection*: Mengimplementasikan parser universal yang mengekstrak perintah model dalam format:
+    1. Tag XML / Generic Tool: `<tool>...</tool>`, `<tool_call>...</tool_call>`, atribut tag XML (`<tool name="read_file" file_path="..."/>`), dan tag `<tool>` belum tertutup akibat streaming/stop token.
+    2. DeepSeek DSML: `<|DSML|calls><|DSML|invoke name="...">...`, toleransi unclosed invoke tag, parsing JSON body cadangan, dan normalisasi parameter `file_path` -> `path`.
+    3. Markdown Codeblock: Blok ```` ```json ```` dan ```` ```tool ```` yang memuat objek tool call (termasuk `{"name": "...", "arguments": {...}}` atau `{"tool": "...", "file_path": "..."}`).
+  * *Tool Mapping & Normalisasi Parameter*:
+    - `read_file`, `ReadFile`, `read`, `Read` -> `read_file`
+    - `edit_file`, `EditFile`, `write_file`, `Edit`, `Write` -> `edit_file` / `write_file`
+    - `execute_command`, `bash`, `shell`, `Bash`, `terminal`, `sh`, `cmd` -> `exec`
+    - `search_files`, `find_in_files`, `Search`, `search`, `grep` -> `code_search`
+    - `glob_files`, `list_files`, `Glob`, `glob`, `find_files` -> `glob`
+    - Normalisasi parameter fleksibel: `file_path`, `path`, `file`, `filepath`, `target` dipetakan otomatis ke `path` untuk semua file tool.
+  * *Ekstraksi Terpadu*: Mengekspos fungsi `extractFallbackToolCall(content: string): ToolCall | null` dan `extractFallbackToolCalls(content: string): ToolCall[]`.
+  * *Pembersihan Output (Zero Terminal Leak)*:
+    - `RevealFilter` (`src/core/ui.ts`) menahan dan menyembunyikan tag XML `<tool>`, `<tool_call>`, DeepSeek DSML, dan markdown ```` ```json ```` bermuatan tool call selama streaming agar tidak bocor sedikit pun ke terminal.
+    - `stripToolBlocks` (`src/agent/tools.ts`) membersihkan seluruh representasi pseudo-tool dari teks jawaban akhir.
+- **Visual Spacing & Pemisah Visual Log Tool UI (`src/agent/agent.ts`)**:
+  * Menambahkan jeda satu baris kosong (`\n`) tepat setelah eksekusi tool terakhir selesai, sebelum balasan teks asisten mulai ditampilkan (baik pada mode streaming live via `LineGate` maupun non-streaming).
+  * Mempertahankan kerapatan satu baris per tool (compact 1-line) pada pemanggilan multiple tool berurutan tanpa baris kosong di antara tool-tool tersebut.
+- **Integrasi Perintah `/yolo` (`src/agent/commands.ts`, `src/core/approval.ts`)**:
+  * Menyediakan shortcut command `/yolo` untuk mengaktifkan/menonaktifkan YOLO mode (auto-approval) secara instan tanpa perlu masuk ke wizard konfigurasi manual.
+- **Rangkaian Pengujian Mandiri**:
+  * Menambahkan unit test komprehensif di `src/tests/pseudo_tool_parser.test.ts` dan `src/tests/yolo_mode.test.ts`.
+  * Seluruh **543 tests** lulus 100% tanpa regresi (`npm test`), dan `npm run typecheck` 100% bersih.
+
+---
+
+### v1.7.5 (22 September 2026) — DeepSeek DSML Tool-Call Parser & Streaming Reveal Filter Remediation (BUG A Verified Fix)
+
+#### Ditambahkan & Diperbarui
+- **Remediasi Tuntas Parser DeepSeek DSML (`src/agent/tools.ts`, `src/core/ui.ts`)**:
+  * *Investigasi Jalur LLM Provider (`src/agent/llm.ts`)*: Memverifikasi bahwa `src/agent/llm.ts` murni hanya menangani rekonstruksi delta `tool_calls` OpenAI native. Model `deepseek-v4.1-flash` memancarkan token DSML sebagai teks biasa (`content` / `delta.content`) yang dialirkan langsung ke terminal via `onToken` dan diekstrak dari teks balasan via `parseToolCalls`.
+  * *Root Cause Analisis Respons Nyata DeepSeek API*:
+    1. Respons nyata `deepseek-v4.1-flash` membungkus pemanggilan dengan tag container `<｜｜DSML｜｜ calls> ... </｜｜DSML｜｜ calls>` atau `<|DSML||calls> ... </|DSML||calls>`.
+    2. Format pembatas menggunakan double pipe (`||` atau full-width `｜｜`), bukan single pipe (`|`/`｜`).
+    3. Terdapat spasi pemisah antara penutup pipa dan nama tag/perintah (`<｜｜DSML｜｜ calls>`, `<｜｜DSML｜｜ invoke name="read_file">`, `</｜｜DSML｜｜ invoke>`).
+    4. Implementasi v1.7.2 hanya menangani single pipe tanpa spasi dan tanpa dukungan tag wrapper `calls`, sehingga respons bocor mentah ke terminal dan `parseToolCalls` mengembalikan array kosong `[]` (0 tool calls).
+  * *Solusi & Perbaikan Komprehensif*:
+    - `parseToolCalls` (`src/agent/tools.ts`): Regex `DSML_INVOKE_RE`, `DSML_INVOKE_SELF_RE`, `DSML_PARAM_RE`, dan `DSML_CALLS_RE` kini mendukung kuantifier pipa jamak `(?:\||｜)+`, toleransi spasi opsional `\s*`, serta penanganan container wrapper `calls` maupun `tool_calls`.
+    - `stripToolBlocks` (`src/agent/tools.ts`): Menghapus seluruh blok DSML container dan tag individual secara bersih tanpa meninggalkan residu teks ke pengguna.
+    - `RevealFilter` (`src/core/ui.ts`): Mendukung multi-marker prefix hold (`<||DSML||`, `<｜｜DSML｜｜`, `</||DSML||`, dsb.) dan state machine (`dsml_calls`, `dsml_invoke`) serta sanitasi newline lanjutan (`skipNextNewline`), menjamin 100% token streaming tidak bocor ke terminal baik pada mode chunk maupun streaming token per karakter.
+- **Rangkaian Pengujian Mandiri**:
+  * Menambahkan 5 unit & integration test baru di `src/tests/thought_and_feedback_bugs.test.ts` untuk memvalidasi:
+    1. `RevealFilter` menahan dan menyembunyikan respons format `feedback.txt` (`<|DSML||calls><|DSML||invoke name="read_file">...`) dan format live DeepSeek (`<｜｜DSML｜｜ calls>...`) secara utuh pada chunk dan karakter-demi-karakter.
+    2. `parseToolCalls` mengekstrak pemanggilan tool `read_file` dan parameter `path` serta `limit` dari format bocor `feedback.txt` dan live DeepSeek.
+    3. `stripToolBlocks` membersihkan seluruh blok DSML tanpa residu.
+    4. Test integrasi end-to-end `Agent.handleInstruction` dengan respons DSML mock DeepSeek menjalankan tool `read_file` dan menyelesaikan turn tanpa kebocoran output terminal.
+  * Total unit test meningkat menjadi **511 tests passed** (100% lulus, 0 fail), dan `npm run typecheck` 100% bersih tanpa galat.
+
+---
+
 ### v1.7.4 (17 September 2026) — Comprehensive QA & Code Audit Remediation: Fix code_search Regex Stateful Skip, Undo Snapshot Sandboxing & Traversal Guard, Config Token/Provider Persistence, Terminal Streaming Markdown Formatter, & Interaction Polish
 
 #### Ditambahkan & Diperbarui
@@ -59,10 +113,13 @@
   * Melarang keras menyimpulkan task sebagai "tuntas" / "selesai" tanpa pengujian atau eksekusi mutasi konkret jika instruksi meminta perbaikan/edit kode.
 - **BUG A: Parser Tool-Call DeepSeek DSML & XML (`src/core/ui.ts`, `src/agent/llm.ts`, `src/agent/tools.ts`)**:
   * *Root Cause*: Model DeepSeek (`deepseek-v4.1-flash`) memancarkan tool call dalam format DeepSeek DSML (`<|DSML|invoke name="...">` atau varian unicode full-width `<｜DSML｜invoke name="...">`) serta `<tool_call>...`, yang sebelumnya tidak dikenali parser internal Ruko dan bocor ke layar pengguna.
-  * *Solusi*:
-    - `RevealFilter` (`src/core/ui.ts`) diperbarui untuk menahan dan menyembunyikan tag DSML dan XML `<tool_call>` selama proses streaming teks ke terminal, dengan regex penutup yang presisi (`<\/(?:\||｜)DSML(?:\||｜)(?:invoke|tool_calls)[^>]*>`).
-    - `parseToolCalls` dan `stripToolBlocks` (`src/agent/tools.ts`) diperkaya dengan parser DSML dan XML untuk mengekstrak nama tool dan parameter (string, boolean, angka) menjadi objek `ToolCall` standar.
+  * *Solusi Asal (v1.7.2)*:
+    - `RevealFilter` (`src/core/ui.ts`) diperbarui untuk menahan dan menyembunyikan tag DSML dan XML `<tool_call>` selama proses streaming teks ke terminal, dengan regex penutup (`<\/(?:\||｜)DSML(?:\||｜)(?:invoke|tool_calls)[^>]*>`).
+    - `parseToolCalls` dan `stripToolBlocks` (`src/agent/tools.ts`) diperkaya dengan parser DSML dan XML untuk mengekstrak nama tool dan parameter menjadi objek `ToolCall` standar.
     - `OpenAiCompatibleProvider` (`src/agent/llm.ts`) diperbarui untuk merekonstruksi delta `tool_calls` pada response streaming native.
+  * *Catatan Audit & Verifikasi Nyata (v1.7.5)*:
+    - Implementasi v1.7.2 hanya diuji pada format sintetis satu pipa tanpa spasi (`<|DSML|invoke...` dan `<｜DSML｜invoke...`).
+    - Respons nyata dari API DeepSeek (`deepseek-v4.1-flash`) menggunakan format double pipe (`||` / `｜｜`), spasi pemisah sebelum nama tag (`<｜｜DSML｜｜ calls>`, `<｜｜DSML｜｜ invoke name="...">`), dan wrapper tag `<...calls>`, serta `src/agent/llm.ts` sebenarnya tidak memproses DSML. Akibatnya, pada v1.7.4 format ini masih bocor dan gagal diproses. Perbaikan tuntas dan terverifikasi secara end-to-end telah diselesaikan di v1.7.5.
 - **BUG B: Multi-Step Task Completion Guard / Anti-Premature Halt (`src/agent/agent.ts`)**:
   * *Root Cause*: Pada instruksi seperti "baca file dan perbaiki bug", LLM membaca file pada turn 1, lalu pada turn 2 memberikan penalaran awal atau analisis temuan tanpa memanggil tool. Pada implementasi lama, ketiadaan tool call langsung dianggap sebagai sinyal selesai sehingga loop berhenti dan menampilkan `[Selesai] Semua langkah tuntas` sebelum tool edit dipanggil.
   * *Solusi*:
@@ -509,7 +566,7 @@ Gap fitur yang tersisa dibanding sistem asisten coding modern:
 
 Status dan resolusi batasan arsitektural:
 1. ~~**Compression menyerah bila budget tak terjangkau**~~ — **TERATASI (v1.7.1)**: Dilengkapi *best-effort fallback compression* (`foldAllHead` pada `src/core/compressor.ts`) yang tetap meringkas giliran riwayat tertua ke ringkasan terpadat ketika protected tail turn panjang, mencegah ledakan konteks window.
-2. **`--exec` timeout mencatat exit code `null`** (bukan 124) — Perilaku standar Node.js `child_process.exec` saat proses dimatikan paksa oleh sinyal (SIGTERM); pesan diagnostik penjelas `[Command timed out after Xms]` disertakan langsung pada teks `output`. Untuk proses latar belakang, gunakan tool terpisah `start_process` (`spawn`).
+2. ~~**`--exec` timeout mencatat exit code `null`** (bukan 124)~~ — **TERATASI (v1.7.6)**: Mengembalikan exit code standar **124** saat proses dibunuh oleh timeout di `src/core/executor.ts` (baris 70-73). Sebelumnya mengembalikan `null` karena perilaku Node.js `child_process.exec`; kini konsisten dengan standar Unix (`timeout` command). Test di `src/tests/exec_timeout.test.ts` dan `src/tests/executor.test.ts` diperbarui memvalidasi exit code 124.
 3. ~~**Urutan stdout vs stderr** pada field `output` tool `exec` tidak terjamin sekuensial mutlak~~ — **TERATASI (v1.7.1)**: Menggunakan real-time interleaved stream listener (`child.stdout.on('data')`, `child.stderr.on('data')`) pada `src/core/executor.ts` sehingga output gabungan terjamin kronologis sekuensial.
 4. **Known limitation deteksi obfusikasi perintah regex**: Obfuscation eval/base64 kompleks (`echo <b64> | base64 -d | sh`) tidak dapat ditutup sempurna dengan regex statis tanpa false-positive masif; ditangani via pertahanan lapis kedua (Guardian LLM).
 5. **Approval non-TTY otomatis menolak**: Di lingkungan CI headless yang ingin mengeksekusi aksi berisiko, wajib menyetel flag non-interaktif atau `RUKO_YOLO_MODE`.
@@ -523,7 +580,7 @@ Status dan resolusi batasan arsitektural:
 
 1. **Verifikasi Baseline**:
    - Jalankan `npm run typecheck` (harus 0 error).
-   - Jalankan `npm test` (harus **446 passed**, 0 fail).
+   - Jalankan `npm test` (harus **511 passed**, 0 fail).
    - E2E test: `npm run test:e2e` (1 passed).
 2. **Struktur Direktori Proyek**:
    - `src/core/`: Infrastruktur murni Node.js (loop, approval, executor, summarizer, undo, context, session, config, wizard, ui, skills).

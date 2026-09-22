@@ -2,7 +2,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { Agent } from './agent/agent.js';
-import { createProvider, OpenAiCompatibleProvider } from './agent/llm.js';
+import { createProvider } from './agent/llm.js';
 import { Confirmer, guardedExecute } from './core/approval.js';
 import { defaultConfigPath, loadResolvedConfig, saveConfig } from './core/config.js';
 import { Context } from './core/context.js';
@@ -478,9 +478,23 @@ async function main(): Promise<void> {
 
   // Interactive mode
   if (process.stdin.isTTY && needsSetup(config)) {
-    const setup = await runSetupWizard(async (r) =>
-      new OpenAiCompatibleProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model }).testConnection(),
-    );
+    const setup = await runSetupWizard(async (r) => {
+      let pType: string | undefined;
+      const rb = r.baseUrl.toLowerCase();
+      const ml = r.model.toLowerCase();
+      if (rb.includes('anthropic.com') || ml.startsWith('claude-')) {
+        pType = 'anthropic';
+      } else if (rb.includes('googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
+        pType = 'gemini';
+      } else {
+        pType = 'openai-compatible';
+      }
+      const testProvider = createProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model, provider: pType });
+      if (testProvider.testConnection) {
+        return testProvider.testConnection();
+      }
+      return { ok: true, message: r.model };
+    });
     if (setup) {
       Object.assign(config, setup);
       saveConfig(config, configPath);

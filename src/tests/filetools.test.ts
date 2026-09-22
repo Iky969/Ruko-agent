@@ -78,7 +78,7 @@ test('looksBinary detects NUL and control-char heavy text', () => {
 });
 
 test('runToolCall dispatches read_file through the tool protocol', async () => {
-  const calls = parseToolCalls(
+  const { calls } = parseToolCalls(
     '```tool\n' + JSON.stringify({ tool: 'read_file', path: sample, limit: 3 }) + '\n```',
   );
   assert.equal(calls.length, 1);

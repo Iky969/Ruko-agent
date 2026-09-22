@@ -15,7 +15,7 @@ test('execute reports a non-zero exit code', async () => {
 
 test('execute times out long-running commands', async () => {
   const result = await execute('sleep 5', { timeoutMs: 500 });
-  assert.notEqual(result.code, 0);
+  assert.equal(result.code, 124);
   assert.ok(result.durationMs < 5000, 'should have stopped well before 5s');
 });
 

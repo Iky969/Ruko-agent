@@ -11,7 +11,7 @@ import { exportSessionTrajectory, listSessions, loadSession, saveSession, search
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
 import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot } from './tools.js';
 import { AgentConfig, ProviderProfile, UiMode } from '../types.js';
-import { ConnectionResult, LLMProvider } from './llm.js';
+import { ConnectionResult, createProvider, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
 import { scanSkills } from '../core/skills.js';
 import type { Agent } from './agent.js';
@@ -231,6 +231,38 @@ const COMMANDS: CommandDef[] = [
           ? yellow('PLAN MODE aktif — tool eksekusi/write diblok; model hanya boleh membaca & menyusun langkah. /plan off untuk lanjut.')
           : green('Plan mode dinonaktifkan — eksekusi normal.'),
       );
+    },
+  },
+  {
+    name: 'yolo',
+    category: 'Operasi & Eksekusi',
+    help: 'Mode YOLO: auto-approve semua eksekusi tool tanpa konfirmasi manual.',
+    hint: 'on | off',
+    run: (args, env) => {
+      const arg = args.trim().toLowerCase();
+      let turnOn: boolean;
+      if (arg === 'on') {
+        turnOn = true;
+      } else if (arg === 'off') {
+        turnOn = false;
+      } else if (arg === '') {
+        const isCurrentlyYolo = !env.config.approvalEnabled;
+        turnOn = !isCurrentlyYolo;
+      } else {
+        console.log('Gunakan: /yolo [on|off] untuk mengubah status auto-approval mode.');
+        return;
+      }
+
+      if (turnOn) {
+        env.config.approvalEnabled = false;
+        env.updateConfig({ approvalEnabled: false });
+        console.log(yellow('⚡ YOLO mode ON: semua perintah tool akan disetujui otomatis.'));
+      } else {
+        delete process.env.RUKO_YOLO_MODE;
+        env.config.approvalEnabled = true;
+        env.updateConfig({ approvalEnabled: true });
+        console.log(green('🛡️ YOLO mode OFF: kembali ke mode verifikasi manual.'));
+      }
     },
   },
   {
@@ -1044,16 +1076,18 @@ function describeProfile(p: ProviderProfile): string {
 /** Applies a provider profile live: credentials + model + persist alias. */
 function applyProfile(env: CommandEnv, alias: string, profile: ProviderProfile): void {
   const apiKey = (profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : profile.apiKey) ?? '';
-  if (profile.baseUrl || apiKey) {
-    env.llm.setCredentials?.(apiKey || (env.config.apiKey ?? ''), profile.baseUrl ?? (env.config.baseUrl ?? ''));
-  }
-  if (profile.model) env.llm.setModel(profile.model);
-  env.updateConfig({
+  const patch: Partial<AgentConfig> = {
     activeProfile: alias,
     ...(apiKey ? { apiKey } : {}),
     ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
     ...(profile.model ? { model: profile.model } : {}),
-  });
+  };
+  env.updateConfig(patch);
+  const newProvider = createProvider({ ...env.config, ...patch });
+  if (env.agent) {
+    env.agent.setLlmProvider(newProvider);
+  }
+  env.llm = newProvider;
   console.log(`✔ Profil aktif: ${alias} (${describeProfile(profile)})`);
 }
 
@@ -1064,15 +1098,52 @@ async function runSetupFlow(env: CommandEnv): Promise<void> {
     return;
   }
   const probe = async (r: SetupResult): Promise<ConnectionResult> => {
-    const { OpenAiCompatibleProvider } = await import('./llm.js');
-    return new OpenAiCompatibleProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model })
-      .testConnection();
+    let pType: string | undefined;
+    const rb = r.baseUrl.toLowerCase();
+    const ml = r.model.toLowerCase();
+    if (rb.includes('anthropic.com') || ml.startsWith('claude-')) {
+      pType = 'anthropic';
+    } else if (rb.includes('googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
+      pType = 'gemini';
+    } else {
+      pType = 'openai-compatible';
+    }
+    const testProvider = createProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model, provider: pType });
+    if (testProvider.testConnection) {
+      return testProvider.testConnection();
+    }
+    return { ok: true, message: r.model };
   };
   const result = await promptSetup({ question: env.ask, readSecret: env.askSecret }, { probe });
   if (!result) return;
-  env.llm.setCredentials?.(result.apiKey, result.baseUrl);
-  env.llm.setModel(result.model);
-  env.updateConfig({ apiKey: result.apiKey, baseUrl: result.baseUrl, model: result.model, activeProfile: undefined });
+
+  let providerType: string | undefined;
+  const rawBase = result.baseUrl.toLowerCase();
+  const modelLower = result.model.toLowerCase();
+  if (rawBase.includes('anthropic.com') || modelLower.startsWith('claude-')) {
+    providerType = 'anthropic';
+  } else if (rawBase.includes('googleapis.com') || (!rawBase && modelLower.startsWith('gemini-'))) {
+    providerType = 'gemini';
+  } else {
+    providerType = 'openai-compatible';
+  }
+
+  const patch: Partial<AgentConfig> = {
+    apiKey: result.apiKey,
+    baseUrl: result.baseUrl,
+    model: result.model,
+    provider: providerType,
+    activeProfile: undefined,
+  };
+  env.updateConfig(patch);
+
+  // Item 1: Re-instantiate provider immediately and replace the active provider instance in memory
+  const newProvider = createProvider({ ...env.config, ...patch });
+  if (env.agent) {
+    env.agent.setLlmProvider(newProvider);
+  }
+  env.llm = newProvider;
+
   console.log(`Konfigurasi tersimpan: baseUrl=${result.baseUrl}, model=${result.model} (API key di-mask).`);
 }
 
@@ -1165,7 +1236,7 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
             const answer = (
               await env.ask(
                 yellow(
-                  `Protokol HTTP (cleartext) terdeteksi untuk "${cleanUrl}". Apakah kamu mempercayai protokol/URL ini? (y/n): `,
+                  `Protokol HTTP (cleartext) terdeteksi untuk "${cleanUrl}". Percayai URL ini? (y/n): `,
                 ),
               )
             )
@@ -1175,7 +1246,7 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
           } else if (env.confirm) {
             trusted = await env.confirm(
               `Set Base URL ke "${cleanUrl}" (HTTP cleartext)`,
-              'Apakah kamu mempercayai protokol/URL ini?',
+              'Percayai URL ini?',
             );
           }
           if (!trusted) {
@@ -1201,6 +1272,11 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
       return;
   }
   env.updateConfig(patch);
+  if (patch.apiKey !== undefined || patch.baseUrl !== undefined || patch.model !== undefined || patch.provider !== undefined) {
+    const newProvider = createProvider({ ...env.config, ...patch });
+    if (env.agent) env.agent.setLlmProvider(newProvider);
+    env.llm = newProvider;
+  }
   const shown = key === 'apiKey' ? '(tersembunyi)' : JSON.stringify(patch[key as keyof AgentConfig]);
   console.log(`Konfigurasi diupdate: ${key} = ${shown}`);
 }

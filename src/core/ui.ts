@@ -207,11 +207,11 @@ export function renderDivider(char = '─', colorFn: (s: string) => string = dim
 export function renderApprovalBox(command: string, reason: string): string {
   const cols = terminalWidth();
   const maxInner = Math.max(16, cols - 4);
-  const headerText = '⚠ KONFIRMASI PERINTAH BERISIKO';
+  const headerText = '⚠ KONFIRMASI BERISIKO';
   const reasonText = `Alasan  : ${reason}`;
   const cmdText = `Perintah: ${command}`;
   const needed = Math.max(visibleLength(headerText), visibleLength(reasonText), visibleLength(cmdText)) + 4;
-  const inner = Math.min(Math.max(needed, 36), maxInner);
+  const inner = Math.min(Math.max(needed, 28), maxInner);
 
   const fit = (t: string): string => truncateVisible(t, inner - 2);
 
@@ -287,13 +287,15 @@ export interface StatusBarInput {
   role?: string;
   /** Plan mode flag shows `⏸ PLAN` in the bar so the block state is visible. */
   planMode?: boolean;
+  /** YOLO mode flag shows `[YOLO]` in the bar when confirmation is bypassed. */
+  yoloMode?: boolean;
   /** True while the AI is thinking/executing tools (v0.7 live input). */
   busy?: boolean;
   /**
    * Char counts of the most recent turn (§8). Merged into the bar instead of
    * printed as its own output line, so usage stats never look like noise.
    */
-  turn?: { promptChars: number; completionChars: number };
+  turn?: { promptChars: number; completionChars: number; durationMs?: number };
   /** Queued messages waiting for the AI to finish (v0.7 badge, feedback #4). */
   pending?: number;
   /** Active background processes. */
@@ -341,10 +343,11 @@ export function buildStatusBar(input: StatusBarInput): string {
 
   if (!isNarrow) {
     const plan = input.planMode ? '⏸ PLAN · ' : '';
+    const yolo = input.yoloMode ? '[YOLO] · ' : '';
     const busy = input.busy ? '⏳ AI bekerja · ' : '';
     const role = input.role && input.role !== 'default' ? ` · ${input.role}` : '';
     const turn = input.turn
-      ? ` · ↑${formatK(input.turn.promptChars)} ↓${formatK(input.turn.completionChars)}`
+      ? ` · ↑${formatK(input.turn.promptChars)} ↓${formatK(input.turn.completionChars)}${input.turn.durationMs ? ` · ${formatDuration(input.turn.durationMs)}` : ''}`
       : '';
     const waiting = input.pending && input.pending > 0 ? ` · ⏳ ${input.pending} menunggu ` : '';
     const detailCtx = ` (${formatK(input.usedChars)}/${formatK(input.budgetChars)})`;
@@ -357,22 +360,22 @@ export function buildStatusBar(input: StatusBarInput): string {
     }
 
     // Try full string first
-    const full = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}ctx ${pct}%${detailCtx}${turn}${hint}${waiting}`;
+    const full = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}ctx ${pct}%${detailCtx}${turn}${hint}${waiting}`;
     if (visibleLength(full) <= targetWidth) {
       return onDarkGreen(full);
     }
     // Drop hint
-    const noHint = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}ctx ${pct}%${detailCtx}${turn}${waiting ? waiting : ' '}`;
+    const noHint = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}ctx ${pct}%${detailCtx}${turn}${waiting ? waiting : ' '}`;
     if (visibleLength(noHint) <= targetWidth) {
       return onDarkGreen(noHint);
     }
     // Drop turn stats
-    const noTurn = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}ctx ${pct}%${detailCtx}${waiting ? waiting : ' '}`;
+    const noTurn = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}ctx ${pct}%${detailCtx}${waiting ? waiting : ' '}`;
     if (visibleLength(noTurn) <= targetWidth) {
       return onDarkGreen(noTurn);
     }
     // Drop detailCtx
-    const noDetail = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}ctx ${pct}%${waiting ? waiting : ' '}`;
+    const noDetail = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}ctx ${pct}%${waiting ? waiting : ' '}`;
     if (visibleLength(noDetail) <= targetWidth) {
       return onDarkGreen(noDetail);
     }
@@ -381,11 +384,12 @@ export function buildStatusBar(input: StatusBarInput): string {
   // Narrow terminal responsive layout (< 60, e.g. Termux mobile):
   const busyNarrow = input.busy ? (isVeryNarrow ? '⏳ ' : '⏳ AI bekerja · ') : '';
   const planNarrow = input.planMode ? (isVeryNarrow ? '⏸ ' : '⏸ PLAN · ') : '';
+  const yoloNarrow = input.yoloMode ? (isVeryNarrow ? '[YOLO] ' : '[YOLO] · ') : '';
   const waitNarrow = input.pending && input.pending > 0
     ? (isVeryNarrow ? ` ⏳${input.pending}` : ` · ⏳ ${input.pending} menunggu `)
     : '';
 
-  const right = `${busyNarrow}${planNarrow}ctx ${pct}%${waitNarrow ? waitNarrow : ' '}`;
+  const right = `${busyNarrow}${planNarrow}${yoloNarrow}ctx ${pct}%${waitNarrow ? waitNarrow : ' '}`;
 
   let proc = '';
   if (procCount > 0) {
@@ -592,6 +596,7 @@ function fencePrefixHold(text: string, marker: string): number {
 
 const FENCE = '```';
 const TOOL_FENCE_RE = /^```[ \t]*tool\b/i;
+const JSON_TOOL_CALL_RE = /["'](?:tool|name|function|action)["']\s*:\s*["'](?:read_file|read|readfile|edit_file|edit|editfile|write_file|write|writefile|patch_file|patch|patchfile|exec|bash|shell|sh|cmd|terminal|execute_command|executecommand|run_command|code_search|search|codesearch|grep|search_files|find_in_files|glob|find_files|glob_files|list_files|list_dir|listdir|list_directory|delete_file|delete|move_file|move|web_fetch|fetch|remember|save_skill|get_skill|subagent|start_process|stop_process)\b/i;
 
 /**
  * Line-buffered sink that holds the trailing line back until either another
@@ -888,18 +893,43 @@ export function extractThoughts(text: string): string[] {
   return results;
 }
 
+const DSML_PREFIX_MARKERS = [
+  '<||DSML||',
+  '<｜｜DSML｜｜',
+  '<|DSML||',
+  '<｜DSML｜｜',
+  '<|DSML|',
+  '<｜DSML｜',
+  '</||DSML||',
+  '</｜｜DSML｜｜',
+  '</|DSML||',
+  '</｜DSML｜｜',
+  '</|DSML|',
+  '</｜DSML｜',
+];
+
+function dsmlPrefixHold(text: string): number {
+  let max = 0;
+  for (const m of DSML_PREFIX_MARKERS) {
+    const h = fencePrefixHold(text, m);
+    if (h > max) max = h;
+  }
+  return max;
+}
+
 /**
  * Protocol-aware streaming reveal filter.
  *
  * Feeds raw LLM tokens through `feed()`; emits only human-visible text to
  * the sink while hiding tool blocks:
  *   - ```tool ... ```
- *   - <|DSML|... / <｜DSML｜...
+ *   - <|DSML|... / <｜DSML｜... / <|DSML||calls>... / <｜｜DSML｜｜ calls>...
  *   - <tool_call>...</tool_call>
  */
 export class RevealFilter {
   private buffer = '';
-  private hiddenType: 'tool_fence' | 'dsml' | 'tool_call' | null = null;
+  private hiddenType: 'tool_fence' | 'dsml_calls' | 'dsml_invoke' | 'tool_call' | 'tool_tag' | null = null;
+  private skipNextNewline = false;
 
   constructor(private readonly sink: (text: string) => void) {}
 
@@ -913,9 +943,22 @@ export class RevealFilter {
     if (!this.hiddenType && this.buffer) this.sink(this.buffer);
     this.buffer = '';
     this.hiddenType = null;
+    this.skipNextNewline = false;
   }
 
   private drain(): void {
+    if (this.skipNextNewline) {
+      if (this.buffer.startsWith('\r\n')) {
+        this.buffer = this.buffer.slice(2);
+        this.skipNextNewline = false;
+      } else if (this.buffer.startsWith('\n')) {
+        this.buffer = this.buffer.slice(1);
+        this.skipNextNewline = false;
+      } else if (this.buffer.length > 0) {
+        this.skipNextNewline = false;
+      }
+    }
+
     for (;;) {
       if (this.hiddenType === 'tool_fence') {
         const close = this.buffer.indexOf(FENCE);
@@ -925,23 +968,49 @@ export class RevealFilter {
           return;
         }
         let rest = this.buffer.slice(close + FENCE.length);
-        if (rest.startsWith('\n')) rest = rest.slice(1);
+        if (rest.startsWith('\r\n')) {
+          rest = rest.slice(2);
+        } else if (rest.startsWith('\n')) {
+          rest = rest.slice(1);
+        } else if (rest.length === 0) {
+          this.skipNextNewline = true;
+        }
         this.buffer = rest;
         this.hiddenType = null;
         continue;
       }
 
-      if (this.hiddenType === 'dsml') {
-        const dsmlCloseMatch = /<\/(?:\||｜)DSML(?:\||｜)(?:invoke|tool_calls)[^>]*>/i.exec(this.buffer);
-        if (!dsmlCloseMatch) {
-          const hold1 = fencePrefixHold(this.buffer, '</|DSML|invoke>');
-          const hold2 = fencePrefixHold(this.buffer, '</｜DSML｜invoke>');
-          const hold = Math.max(hold1, hold2);
-          this.buffer = hold ? this.buffer.slice(this.buffer.length - hold) : '';
+      if (this.hiddenType === 'dsml_calls') {
+        const closeMatch = /<\/\s*(?:\||｜)+DSML(?:\||｜)+\s*(?:calls|tool_calls)[^>]*>/i.exec(this.buffer);
+        if (!closeMatch) {
           return;
         }
-        let rest = this.buffer.slice(dsmlCloseMatch.index + dsmlCloseMatch[0].length);
-        if (rest.startsWith('\n')) rest = rest.slice(1);
+        let rest = this.buffer.slice(closeMatch.index + closeMatch[0].length);
+        if (rest.startsWith('\r\n')) {
+          rest = rest.slice(2);
+        } else if (rest.startsWith('\n')) {
+          rest = rest.slice(1);
+        } else if (rest.length === 0) {
+          this.skipNextNewline = true;
+        }
+        this.buffer = rest;
+        this.hiddenType = null;
+        continue;
+      }
+
+      if (this.hiddenType === 'dsml_invoke') {
+        const closeMatch = /<\/\s*(?:\||｜)+DSML(?:\||｜)+\s*invoke[^>]*>/i.exec(this.buffer);
+        if (!closeMatch) {
+          return;
+        }
+        let rest = this.buffer.slice(closeMatch.index + closeMatch[0].length);
+        if (rest.startsWith('\r\n')) {
+          rest = rest.slice(2);
+        } else if (rest.startsWith('\n')) {
+          rest = rest.slice(1);
+        } else if (rest.length === 0) {
+          this.skipNextNewline = true;
+        }
         this.buffer = rest;
         this.hiddenType = null;
         continue;
@@ -955,29 +1024,57 @@ export class RevealFilter {
           return;
         }
         let rest = this.buffer.slice(closeIdx + 12);
-        if (rest.startsWith('\n')) rest = rest.slice(1);
+        if (rest.startsWith('\r\n')) {
+          rest = rest.slice(2);
+        } else if (rest.startsWith('\n')) {
+          rest = rest.slice(1);
+        } else if (rest.length === 0) {
+          this.skipNextNewline = true;
+        }
+        this.buffer = rest;
+        this.hiddenType = null;
+        continue;
+      }
+
+      if (this.hiddenType === 'tool_tag') {
+        const closeIdx = this.buffer.indexOf('</tool>');
+        if (closeIdx === -1) {
+          const hold = fencePrefixHold(this.buffer, '</tool>');
+          this.buffer = hold ? this.buffer.slice(this.buffer.length - hold) : '';
+          return;
+        }
+        let rest = this.buffer.slice(closeIdx + 7);
+        if (rest.startsWith('\r\n')) {
+          rest = rest.slice(2);
+        } else if (rest.startsWith('\n')) {
+          rest = rest.slice(1);
+        } else if (rest.length === 0) {
+          this.skipNextNewline = true;
+        }
         this.buffer = rest;
         this.hiddenType = null;
         continue;
       }
 
       const fenceIdx = this.buffer.indexOf(FENCE);
-      const dsmlAsciiIdx = this.buffer.indexOf('<|DSML|');
-      const dsmlUniIdx = this.buffer.indexOf('<｜DSML｜');
+      const dsmlMatch = /<\/?\s*(?:\||｜)+DSML(?:\||｜)+/i.exec(this.buffer);
+      const dsmlIdx = dsmlMatch ? dsmlMatch.index : -1;
       const toolCallIdx = this.buffer.indexOf('<tool_call');
+      const toolTagMatch = /<tool\b/i.exec(this.buffer);
+      const toolTagIdx = toolTagMatch ? toolTagMatch.index : -1;
 
-      const candidates: Array<{ idx: number; type: 'fence' | 'dsml' | 'tool_call' }> = [];
+      const candidates: Array<{ idx: number; type: 'fence' | 'dsml' | 'tool_call' | 'tool_tag' }> = [];
       if (fenceIdx !== -1) candidates.push({ idx: fenceIdx, type: 'fence' });
-      if (dsmlAsciiIdx !== -1) candidates.push({ idx: dsmlAsciiIdx, type: 'dsml' });
-      if (dsmlUniIdx !== -1) candidates.push({ idx: dsmlUniIdx, type: 'dsml' });
+      if (dsmlIdx !== -1) candidates.push({ idx: dsmlIdx, type: 'dsml' });
       if (toolCallIdx !== -1) candidates.push({ idx: toolCallIdx, type: 'tool_call' });
+      if (toolTagIdx !== -1 && toolTagIdx !== toolCallIdx) candidates.push({ idx: toolTagIdx, type: 'tool_tag' });
 
       if (candidates.length === 0) {
         const holdFence = fencePrefixHold(this.buffer, FENCE);
-        const holdDsml1 = fencePrefixHold(this.buffer, '<|DSML|');
-        const holdDsml2 = fencePrefixHold(this.buffer, '<｜DSML｜');
+        const holdDsml = dsmlPrefixHold(this.buffer);
         const holdToolCall = fencePrefixHold(this.buffer, '<tool_call');
-        const hold = Math.max(holdFence, holdDsml1, holdDsml2, holdToolCall);
+        const holdToolTag = fencePrefixHold(this.buffer, '<tool');
+        const hold = Math.max(holdFence, holdDsml, holdToolCall, holdToolTag);
         const emit = this.buffer.slice(0, this.buffer.length - hold);
         this.buffer = hold ? this.buffer.slice(this.buffer.length - hold) : '';
         if (emit) this.sink(emit);
@@ -1005,18 +1102,64 @@ export class RevealFilter {
           this.buffer = this.buffer.slice(this.buffer.indexOf('tool') + 4);
           continue;
         }
+        // Check if markdown code block is a pseudo-tool JSON call
+        const closeFence = this.buffer.indexOf(FENCE, FENCE.length);
+        if (closeFence !== -1) {
+          const fencedBody = this.buffer.slice(FENCE.length, closeFence);
+          if (JSON_TOOL_CALL_RE.test(fencedBody)) {
+            let rest = this.buffer.slice(closeFence + FENCE.length);
+            if (rest.startsWith('\r\n')) rest = rest.slice(2);
+            else if (rest.startsWith('\n')) rest = rest.slice(1);
+            else if (rest.length === 0) this.skipNextNewline = true;
+            this.buffer = rest;
+            continue;
+          }
+        } else {
+          // Unclosed or in-flight fence: check if candidate tool JSON payload is already visible
+          if (JSON_TOOL_CALL_RE.test(this.buffer)) {
+            this.hiddenType = 'tool_fence';
+            this.buffer = this.buffer.slice(FENCE.length);
+            continue;
+          }
+          // If the buffer currently looks like the start of a json codeblock, hold briefly
+          if (/^```(?:json)?\s*\{?$/i.test(this.buffer.slice(0, 32))) {
+            return;
+          }
+        }
         this.sink(FENCE);
         this.buffer = this.buffer.slice(FENCE.length);
         continue;
       }
 
       if (earliest.type === 'dsml') {
-        this.hiddenType = 'dsml';
+        const gtIdx = this.buffer.indexOf('>');
+        if (gtIdx === -1) {
+          return;
+        }
+        const tag = this.buffer.slice(0, gtIdx + 1);
+        this.buffer = this.buffer.slice(gtIdx + 1);
+        if (tag.endsWith('/>')) {
+          continue;
+        }
+        if (/<\s*(?:\||｜)+DSML(?:\||｜)+\s*(?:calls|tool_calls)\b/i.test(tag)) {
+          this.hiddenType = 'dsml_calls';
+          continue;
+        }
+        if (/<\s*(?:\||｜)+DSML(?:\||｜)+\s*invoke\b/i.test(tag)) {
+          this.hiddenType = 'dsml_invoke';
+          continue;
+        }
+        // stray or closing tag
         continue;
       }
 
       if (earliest.type === 'tool_call') {
         this.hiddenType = 'tool_call';
+        continue;
+      }
+
+      if (earliest.type === 'tool_tag') {
+        this.hiddenType = 'tool_tag';
         continue;
       }
     }
@@ -1182,15 +1325,61 @@ export function inferStepDescription(
  *   │  🟡 Edit(src/core/ui.ts)
  *   └─ ✓ [Selesai] Semua langkah tuntas
  */
+export interface WorkflowTreeOptions {
+  compact?: boolean;
+}
+
+/**
+ * Formats a raw tool invocation log line into the compact single-line mobile view (§Item 5).
+ */
+export function formatCompactToolLog(no: number, text: string, durationMs?: number): string | null {
+  const plain = stripAnsi(text).trim();
+  const suffix = durationMs != null ? ` · ${formatDuration(durationMs)}` : '';
+  
+  const editMatch = plain.match(/^(?:🟢|🟡)\s*(?:Edit|Write|Patch)\(([^)]+)\)/i);
+  if (editMatch) {
+    return `${cyan(`[${no}]`)} ✏️ Edit ${editMatch[1]}${dim(suffix)}`;
+  }
+  const readMatch = plain.match(/^🟢\s*Read\(([^)]+)\)/i);
+  if (readMatch) {
+    return `${cyan(`[${no}]`)} 📖 Read ${readMatch[1]}${dim(suffix)}`;
+  }
+  const searchMatch = plain.match(/^🟢\s*(?:Search|Glob|ListDir)\(([^)]+)\)/i);
+  if (searchMatch) {
+    return `${cyan(`[${no}]`)} 🔎 Mencari ${searchMatch[1]}${dim(suffix)}`;
+  }
+  const bashMatch = plain.match(/^🟢\s*Bash\(([^)]+)\)/i);
+  if (bashMatch) {
+    // Remove timeout badge if present
+    const cmd = bashMatch[1].replace(/\s*\[\d+s\]$/, '').trim();
+    return `${cyan(`[${no}]`)} 🟢 ${cmd}${dim(suffix)}`;
+  }
+  const directCmdMatch = plain.match(/^🟢\s+([^\s].*)$/);
+  if (directCmdMatch && !plain.includes('Edit(') && !plain.includes('Read(')) {
+    return `${cyan(`[${no}]`)} 🟢 ${directCmdMatch[1]}${dim(suffix)}`;
+  }
+  return null;
+}
+
 export class WorkflowTree {
   private stepCount = 0;
+  private actionCount = 0;
   private active = false;
+  private readonly compact: boolean;
 
-  constructor(private readonly out: (line: string) => void = (l) => console.log(l)) {}
+  constructor(
+    private readonly out: (line: string) => void = (l) => console.log(l),
+    options: WorkflowTreeOptions = {},
+  ) {
+    this.compact = options.compact ?? false;
+  }
 
   startStep(description: string): void {
     this.stepCount++;
     this.active = true;
+    if (this.compact) {
+      return;
+    }
     const prefix = this.stepCount === 1 ? '┌─' : '├─';
     const badge = cyan(`● [Langkah ${this.stepCount}]`);
     this.out(`${prefix} ${badge} ${description}`);
@@ -1201,6 +1390,22 @@ export class WorkflowTree {
       this.out(line);
       return;
     }
+
+    if (this.compact) {
+      const lines = line.split('\n');
+      for (const l of lines) {
+        const compactFormatted = formatCompactToolLog(this.actionCount + 1, l);
+        if (compactFormatted) {
+          this.actionCount++;
+          this.out(compactFormatted);
+        } else {
+          // Output line directly (diff lines, warnings) without tree character prefix `│ `
+          this.out(l);
+        }
+      }
+      return;
+    }
+
     const lines = line.split('\n');
     for (const l of lines) {
       this.out(`│  ${l}`);
@@ -1213,11 +1418,21 @@ export class WorkflowTree {
       return;
     }
     const badge = red('✖ [Gagal]');
-    this.out(`│  ${badge} ${message}`);
+    if (this.compact) {
+      this.out(`${badge} ${message}`);
+    } else {
+      this.out(`│  ${badge} ${message}`);
+    }
   }
 
   finish(summary = 'Semua langkah tuntas'): void {
     if (!this.active) return;
+    if (this.compact) {
+      this.active = false;
+      const badge = summary.includes('Dibatalkan') || summary.includes('loop') ? yellow('⚠') : green('✓');
+      this.out(`${badge} ${summary}`);
+      return;
+    }
     const badge = green('✓ [Selesai]');
     this.out(`└─ ${badge} ${summary}`);
     this.active = false;
