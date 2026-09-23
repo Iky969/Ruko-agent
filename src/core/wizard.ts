@@ -15,6 +15,7 @@ export interface SetupResult {
   apiKey: string;
   baseUrl: string;
   model: string;
+  provider?: string;
 }
 
 /** Probe hook supplied by the caller (builds a provider, tests it). */
@@ -40,7 +41,8 @@ export function needsSetup(cfg: { apiKey?: string; baseUrl?: string; model?: str
  * API key can be masked (§5) and a cancelled line resolves to null. Piped input
  * falls back to node:readline (no masking possible there).
  */
-export async function runSetupWizard(probe?: ConnectionProbe): Promise<SetupResult | null> {
+export async function runSetupWizard(probe?: ConnectionProbe, options: SetupOptions = {}): Promise<SetupResult | null> {
+  const setupOpts: SetupOptions = { probe, askProvider: true, ...options };
   if (process.stdin.isTTY) {
     const editor = createLineEditor();
     try {
@@ -49,7 +51,7 @@ export async function runSetupWizard(probe?: ConnectionProbe): Promise<SetupResu
           question: async (q) => (await editor.readLine({ prompt: q })) ?? '',
           readSecret: async (q) => (await editor.readLine({ prompt: q, mask: true })) ?? '',
         },
-        probe ? { probe } : {},
+        setupOpts,
       );
     } finally {
       editor.close();
@@ -57,7 +59,7 @@ export async function runSetupWizard(probe?: ConnectionProbe): Promise<SetupResu
   }
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    return await promptSetup(rl, probe ? { probe } : {});
+    return await promptSetup(rl, setupOpts);
   } finally {
     rl.close();
   }
@@ -65,6 +67,8 @@ export async function runSetupWizard(probe?: ConnectionProbe): Promise<SetupResu
 
 export interface SetupOptions {
   probe?: ConnectionProbe;
+  /** When true, explicitly prompts the user to select provider type (openai-compatible, anthropic, gemini). */
+  askProvider?: boolean;
 }
 
 /**
@@ -130,60 +134,103 @@ export async function promptSetup(
       console.log(dim('  (Model wajib diisi — setup dibatalkan.)'));
       return null;
     }
-  } catch {
-    return null;
-  }
 
-  const result: SetupResult = { apiKey, baseUrl, model };
-
-  if (options.probe) {
-    console.log(dim('  Menguji koneksi...'));
-    let retry = true;
-    while (retry) {
-      const test = await options.probe(result);
-      if (test.ok) {
-        console.log(green(`  ✓ Terhubung ke ${test.message}`));
-        break;
-      }
-      console.log(red(`  ✗ ${test.message}`));
-      let answer = '';
+    let provider: string | undefined;
+    if (options.askProvider) {
+      const defaultProvider = (
+        baseUrl.toLowerCase().includes('anthropic.com') || model.toLowerCase().startsWith('claude-')
+          ? 'anthropic'
+          : baseUrl.toLowerCase().includes('googleapis.com') || (!baseUrl && model.toLowerCase().startsWith('gemini-'))
+            ? 'gemini'
+            : 'openai-compatible'
+      );
       try {
-        answer = (await rl.question(
-          yellow('  Simpan walau gagal / [c]oba key lain / [b]atalkan [Simpan/gagal]?: '),
-        )).trim().toLowerCase();
+        console.log(dim('  Pilih tipe provider:'));
+        console.log(dim('    1) openai-compatible (Ollama, LM Studio, vLLM, OpenAI, Groq, dll.)'));
+        console.log(dim('    2) anthropic (Anthropic Claude API)'));
+        console.log(dim('    3) gemini (Google Gemini API)'));
+        const pChoice = cleanInput(await rl.question(`${green(`  Provider [1/2/3 atau nama] (default: ${defaultProvider}): `)}`));
+        const pLower = pChoice.toLowerCase();
+        if (pChoice === '2' || pLower === 'anthropic' || pLower === 'claude') {
+          provider = 'anthropic';
+        } else if (pChoice === '3' || pLower === 'gemini' || pLower === 'google') {
+          provider = 'gemini';
+        } else if (pChoice === '1' || pLower === 'openai-compatible' || pLower === 'openai' || pLower === 'ollama') {
+          provider = 'openai-compatible';
+        } else if (!pChoice || pLower === 's' || pLower === 'simpan') {
+          provider = defaultProvider;
+        } else if (/^[a-zA-Z0-9_-]+$/.test(pChoice) && (pLower.includes('openai') || pLower.includes('anthropic') || pLower.includes('gemini'))) {
+          provider = pChoice;
+        } else {
+          provider = defaultProvider;
+        }
       } catch {
-        return null;
+        provider = defaultProvider;
       }
-      if (/^(c|cob|retry|ulang)$/.test(answer)) {
+    }
+
+    const result: SetupResult = { apiKey, baseUrl, model, ...(provider ? { provider } : {}) };
+
+    if (options.probe) {
+      console.log(dim('  Menguji koneksi...'));
+      let retry = true;
+      while (retry) {
+        const test = await options.probe(result);
+        if (test.ok) {
+          console.log(green(`  ✓ Terhubung ke ${test.message}`));
+          break;
+        }
+        console.log(red(`  ✗ ${test.message}`));
+        let answer = '';
         try {
-          const newKey = cleanInput(await readSecret(`${green('  API Key baru: ')}`));
-          if (newKey) result.apiKey = newKey;
-          const newUrl = cleanInput(await rl.question(`${green(`  Base URL (sekarang: ${result.baseUrl}): `)}`));
-          if (newUrl) {
-            if (/^http:\/\//i.test(newUrl)) {
-              console.log(yellow(`\n  ⚠ Peringatan: Protokol HTTP (cleartext) terdeteksi untuk "${newUrl}".`));
-              const trust = (
-                await rl.question(yellow('  Percayai URL ini? (y/n): '))
-              )
-                .trim()
-                .toLowerCase();
-              if (!/^(y|yes|ya)$/i.test(trust)) {
-                console.log(dim('  (Protokol/URL HTTP tidak disetujui — setup dibatalkan.)'));
-                return null;
-              }
-            }
-            result.baseUrl = newUrl;
-          }
-          const newModel = cleanInput(await rl.question(`${green(`  Model (sekarang: ${result.model}): `)}`));
-          if (newModel) result.model = newModel;
+          answer = (await rl.question(
+            yellow('  Simpan walau gagal / [c]oba key lain / [b]atalkan [Simpan/gagal]?: '),
+          )).trim().toLowerCase();
         } catch {
           return null;
         }
-        continue;
+        if (/^(c|cob|retry|ulang)$/.test(answer)) {
+          try {
+            const newKey = cleanInput(await readSecret(`${green('  API Key baru: ')}`));
+            if (newKey) result.apiKey = newKey;
+            const newUrl = cleanInput(await rl.question(`${green(`  Base URL (sekarang: ${result.baseUrl}): `)}`));
+            if (newUrl) {
+              if (/^http:\/\//i.test(newUrl)) {
+                console.log(yellow(`\n  ⚠ Peringatan: Protokol HTTP (cleartext) terdeteksi untuk "${newUrl}".`));
+                const trust = (
+                  await rl.question(yellow('  Percayai URL ini? (y/n): '))
+                )
+                  .trim()
+                  .toLowerCase();
+                if (!/^(y|yes|ya)$/i.test(trust)) {
+                  console.log(dim('  (Protokol/URL HTTP tidak disetujui — setup dibatalkan.)'));
+                  return null;
+                }
+              }
+              result.baseUrl = newUrl;
+            }
+            const newModel = cleanInput(await rl.question(`${green(`  Model (sekarang: ${result.model}): `)}`));
+            if (newModel) result.model = newModel;
+            if (options.askProvider) {
+              const newProv = cleanInput(await rl.question(`${green(`  Provider (sekarang: ${result.provider ?? 'openai-compatible'}): `)}`));
+              if (newProv) {
+                if (newProv === '2' || newProv.toLowerCase() === 'anthropic') result.provider = 'anthropic';
+                else if (newProv === '3' || newProv.toLowerCase() === 'gemini') result.provider = 'gemini';
+                else if (newProv === '1' || newProv.toLowerCase() === 'openai-compatible') result.provider = 'openai-compatible';
+                else result.provider = newProv;
+              }
+            }
+          } catch {
+            return null;
+          }
+          continue;
+        }
+        if (/^(b|bat|no|tidak)$/.test(answer)) return null;
+        break; // save anyway
       }
-      if (/^(b|bat|no|tidak)$/.test(answer)) return null;
-      break; // save anyway
     }
+    return result;
+  } catch {
+    return null;
   }
-  return result;
 }

@@ -118,18 +118,18 @@ test('buildStatusPanel drops optional columns before truncating the model cell',
 test('formatActionLogLine renders ├── branches for finished tool calls', () => {
   assert.equal(
     stripAnsi(formatActionLogLine(1, '🟢 Glob(PROGRESS.md)', 12) ?? ''),
-    '├── [1] 🔍 find PROGRESS.md · 12ms',
+    '├── [1] 🔍 find PROGRESS.md (12ms)',
   );
   assert.equal(
     stripAnsi(formatActionLogLine(2, '🟢 Bash(npm test)', 1200) ?? ''),
-    '├── [2] 🖥️ Bash(npm test) · 1.2s',
+    '├── [2] 🖥️ Bash(npm test) (1.2s)',
   );
   assert.equal(
     stripAnsi(formatActionLogLine(3, '🟣 Subagent(read file halo.md)') ?? ''),
     '├── [3] 🟣 Subagent "read file halo.md"',
   );
   // Compact-compatible read form (existing logs/tests depend on it).
-  assert.equal(stripAnsi(formatActionLogLine(1, '🟢 Read(a.txt)', 5) ?? ''), '├── [1] 📖 Read a.txt · 5ms');
+  assert.equal(stripAnsi(formatActionLogLine(1, '🟢 Read(a.txt)', 5) ?? ''), '├── [1] 📖 Read a.txt (5ms)');
   // Extra notes emitted by the tool are preserved.
   assert.equal(
     stripAnsi(formatActionLogLine(4, '🟡 Edit(src/x.ts) — tidak ada perubahan') ?? ''),
@@ -168,7 +168,7 @@ test('WorkflowTree branch mode prints one ├── line per tool, only when it 
   tree.completeAction('🟢 Read(package.json)', 42);
 
   const plain = output.map(stripAnsi);
-  assert.equal(plain[0], '├── [1] 📖 Read package.json · 42ms', 'action line lands first');
+  assert.equal(plain[0], '├── [1] 📖 Read package.json (42ms)', 'action line lands first');
   assert.equal(plain[1], '│  --- a/package.json', 'detail lines are indented under the branch');
   assert.equal(plain[2], '│  +++ b/package.json');
 
@@ -179,7 +179,7 @@ test('WorkflowTree branch mode prints one ├── line per tool, only when it 
   // Second action: numbered independently, fallback text used when the tool logged nothing.
   tree.beginAction();
   tree.completeAction('🟢 Bash(echo hi)', 3);
-  assert.equal(stripAnsi(output[output.length - 1]), '├── [2] 🖥️ Bash(echo hi) · 3ms');
+  assert.equal(stripAnsi(output[output.length - 1]), '├── [2] 🖥️ Bash(echo hi) (3ms)');
 
   tree.finish('Semua langkah tuntas');
   assert.ok(stripAnsi(output[output.length - 1]).includes('Semua langkah tuntas'));

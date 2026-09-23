@@ -192,15 +192,42 @@ export function parseToolCalls(text: string): ParseToolCallsResult {
     }
   }
 
-  // 4. Generic XML <tool>JSON</tool> (Nemotron / generic style)
+  // 4. Generic XML <tool>JSON</tool> (Nemotron / generic style) or self-closing <tool name="..." ... />
   const XML_TOOL_SIMPLE_RE = /<tool(?:[^>]*)>\s*([\s\S]*?)\s*(?:<\/tool>|$)/gi;
   for (const match of text.matchAll(XML_TOOL_SIMPLE_RE)) {
+    const rawTag = match[0].trim();
+    const body = match[1]?.trim() ?? '';
+
     // try extract name attribute
     const attrMatch = match[0].match(/name=["']?([^"'>\s]+)["']?/i);
     let nameAttr = attrMatch ? attrMatch[1] : null;
-    
+
+    if (!body && (match[0].includes('/>') || nameAttr)) {
+      // Self-closing or attribute-only tag: extract parameters from XML attributes
+      const attrRegex = /([a-zA-Z0-9_-]+)=["']([^"']*)["']|([a-zA-Z0-9_-]+)=([^\s>]+)/g;
+      const attrs: Record<string, string> = {};
+      for (const m of match[0].matchAll(attrRegex)) {
+        const k = (m[1] ?? m[3]).toLowerCase();
+        const v = m[2] ?? m[4] ?? '';
+        attrs[k] = v;
+      }
+      let tName = attrs.tool ?? attrs.name ?? nameAttr;
+      if (typeof tName === 'string' && tName.length > 0) {
+        tName = normalizeToolName(tName);
+        delete attrs.tool;
+        delete attrs.name;
+        calls.push({ tool: tName, ...attrs });
+        continue;
+      }
+    }
+
+    if (!body) {
+      if (rawTag) malformedBlocks.push(rawTag);
+      continue;
+    }
+
     try {
-      const parsed = JSON.parse(match[1].trim());
+      const parsed = JSON.parse(body);
       if (parsed && typeof parsed === 'object') {
         let tName = parsed.tool ?? parsed.name ?? nameAttr;
         if (typeof tName === 'string' && tName.length > 0) {
@@ -211,10 +238,14 @@ export function parseToolCalls(text: string): ParseToolCallsResult {
           }
           const { tool: _t, name: _n, arguments: _a, parameters: _p, ...rest } = parsed;
           calls.push({ tool: tName, ...rest, ...(typeof args === 'object' && args ? args : {}) });
+        } else {
+          malformedBlocks.push(body || rawTag);
         }
+      } else {
+        malformedBlocks.push(body || rawTag);
       }
     } catch {
-      malformedBlocks.push(match[1].trim());
+      malformedBlocks.push(body || rawTag);
     }
   }
 
@@ -248,8 +279,9 @@ export function stripToolBlocks(text: string): string {
     .replace(DSML_INVOKE_SELF_RE, '')
     .replace(/<\/?(?:\|\|?|｜｜?)DSML(?:\|\|?|｜｜?)[^>]*>/gi, '')
     .replace(XML_TOOL_CALL_RE, '')
-    .replace(/<tool>\s*[\s\S]*?\s*<\/tool>/gi, '')
-    .replace(/<tool>\s*[\s\S]*$/gi, '')
+    .replace(/<tool(?:[^>]*)>[\s\S]*?<\/tool>/gi, '')
+    .replace(/<tool(?:[^>]*)\/>/gi, '')
+    .replace(/<tool(?:[^>]*)>[\s\S]*$/gi, '')
     .replace(MALFORMED_TOOL_TAG_RE, '')
     .trim();
 }

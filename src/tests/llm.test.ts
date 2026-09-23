@@ -6,6 +6,8 @@ import {
   missingConfigFields,
   OpenAiCompatibleProvider,
   parseRetryAfterMs,
+  sanitizeToolMessageContent,
+  validateOpenAiMessages,
 } from '../agent/llm.js';
 
 const ENV_KEYS = ['OPENAI_API_KEY', 'OPENAI_BASE_URL', 'AGENT_MODEL', 'OPENAI_MODEL'] as const;
@@ -382,5 +384,66 @@ test('OpenAiCompatibleProvider buffers reasoning_content without logging and inv
       console.log = origLog;
     }
   });
+});
+
+test('Tugas 7: sanitizeToolMessageContent sanitizes empty, null, or whitespace tool payload', () => {
+  const emptyRes = sanitizeToolMessageContent('', 'read_file');
+  assert.ok(emptyRes.includes('kosong'));
+  assert.ok(emptyRes.includes('read_file'));
+
+  const nullRes = sanitizeToolMessageContent(null, 'exec');
+  assert.ok(nullRes.includes('kosong'));
+  assert.ok(nullRes.includes('exec'));
+
+  const wsRes = sanitizeToolMessageContent('   \n  ', 'glob');
+  assert.ok(wsRes.includes('kosong'));
+});
+
+test('Tugas 7: sanitizeToolMessageContent closes unclosed markdown codeblock in truncated payload', () => {
+  const truncatedCode = '```typescript\nconst a = 123;\nfunction test() {';
+  const sanitized = sanitizeToolMessageContent(truncatedCode, 'read_file');
+  assert.ok(sanitized.includes('```\n[Catatan: Output blok kode terpotong / truncated code block]'));
+  // Ensure the total count of ``` is now even (valid markdown)
+  const matches = sanitized.match(/```/g);
+  assert.equal(matches!.length % 2, 0);
+});
+
+test('Tugas 7: sanitizeToolMessageContent appends warning on truncated JSON payload', () => {
+  const truncatedJson = '{"status": "running", "items": [{"id": 1, "name": "item';
+  const sanitized = sanitizeToolMessageContent(truncatedJson, 'custom_tool');
+  assert.ok(sanitized.includes('[Peringatan: Payload JSON tool terpotong / truncated JSON payload]'));
+});
+
+test('Tugas 7: validateOpenAiMessages applies payload sanitization to all tool messages in conversation', () => {
+  const input = [
+    { role: 'user', content: 'run tool' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        { id: 'call_1', type: 'function', function: { name: 'read_file' } },
+        { id: 'call_2', type: 'function', function: { name: 'exec' } },
+        { id: 'call_3', type: 'function', function: { name: 'fetch' } },
+      ],
+    },
+    // call_1 returned empty string
+    { role: 'tool', tool_call_id: 'call_1', content: '', name: 'read_file' },
+    // call_2 returned truncated codeblock
+    { role: 'tool', tool_call_id: 'call_2', content: '```bash\nnpm install', name: 'exec' },
+    // call_3 returned valid result
+    { role: 'tool', tool_call_id: 'call_3', content: '{"status": "ok"}', name: 'fetch' },
+  ];
+
+  const validated = validateOpenAiMessages(input);
+  assert.equal(validated.length, 5);
+
+  // call_1 sanitized from empty to descriptive fallback
+  assert.ok(validated[2].content?.includes('kosong'));
+
+  // call_2 sanitized with closing codeblock
+  assert.ok(validated[3].content?.includes('```\n[Catatan: Output blok kode terpotong'));
+
+  // call_3 valid result preserved intact
+  assert.equal(validated[4].content, '{"status": "ok"}');
 });
 

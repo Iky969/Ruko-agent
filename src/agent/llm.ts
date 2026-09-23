@@ -1,4 +1,5 @@
 import { AgentConfig, ContextMessage } from '../types.js';
+import { parseToolCalls } from './tools.js';
 
 /**
  * Ruko ships NO provider default: base URL and model are whatever the user
@@ -171,10 +172,40 @@ export function explainProviderError(err: unknown): string {
 }
 
 /**
- * Item 4: Validasi Pesan OpenAI-Compatible
+ * Sanitizes and validates the integrity of a 'tool' role message payload (Tugas 7).
+ * Prevents syntax confusion or token bleed when payload is empty or truncated.
+ */
+export function sanitizeToolMessageContent(content: string | null | undefined, toolName?: string): string {
+  if (content === null || content === undefined) {
+    return `[Hasil tool "${toolName ?? 'unknown'}" kosong]`;
+  }
+  const str = typeof content === 'string' ? content : String(content);
+  const trimmed = str.trim();
+  if (trimmed.length === 0) {
+    return `[Hasil tool "${toolName ?? 'unknown'}" kosong]`;
+  }
+
+  let sanitized = str;
+
+  // 1. Detect unclosed markdown code blocks (e.g. ``` without closing ```)
+  const fenceMatches = sanitized.match(/```/g);
+  if (fenceMatches && fenceMatches.length % 2 !== 0) {
+    sanitized += '\n```\n[Catatan: Output blok kode terpotong / truncated code block]';
+  }
+
+  // 2. Detect truncated JSON payloads: starts with { or [ but does not end with } or ]
+  if ((trimmed.startsWith('{') && !trimmed.endsWith('}')) || (trimmed.startsWith('[') && !trimmed.endsWith(']'))) {
+    sanitized += '\n[Peringatan: Payload JSON tool terpotong / truncated JSON payload]';
+  }
+
+  return sanitized;
+}
+
+/**
+ * Item 4 & Tugas 7: Validasi dan Sanitasi Pesan OpenAI-Compatible
  * Memastikan invariant struktur pesan terjaga: setiap pesan role `assistant` yang berisi array `tool_calls`
- * wajib disusul secara lengkap dan berurutan oleh pesan role `tool` untuk setiap `tool_call_id` terkait
- * sebelum pemanggilan completions berikutnya dilakukan.
+ * wajib disusul secara lengkap dan berurutan oleh pesan role `tool` untuk setiap `tool_call_id` terkait,
+ * serta memeriksa integritas payload pesan tool (sanitasi payload kosong atau terpotong).
  */
 export function validateOpenAiMessages<T extends { role: string; content?: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>(
   messages: T[],
@@ -197,7 +228,13 @@ export function validateOpenAiMessages<T extends { role: string; content?: strin
         const id = tc.id;
         const matchingIdx = toolMsgs.findIndex((tm) => tm.tool_call_id === id);
         if (matchingIdx !== -1) {
-          result.push(toolMsgs[matchingIdx]);
+          const original = toolMsgs[matchingIdx];
+          const toolName = original.name ?? tc.function?.name;
+          const sanitizedContent = sanitizeToolMessageContent(original.content, toolName);
+          result.push({
+            ...original,
+            content: sanitizedContent,
+          });
           toolMsgs.splice(matchingIdx, 1);
         } else {
           // Jika ada tool_call_id yang belum disusul, buat pesan tool pengganti yang valid
@@ -535,6 +572,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     }
     this.lastReasoning = reasoningBuffer || null;
     if (streamToolCalls.size > 0) {
+      const existingCalls = parseToolCalls(full).calls;
       for (const [, tc] of streamToolCalls) {
         if (tc.name) {
           let parsedArgs: Record<string, unknown> = {};
@@ -543,7 +581,23 @@ export class OpenAiCompatibleProvider implements LLMProvider {
           } catch {
             // fallback
           }
-          full += `\n\`\`\`tool\n${JSON.stringify({ tool: tc.name, ...parsedArgs })}\n\`\`\`\n`;
+
+          // Solusi 1: De-duplikasi level stream.
+          // Jika delta.content sudah mencetak pemanggilan tool yang sama
+          // (misal via blok ```tool atau DSML), jangan tambahkan sintesis duplikat.
+          const normName = tc.name.toLowerCase().replace(/_/g, '');
+          const candidateSig = `${normName}:${JSON.stringify(parsedArgs)}`;
+          const alreadyInFull = existingCalls.some((ec) => {
+            const { id: _eId, tool: ecTool, ...ecRest } = ec;
+            const normEcTool = (ecTool ?? '').toLowerCase().replace(/_/g, '');
+            return `${normEcTool}:${JSON.stringify(ecRest)}` === candidateSig;
+          });
+
+          if (!alreadyInFull) {
+            const toolObj: Record<string, unknown> = { tool: tc.name, ...parsedArgs };
+            if (tc.id) toolObj.id = tc.id;
+            full += `\n\`\`\`tool\n${JSON.stringify(toolObj)}\n\`\`\`\n`;
+          }
         }
       }
     }

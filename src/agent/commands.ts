@@ -53,6 +53,102 @@ interface CommandDef {
   run: CommandHandler;
 }
 
+export function applyContextLimit(valStr: string, env: CommandEnv): void {
+  let newLimit: number;
+  if (/^\d+[kK]$/.test(valStr)) {
+    newLimit = parseInt(valStr.slice(0, -1), 10) * 1_000;
+  } else {
+    newLimit = Number(valStr.replace(/_/g, ''));
+  }
+
+  if (!Number.isFinite(newLimit) || newLimit <= 0 || !Number.isInteger(newLimit)) {
+    console.log('Error: nilai limit context harus berupa angka positif dalam satuan karakter (contoh: /context set 50k atau /setctx 50k).');
+    return;
+  }
+
+  if (newLimit < env.ctx.totalChars) {
+    console.log(
+      `Error: nilai baru (${newLimit} karakter) tidak boleh lebih rendah dari jumlah karakter aktif (${env.ctx.totalChars} karakter).`,
+    );
+    return;
+  }
+
+  env.updateConfig({ maxContextChars: newLimit });
+  console.log(green(`✔ Limit context aktif diperbarui menjadi ${newLimit} karakter (~${Math.round(newLimit / 4)} token).`));
+}
+
+export function renderContextDashboard(env: CommandEnv): void {
+  const budgetChars = env.config.maxContextChars;
+  const budgetTokens = Math.round(budgetChars / 4);
+  const usedChars = env.ctx.totalChars;
+  const usedTokens = Math.round(usedChars / 4);
+  const pct = budgetChars > 0 ? Math.min(100, Math.round((usedChars / budgetChars) * 100)) : 0;
+  const maxOut = env.config.maxOutputTokens ?? DEFAULT_CONFIG.maxOutputTokens ?? 4096;
+  const ws = getWorkspaceRoot();
+  const cfgPath = join(ws, '.ruko', 'config.json');
+  const isPersistent = existsSync(cfgPath);
+
+  const rawLines = [
+    `Model aktif: ${env.llm.model}${env.llm.name ? ` (${env.llm.name})` : ''}`,
+    `Context window limit aktif: ${budgetChars.toLocaleString()} karakter (~${formatK(budgetChars)}) [budget: ${budgetChars}]`,
+    `Token budget aktif: ~${budgetTokens.toLocaleString()} tokens (1 token ≈ 4 karakter)`,
+    `Max output tokens aktif: ${maxOut.toLocaleString()} tokens (per-turn)`,
+    `Karakter aktif saat ini: ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}%`,
+    `Pesan dalam konteks: ${env.ctx.size} pesan (messages: ${env.ctx.size})`,
+    `Threshold log summarizer: ${env.config.maxLogChars} chars`,
+    `Timeout eksekusi: ${env.config.execTimeoutMs}ms`,
+    `Status konfigurasi: ${isPersistent ? 'Tersimpan di .ruko/config.json (survive lintas sesi)' : 'Menggunakan nilai default sesi (belum disimpan)'}`,
+    `───────────────────────────────────────────────────────`,
+    `Hint: Atur budget dengan /context set <jumlah|50k> atau /settings context <128k|500k|unlimited>`,
+  ];
+
+  const maxInner = Math.max(10, terminalWidth() - 4);
+  const availWidth = maxInner - 2;
+
+  const wrappedLines: string[] = [];
+  for (const line of rawLines) {
+    if (visibleLength(line) <= availWidth || line.startsWith('───')) {
+      wrappedLines.push(line);
+      continue;
+    }
+    const colonIdx = line.indexOf(': ');
+    if (colonIdx !== -1 && colonIdx <= availWidth) {
+      const key = line.slice(0, colonIdx + 1);
+      const val = line.slice(colonIdx + 2);
+      wrappedLines.push(key);
+      if (visibleLength(val) + 2 <= availWidth) {
+        wrappedLines.push(`  ${val}`);
+      } else {
+        const words = val.split(' ');
+        let cur = '  ';
+        for (const w of words) {
+          if (cur === '  ') cur += w;
+          else if (visibleLength(cur + ' ' + w) <= availWidth) cur += ' ' + w;
+          else {
+            wrappedLines.push(cur);
+            cur = '  ' + w;
+          }
+        }
+        if (cur.trim()) wrappedLines.push(cur);
+      }
+      continue;
+    }
+    const words = line.split(' ');
+    let cur = '';
+    for (const w of words) {
+      if (!cur) cur = w;
+      else if (visibleLength(cur + ' ' + w) <= availWidth) cur += ' ' + w;
+      else {
+        wrappedLines.push(cur);
+        cur = w;
+      }
+    }
+    if (cur.trim()) wrappedLines.push(cur);
+  }
+
+  console.log(renderBox('Context Budget & Status Aktif', wrappedLines));
+}
+
 const COMMANDS: CommandDef[] = [
   {
     name: 'help',
@@ -468,21 +564,15 @@ const COMMANDS: CommandDef[] = [
     },
   },
   {
-    name: 'context',
+    name: 'ctx',
+    aliases: ['context', 'status', 'budget'],
     category: 'Konfigurasi & Budget',
-    help: 'Lihat statistik atau ubah budget konteks (/context set <jumlah>).',
-    hint: '[set <jumlah>]',
+    help: 'Lihat limit context aktif, token budget, dan persentase penggunaan saat ini (atau /context set <jumlah>).',
+    hint: '[set <jumlah|50k>]',
     run: (args, env) => {
       const trimmed = args.trim();
       if (!trimmed) {
-        console.log(
-          renderBox('Context', [
-            `messages: ${env.ctx.size}`,
-            `total chars: ${env.ctx.totalChars} (budget: ${env.config.maxContextChars})`,
-            `log summarizer threshold: ${env.config.maxLogChars} chars`,
-            `exec timeout: ${env.config.execTimeoutMs}ms`,
-          ]),
-        );
+        renderContextDashboard(env);
         return;
       }
 
@@ -490,34 +580,14 @@ const COMMANDS: CommandDef[] = [
       if (match) {
         const valStr = match[1]?.trim();
         if (!valStr) {
-          console.log('Penggunaan: /context set <jumlah>');
+          console.log('Penggunaan: /context set <jumlah|50k>');
           return;
         }
-        let newLimit: number;
-        if (/^\d+[kK]$/.test(valStr)) {
-          newLimit = parseInt(valStr.slice(0, -1), 10) * 1_000;
-        } else {
-          newLimit = Number(valStr.replace(/_/g, ''));
-        }
-
-        if (!Number.isFinite(newLimit) || newLimit <= 0 || !Number.isInteger(newLimit)) {
-          console.log('Error: nilai limit context harus berupa angka positif dalam satuan karakter.');
-          return;
-        }
-
-        if (newLimit < env.ctx.totalChars) {
-          console.log(
-            `Error: nilai baru (${newLimit} karakter) tidak boleh lebih rendah dari jumlah karakter aktif (${env.ctx.totalChars} karakter).`,
-          );
-          return;
-        }
-
-        env.updateConfig({ maxContextChars: newLimit });
-        console.log(green(`✔ Limit context aktif diperbarui menjadi ${newLimit} karakter.`));
+        applyContextLimit(valStr, env);
         return;
       }
 
-      console.log('Penggunaan: /context  |  /context set <jumlah>');
+      console.log('Penggunaan: /context  |  /context set <jumlah|50k>');
     },
   },
   {
@@ -725,28 +795,7 @@ const COMMANDS: CommandDef[] = [
         );
         return;
       }
-
-      let newLimit: number;
-      if (/^\d+[kK]$/.test(trimmed)) {
-        newLimit = parseInt(trimmed.slice(0, -1), 10) * 1_000;
-      } else {
-        newLimit = Number(trimmed.replace(/_/g, ''));
-      }
-
-      if (!Number.isFinite(newLimit) || newLimit <= 0 || !Number.isInteger(newLimit)) {
-        console.log('Error: nilai limit context harus berupa angka positif dalam satuan karakter (contoh: /setctx 50k atau /setctx 80000).');
-        return;
-      }
-
-      if (newLimit < env.ctx.totalChars) {
-        console.log(
-          `Error: nilai baru (${newLimit} karakter) tidak boleh lebih rendah dari jumlah karakter aktif (${env.ctx.totalChars} karakter).`,
-        );
-        return;
-      }
-
-      env.updateConfig({ maxContextChars: newLimit });
-      console.log(green(`✔ Limit context window diperbarui menjadi ${newLimit} karakter (~${Math.round(newLimit / 4)} token).`));
+      applyContextLimit(trimmed, env);
     },
   },
   {
@@ -792,83 +841,6 @@ const COMMANDS: CommandDef[] = [
 
       env.updateConfig({ maxContextChars: newChars });
       console.log(green(`✔ Budget context window diperbarui menjadi ${tokens} token (${newChars} karakter, rasio 1 token ≈ 4 karakter).`));
-    },
-  },
-  {
-    name: 'ctx',
-    aliases: ['status', 'budget'],
-    category: 'Konfigurasi & Budget',
-    help: 'Lihat limit context aktif, token budget, dan persentase penggunaan saat ini.',
-    run: (_args, env) => {
-      const budgetChars = env.config.maxContextChars;
-      const budgetTokens = Math.round(budgetChars / 4);
-      const usedChars = env.ctx.totalChars;
-      const usedTokens = Math.round(usedChars / 4);
-      const pct = budgetChars > 0 ? Math.min(100, Math.round((usedChars / budgetChars) * 100)) : 0;
-      const maxOut = env.config.maxOutputTokens ?? DEFAULT_CONFIG.maxOutputTokens ?? 4096;
-      const ws = getWorkspaceRoot();
-      const cfgPath = join(ws, '.ruko', 'config.json');
-      const isPersistent = existsSync(cfgPath);
-
-      const rawLines = [
-        `Model aktif: ${env.llm.model} (${env.llm.name})`,
-        `Context window limit aktif: ${budgetChars.toLocaleString()} karakter (~${formatK(budgetChars)})`,
-        `Token budget aktif: ~${budgetTokens.toLocaleString()} tokens (1 token ≈ 4 karakter)`,
-        `Max output tokens aktif: ${maxOut.toLocaleString()} tokens (per-turn)`,
-        `Karakter aktif saat ini: ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}%`,
-        `Pesan dalam konteks: ${env.ctx.size} pesan`,
-        `Status konfigurasi: ${isPersistent ? 'Tersimpan di .ruko/config.json (survive lintas sesi)' : 'Menggunakan nilai default sesi (belum disimpan)'}`,
-        `───────────────────────────────────────────────────────`,
-        `Hint: Atur budget dengan /settings context <128k|500k|unlimited>`,
-      ];
-
-      // Responsive line wrapping for narrow terminals (<= 60 cols) to ensure
-      // lines are not cut off by renderBox visible length clamping.
-      const maxInner = Math.max(10, terminalWidth() - 4);
-      const availWidth = maxInner - 2;
-
-      const wrappedLines: string[] = [];
-      for (const line of rawLines) {
-        if (visibleLength(line) <= availWidth || line.startsWith('───')) {
-          wrappedLines.push(line);
-          continue;
-        }
-        const colonIdx = line.indexOf(': ');
-        if (colonIdx !== -1 && colonIdx <= availWidth) {
-          const key = line.slice(0, colonIdx + 1);
-          const val = line.slice(colonIdx + 2);
-          wrappedLines.push(key);
-          if (visibleLength(val) + 2 <= availWidth) {
-            wrappedLines.push(`  ${val}`);
-          } else {
-            const words = val.split(' ');
-            let cur = '  ';
-            for (const w of words) {
-              if (cur === '  ') cur += w;
-              else if (visibleLength(cur + ' ' + w) <= availWidth) cur += ' ' + w;
-              else {
-                wrappedLines.push(cur);
-                cur = '  ' + w;
-              }
-            }
-            if (cur.trim()) wrappedLines.push(cur);
-          }
-          continue;
-        }
-        const words = line.split(' ');
-        let cur = '';
-        for (const w of words) {
-          if (!cur) cur = w;
-          else if (visibleLength(cur + ' ' + w) <= availWidth) cur += ' ' + w;
-          else {
-            wrappedLines.push(cur);
-            cur = '  ' + w;
-          }
-        }
-        if (cur.trim()) wrappedLines.push(cur);
-      }
-
-      console.log(renderBox('Context Budget & Status Aktif', wrappedLines));
     },
   },
   {
@@ -1105,15 +1077,17 @@ async function runSetupFlow(env: CommandEnv): Promise<void> {
     return;
   }
   const probe = async (r: SetupResult): Promise<ConnectionResult> => {
-    let pType: string | undefined;
     const rb = r.baseUrl.toLowerCase();
     const ml = r.model.toLowerCase();
-    if (rb.includes('anthropic.com') || ml.startsWith('claude-')) {
-      pType = 'anthropic';
-    } else if (rb.includes('googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
-      pType = 'gemini';
-    } else {
-      pType = 'openai-compatible';
+    let pType: string | undefined = r.provider;
+    if (!pType) {
+      if (rb.includes('anthropic.com') || ml.startsWith('claude-')) {
+        pType = 'anthropic';
+      } else if (rb.includes('googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
+        pType = 'gemini';
+      } else {
+        pType = 'openai-compatible';
+      }
     }
     const testProvider = createProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model, provider: pType });
     if (testProvider.testConnection) {
@@ -1121,18 +1095,20 @@ async function runSetupFlow(env: CommandEnv): Promise<void> {
     }
     return { ok: true, message: r.model };
   };
-  const result = await promptSetup({ question: env.ask, readSecret: env.askSecret }, { probe });
+  const result = await promptSetup({ question: env.ask, readSecret: env.askSecret }, { probe, askProvider: true });
   if (!result) return;
 
-  let providerType: string | undefined;
-  const rawBase = result.baseUrl.toLowerCase();
-  const modelLower = result.model.toLowerCase();
-  if (rawBase.includes('anthropic.com') || modelLower.startsWith('claude-')) {
-    providerType = 'anthropic';
-  } else if (rawBase.includes('googleapis.com') || (!rawBase && modelLower.startsWith('gemini-'))) {
-    providerType = 'gemini';
-  } else {
-    providerType = 'openai-compatible';
+  let providerType: string | undefined = result.provider;
+  if (!providerType) {
+    const rawBase = result.baseUrl.toLowerCase();
+    const modelLower = result.model.toLowerCase();
+    if (rawBase.includes('anthropic.com') || modelLower.startsWith('claude-')) {
+      providerType = 'anthropic';
+    } else if (rawBase.includes('googleapis.com') || (!rawBase && modelLower.startsWith('gemini-'))) {
+      providerType = 'gemini';
+    } else {
+      providerType = 'openai-compatible';
+    }
   }
 
   const patch: Partial<AgentConfig> = {
@@ -1481,6 +1457,7 @@ export function buildHelpText(): string {
     `  \x1b[90m•\x1b[0m \x1b[37m${truncateNote('Plan mode (/plan) memblokir eksekusi di level kode, bukan cuma prompt.', noteAvailBullet)}\x1b[0m`,
     `  \x1b[90m•\x1b[0m \x1b[37m${truncateNote('Perubahan file bisa dibatalkan dengan /undo (snapshot .ruko/undo).', noteAvailBullet)}\x1b[0m`,
     `  \x1b[90m•\x1b[0m \x1b[37m${truncateNote('Bypass persetujuan: RUKO_YOLO_MODE=1 atau approvalEnabled=false.', noteAvailBullet)}\x1b[0m`,
+    `  \x1b[90m•\x1b[0m \x1b[37m${truncateNote('Pemulihan terminal (post-crash/SIGKILL): ketik reset atau stty sane.', noteAvailBullet)}\x1b[0m`,
   );
 
   return lines.join('\n');
