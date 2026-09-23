@@ -256,7 +256,6 @@ Ketik `/` di terminal untuk memunculkan menu interaktif, atau gunakan perintah b
 | `/settings` | Dashboard konfigurasi terpadu: context window, max tokens, role, mode, approval, anim. |
 | `/role [nama]` | Mengganti peran sistem AI (`default`, `reviewer`, `teacher`, `minimal`). |
 | `/mode beginner \| pro` | Mode pengguna: panduan mendalam (`beginner`) atau ringkas (`pro`). |
-| `/anim [on\|off]` | Mengaktifkan/menonaktifkan animasi Pac-Man saat AI berpikir. |
 | `/profile [alias]` | Beralih profil penyedia LLM (`hemat`, `kuat`, `lokal`). |
 | `/exec <perintah>` | Menjalankan perintah shell langsung dari baris perintah Ruko. |
 | `/history [n]` | Menampilkan *n* pesan riwayat percakapan terakhir. |
