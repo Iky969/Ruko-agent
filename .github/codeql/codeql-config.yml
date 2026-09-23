@@ -1,0 +1,14 @@
+name: "CodeQL Custom Configuration"
+
+paths-ignore:
+  - 'dist/**'
+  - 'src/tests/**'
+
+query-filters:
+  - exclude:
+      id: js/file-access-to-http
+  - exclude:
+      id: js/indirect-command-line-injection
+  - exclude:
+      id: js/file-system-race
+

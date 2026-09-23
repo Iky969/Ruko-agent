@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline/promises';
 import { Agent } from './agent/agent.js';
 import { createProvider } from './agent/llm.js';
 import { Confirmer, guardedExecute, isHighRiskDangerousCommand } from './core/approval.js';
-import { defaultConfigPath, loadResolvedConfig, redactApiKey, saveConfig } from './core/config.js';
+import { defaultConfigPath, isHostnameOrSubdomain, loadResolvedConfig, redactApiKey, saveConfig } from './core/config.js';
 import { Context } from './core/context.js';
 import { SystemLoop } from './core/loop.js';
 import { summarizeLog } from './core/summarizer.js';
@@ -556,9 +556,9 @@ async function main(): Promise<void> {
       if (!pType) {
         const rb = r.baseUrl.toLowerCase();
         const ml = r.model.toLowerCase();
-        if (rb.includes('anthropic.com') || ml.startsWith('claude-')) {
+        if (isHostnameOrSubdomain(rb, 'anthropic.com') || ml.startsWith('claude-')) {
           pType = 'anthropic';
-        } else if (rb.includes('googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
+        } else if (isHostnameOrSubdomain(rb, 'googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
           pType = 'gemini';
         } else {
           pType = 'openai-compatible';

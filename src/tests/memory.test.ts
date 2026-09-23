@@ -13,7 +13,6 @@ import {
   hasMeaningfulMemory,
   initMemoryFile,
   MEMORY_PLACEHOLDER_HEADER,
-  MEMORY_WARN_THRESHOLD,
   readMemory,
   readMemorySafe,
   sanitizeMemoryContent,
@@ -21,9 +20,7 @@ import {
 } from '../core/memory.js';
 import { buildSystemPrompt, getBuiltInRole } from '../agent/roles.js';
 import { assertInsideWorkspace, runToolCall } from '../agent/tools.js';
-import { handleCommand, listCommands } from '../agent/commands.js';
-import { Context } from '../core/context.js';
-import { DEFAULT_CONFIG } from '../types.js';
+import { listCommands } from '../agent/commands.js';
 
 test('initMemoryFile creates .ruko/memory.md with placeholder header and 0o600 permissions', () => {
   const ws = mkdtempSync(join(tmpdir(), 'ruko-mem-'));

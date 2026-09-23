@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import { Buffer } from 'node:buffer';
 import * as path from 'node:path';
-import { assertInsideWorkspace, assertNotSensitivePath, assertNotSecurityCore, getWorkspaceRoot, isPathInsideWorkspace, isSecurityCoreFile, isSensitivePath } from './tools.js';
+import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isPathInsideWorkspace, isSensitivePath } from './tools.js';
 
 export { assertNotSecurityCore, isSecurityCoreFile } from './tools.js';
 
@@ -142,31 +142,38 @@ export async function readFileTool(
     }
   }
 
+  let handle;
   let stat;
   try {
-    stat = await fs.stat(abs);
+    handle = await fs.open(abs, 'r');
+    stat = await handle.stat();
   } catch (err) {
     return { ok: false, text: `read_file: tidak bisa membuka '${filePath}': ${errorMessage(err)}` };
   }
-  if (stat.isDirectory()) {
-    return { ok: false, text: `read_file: '${filePath}' adalah direktori, bukan file.` };
-  }
-  if (!stat.isFile()) {
-    return { ok: false, text: `read_file: '${filePath}' bukan file reguler.` };
-  }
-
-  // Item 3: Return from in-memory cache directly if file has not changed
-  const cacheKey = `${abs}::${offset}::${limit}`;
-  const cached = fileReadCache.get(cacheKey);
-  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-    return cached.result;
-  }
 
   let content: string;
+  const cacheKey = `${abs}::${offset}::${limit}`;
   try {
-    content = await fs.readFile(abs, 'utf8');
-  } catch (err) {
-    return { ok: false, text: `read_file: gagal membaca '${filePath}': ${errorMessage(err)}` };
+    if (stat.isDirectory()) {
+      return { ok: false, text: `read_file: '${filePath}' adalah direktori, bukan file.` };
+    }
+    if (!stat.isFile()) {
+      return { ok: false, text: `read_file: '${filePath}' bukan file reguler.` };
+    }
+
+    // Item 3: Return from in-memory cache directly if file has not changed
+    const cached = fileReadCache.get(cacheKey);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return cached.result;
+    }
+
+    try {
+      content = await handle.readFile({ encoding: 'utf8' });
+    } catch (err) {
+      return { ok: false, text: `read_file: gagal membaca '${filePath}': ${errorMessage(err)}` };
+    }
+  } finally {
+    await handle.close().catch(() => {});
   }
 
   if (looksBinary(content)) {

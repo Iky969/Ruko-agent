@@ -8,8 +8,6 @@ import {
   globTool,
   globToRegex,
   IGNORED_DIRS,
-  isBinaryFile,
-  walkDirectory,
 } from '../agent/filetools.js';
 import { parseToolCalls, runToolCall, setWorkspaceRoot } from '../agent/tools.js';
 

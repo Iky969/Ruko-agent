@@ -12,8 +12,8 @@ import { searchSessions } from '../core/session.js';
 import { runSubagent } from './subagent.js';
 import { webFetchTool } from './webtools.js';
 import { defaultProcessManager } from './processManager.js';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { open, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -138,7 +138,6 @@ export function parseToolCalls(text: string): ParseToolCallsResult {
     const body = match[2];
     const params: Record<string, unknown> = {};
 
-    let hasError = false;
     for (const pMatch of body.matchAll(DSML_PARAM_RE)) {
       const pName = pMatch[1].trim();
       const isString = pMatch[2]?.toLowerCase() === 'true';
@@ -754,26 +753,24 @@ async function writeWithDiff(
     );
   }
 
-  // Reject writing/editing through symbolic link
+  let oldContent = '';
+  let existed = false;
+  let readHandle;
   try {
-    const lst = lstatSync(abs);
-    if (lst.isSymbolicLink()) {
+    readHandle = await open(abs, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    oldContent = await readHandle.readFile('utf8');
+    existed = true;
+  } catch (err: any) {
+    if (err?.code === 'ELOOP' || (err instanceof Error && err.message.includes('symbolic link'))) {
       throw new Error(
         `Akses ditolak: "${fileLabel}" adalah symbolic link. Menulis atau mengubah file melalui symbolic link dilarang demi keamanan sandbox.`,
       );
     }
-  } catch (err) {
-    if (err instanceof Error && err.message.includes('symbolic link')) {
-      throw err;
-    }
+    if (err?.code !== 'ENOENT') throw err;
+  } finally {
+    await readHandle?.close();
   }
 
-  // Pre-write re-validation
-  assertInsideWorkspace(abs, workspaceRoot);
-  assertNotSensitivePath(abs, workspaceRoot);
-
-  const existed = existsSync(abs);
-  const oldContent = existed ? await readFile(abs, 'utf8') : '';
   if (existed && oldContent === newContent) {
     onLog?.(yellow(`🟡 Edit(${fileLabel}) — tidak ada perubahan`));
     return JSON.stringify({ ok: true, note: 'File sudah berisi konten yang sama; tidak ada perubahan.' });
@@ -781,18 +778,20 @@ async function writeWithDiff(
   // Undo safety net (§6): snapshot the old state before any mutation.
   takeSnapshot(abs);
 
-  // Eliminate TOCTOU swap window: verify target is not a symlink right before writing
+  // Eliminate TOCTOU swap window: atomic open with O_NOFOLLOW
+  const openFlags = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW || 0);
+  let writeHandle;
   try {
-    if (lstatSync(abs).isSymbolicLink()) {
+    writeHandle = await open(abs, openFlags, 0o644);
+    await writeHandle.writeFile(newContent, 'utf8');
+  } catch (err: any) {
+    if (err?.code === 'ELOOP' || (err instanceof Error && err.message.includes('symbolic link'))) {
       throw new Error(`Akses ditolak: "${fileLabel}" terdeteksi sebagai symbolic link sebelum penulisan.`);
     }
-  } catch (err) {
-    if (err instanceof Error && err.message.includes('symbolic link')) {
-      throw err;
-    }
+    throw err;
+  } finally {
+    await writeHandle?.close();
   }
-
-  await writeFile(abs, newContent, 'utf8');
   onLog?.(green(`🟢 Edit(${fileLabel})`));
   const diff = renderFileDiff(
     fileLabel,

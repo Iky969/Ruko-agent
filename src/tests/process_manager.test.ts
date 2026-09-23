@@ -6,7 +6,6 @@ import { test } from 'node:test';
 import {
   defaultProcessManager,
   redactCredentials,
-  CREDENTIAL_REDACT_REGEX,
 } from '../agent/processManager.js';
 import { runToolCall, setWorkspaceRoot } from '../agent/tools.js';
 import { DEFAULT_CONFIG } from '../types.js';

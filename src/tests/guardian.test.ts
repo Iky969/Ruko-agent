@@ -237,7 +237,7 @@ test('guardedExecute + guardian: DANGEROUS + guardian dangerous → falls throug
 
 test('guardedExecute + guardian: DANGEROUS + guardian error → falls through to user confirm', async () => {
   let confirmCalled = false;
-  const result = await guardedExecute(
+  await guardedExecute(
     'sudo apt install vim',
     {
       confirm: async () => { confirmCalled = true; return false; },
@@ -285,7 +285,7 @@ test('guardedExecute + guardian: guardianEnabled=false skips guardian', async ()
     guardianCalled = true;
     return '{"verdict":"safe","reasoning":"safe"}';
   });
-  const result = await guardedExecute(
+  await guardedExecute(
     'sudo echo hi',
     {
       confirm: async () => { confirmCalled = true; return true; },

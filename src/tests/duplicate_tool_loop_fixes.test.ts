@@ -4,7 +4,7 @@ import { Agent } from '../agent/agent.js';
 import { Context } from '../core/context.js';
 import { ChatOptions, LLMProvider, OpenAiCompatibleProvider } from '../agent/llm.js';
 import { ContextMessage, DEFAULT_CONFIG } from '../types.js';
-import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setWorkspaceRoot } from '../agent/tools.js';

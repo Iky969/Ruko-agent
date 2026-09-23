@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { detectRisk, extractAndResolveShellVariables } from '../core/approval.js';
+import { detectRisk } from '../core/approval.js';
 import { containsSensitiveFilePattern, runSubagent } from '../agent/subagent.js';
 import { codeSearchTool } from '../agent/filetools.js';
 import { DEFAULT_CONFIG } from '../types.js';
@@ -8,7 +8,7 @@ import { Agent } from '../agent/agent.js';
 import { Context } from '../core/context.js';
 import { createProvider } from '../agent/llm.js';
 import { handleCommand } from '../agent/commands.js';
-import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { takeSnapshot } from '../core/undo.js';

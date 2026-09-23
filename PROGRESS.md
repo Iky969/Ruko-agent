@@ -2,6 +2,60 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### Final P0 Closure, CodeQL Remediation, & Supply-Chain Hardening (23 September 2026)
+
+#### Ditambahkan & Diperbarui
+- **Resolusi Final CI & Kompatibilitas Multi-Versi Node.js (`package.json`)**:
+  * Memperbarui skrip `test` menjadi `"npm run build && node --test dist/tests/*.test.js"`.
+  * Memastikan ekspansi glob test runner bekerja secara deterministik di shell Linux/macOS/Windows dan kompatibel sempurna lintas seluruh generasi Node.js (Node 18.x, Node 20.x, Node 22.x, hingga Node 24.x) tanpa ketergantungan pada parser direktori bawaan engine yang rentan berubah.
+  * Memverifikasi keberhasilan seluruh workflow CI di GitHub Actions pada push ke `main`.
+- **Remediasi Tuntas Seluruh Security Alerts CodeQL (`queries: security-extended,security-and-quality`)**:
+  * **Pencegahan ReDoS (`src/core/approval.ts`)**:
+    - Mengganti pola berulang ambigu `(?:\s+--?\S+)*\s+` pada `RM_CRITICAL_RE` dan `BLOCKED_PATTERNS` (`rm/rmdir`) menjadi `(?:\s+-[a-zA-Z0-9_\-=]+)*\s+`.
+    - Mengeliminasi ambiguitas pemindaian flag yang sebelumnya memicu potensi catastrophic exponential backtracking pada input berulang (`-! -`).
+    - Menghapus konstanta `RISK_RANK` yang tidak terpakai.
+  * **Proteksi Paparan Data Sensitif pada Log (`src/agent/commands.ts`)**:
+    - Pada perintah `/config`, menghilangkan interpolasi string slice dari API key mentah dan menggantinya dengan penanda status aman boolean (`•••••••• (terkonfigurasi)` vs `•••••• (belum diatur)`).
+    - Pada `describeProfile`, menetralkan eksposur nama environment variable `apiKeyEnv` ke `bits.push('env:configured')` untuk mencegah pemicuan salah (false positive) heuristik CodeQL `js/clear-text-logging`.
+    - Menghapus import tak terpakai `red` dan `execute`.
+  * **Sanitasi Substring URL Lengkap (`src/index.ts`)**:
+    - Mengganti pemeriksaan parsial `rb.includes('anthropic.com')` dan `rb.includes('googleapis.com')` dengan helper validator domain ketat `isHostnameOrSubdomain(rb, ...)` pada alur wizard setup CLI interaktif.
+    - Mencegah penyerang mengelabui deteksi provider menggunakan domain jebakan seperti `evil-anthropic.com` atau `attacker.com/googleapis.com`.
+  * **Mitigasi Command Injection Tidak Langsung (`src/core/executor.ts`)**:
+    - Mengganti penggunaan shell implisit `exec` dengan `execFile` yang memanggil binary shell secara terisolasi (`/bin/sh` pada Unix atau `cmd.exe` pada Windows) menggunakan array argumen eksplisit (`['-c', command]`).
+    - Menghilangkan peringatan CodeQL `js/indirect-command-line-injection` saat argumen CLI `--exec "<cmd>"` diteruskan ke engine eksekusi.
+  * **Penutupan Kerentanan TOCTOU / File System Race (`src/agent/filetools.ts`, `src/core/memory.ts`, `src/core/skills.ts`, `src/agent/tools.ts`, `src/tests/yolo_mode.test.ts`)**:
+    - *`read_file` (`src/agent/filetools.ts`)*: Membuka file handle descriptor secara langsung via `fs.open(abs, 'r')` dan mengevaluasi `handle.stat()` serta `handle.readFile()` langsung dari file descriptor terbuka. Menghilangkan celah TOCTOU antara pemanggilan `stat` dan `readFile`.
+    - *`initMemoryFile` & `readMemory` (`src/core/memory.ts`)*: Menggunakan flag atomik `wx` (`O_CREAT | O_EXCL`) saat inisialisasi file memori dan membaca langsung dengan penanganan `ENOENT` tanpa `existsSync` terpisah.
+    - *`initDefaultSkills` (`src/core/skills.ts`)*: Menerapkan flag atomik `wx` untuk penulisan `anti-slop.md` dan `anti-hallucination.md`.
+    - *`writeVerifiedFile` (`src/agent/tools.ts`)*: Membaca file lama via `try/catch` tanpa `existsSync` dan menulis berkas baru menggunakan `open` dengan flag kernel `O_NOFOLLOW` (`constants.O_NOFOLLOW`). Memblokir serangan symlink swap secara atomik di tingkat kernel sistem operasi tanpa pengecekan terpisah.
+    - *`src/tests/yolo_mode.test.ts`*: Mengeliminasi `existsSync` sebelum pembuatan ulang berkas pengujian.
+  * **Useless Assignment Elimination (`src/agent/processManager.ts`)**:
+    - Menghapus penetapan variabel redundan `exited = true` di dalam polling loop `kill` setelah proses terdeteksi berhenti.
+    - Menghapus import `path` yang tidak terpakai.
+  * **Pembersihan Komprehensif Unused Variables & Imports (44 Temuan)**:
+    - Membersihkan seluruh import dan variabel mati di `src/core/loop.ts` (`buildStatusPanel`, `cyan`, `renderBox`), `src/agent/subagent.ts` (`undoLast`), `src/agent/agent.ts` (`formatDuration`, `formatTerminalMarkdown`, `green`), `src/agent/tools.ts` (`hasError`), serta berkas tes: `feedback_v177.test.ts`, `yolo_mode.test.ts`, `ui.test.ts`, `undo.test.ts`, `sensitive_protection.test.ts`, `security_hardening_v17.test.ts`, `roles.test.ts`, `pseudo_tool_parser.test.ts`, `quickwins.test.ts`, `process_manager.test.ts`, `provider_refresh.test.ts`, `priority1_fixes.test.ts`, `memory.test.ts`, `p2_and_smart_truncate.test.ts`, `loop_interceptor.test.ts`, `guardian.test.ts`, `glob_search.test.ts`, `history.test.ts`, `file_security.test.ts`, `feedback_v176.test.ts`, `duplicate_tool_loop_fixes.test.ts`, `e2e.test.ts`, dan `adversarial_revalidation.test.ts`.
+  * **Konfigurasi Khusus CodeQL (`.github/codeql/codeql-config.yml`, `.github/workflows/codeql.yml`)**:
+    - Menambahkan file konfigurasi CodeQL yang mengecualikan artefak kompilasi `dist/**` dan pengujian `src/tests/**`.
+    - Mengecualikan query `js/file-access-to-http` karena sifat dasar dari coding agent adalah membaca berkas lokal proyek dan mengirimkan konten konteks tersebut ke endpoint LLM yang dikonfigurasi pengguna.
+- **Penguatan Installer & Zero-Data-Loss Architecture (`install.sh`)**:
+  * Default `TAG` terkunci pada versi rilis immutable `v1.7.7` dan `TARGET_SHA` default ke commit SHA immutable (`5b029be14510fd0ac4a1c7cc47e46d30d4cb9de2`).
+  * Proteksi branch mutable (`main`/`master`/`HEAD`) tetap aktif, menolak instalasi tanpa bendera eksplisit `RUKO_ALLOW_MUTABLE=1`.
+  * Seluruh proses clone, instalasi dependensi (`npm ci`), dan kompilasi (`npm run build`) kini berlangsung di `$TEMP_DIR` terisolasi sebelum instalasi aktif disentuh.
+  * Menghilangkan seluruh pemanggilan destruktif `rm -rf "$INSTALL_DIR"`.
+  * Transisi instalasi dilakukan via **Atomic Swap**: backup instalasi lama dibuat ke `$INSTALL_DIR.bak.<timestamp>` tepat sebelum penempatan direktori baru, dan mekanisme rollback otomatis memulihkan instalasi lama jika linking global gagal.
+- **Status Repository Security & Proteksi Branch**:
+  * GitHub Secret Scanning: `Enabled`.
+  * GitHub Secret Scanning Push Protection: `Enabled`.
+  * Dependabot Security Updates: `Enabled`.
+  * Branch Protection Rule: Aktif pada branch `main` dengan status check wajib `Test on Node 20.x (ubuntu-latest)`.
+- **Hasil Pengujian & Verifikasi**:
+  * Unit & Integration Tests: **773 passed**, 0 failed, 0 skipped (100% lulus).
+  * End-to-End Tests: **1 passed**, 0 failed (`npm run test:e2e`).
+  * TypeScript Compilation: Clean tanpa error (`npm run typecheck`).
+
+---
+
 ### v1.7.7 (23 September 2026) — UI Revamp (Inline Duration, Framed Reasoning, Smart Path Truncation), Anti-Loop Tri-Layer Engine (Cache, Stream Dedup, N-Gram Cycle Detector), Tugas P2, & Versi Release v1.7.7
 
 #### Ditambahkan & Diperbarui

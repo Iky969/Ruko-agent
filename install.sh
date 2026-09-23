@@ -3,7 +3,7 @@ set -e
 
 REPO="https://github.com/Iky969/Ruko-agent.git"
 INSTALL_DIR="$HOME/.ruko-agent"
-PINNED_COMMIT_SHA="3c1f5689244f49d1f75151358a119f8745976fc5" # v1.7.7 release
+PINNED_COMMIT_SHA="5b029be14510fd0ac4a1c7cc47e46d30d4cb9de2" # v1.7.7 release
 TAG="${RUKO_VERSION:-v1.7.7}"
 TARGET_SHA="${RUKO_COMMIT_SHA:-$PINNED_COMMIT_SHA}"
 
@@ -53,28 +53,19 @@ fi
 
 TEMP_DIR=$(mktemp -d)
 BACKUP_DIR=""
-
-# Safe-upgrade: Never delete up front with rm -rf, even in --force mode.
-# Always preserve the existing installation until the new build succeeds.
-if [ -d "$INSTALL_DIR" ]; then
-  TIMESTAMP=$(date +%s)
-  BACKUP_DIR="${INSTALL_DIR}.bak.${TIMESTAMP}"
-  if [ "$FORCE" -eq 1 ]; then
-    echo "Existing installation found. Staging backup to $BACKUP_DIR (will be cleaned after success)..."
-  else
-    echo "Existing installation found. Backing up to $BACKUP_DIR"
-  fi
-  mv "$INSTALL_DIR" "$BACKUP_DIR"
-fi
+SWAPPED=0
 
 cleanup() {
   local exit_code=$?
   if [ $exit_code -ne 0 ]; then
-    echo "Installation failed!"
-    if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
-      echo "Rolling back to previous installation..."
-      rm -rf "$INSTALL_DIR" 2>/dev/null || true
+    echo "Instalasi gagal (exit code: $exit_code)!"
+    if [ "$SWAPPED" -eq 1 ] && [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
+      echo "Memulihkan instalasi sebelumnya (rollback)..."
+      if [ -d "$INSTALL_DIR" ]; then
+        mv "$INSTALL_DIR" "${INSTALL_DIR}.failed.$(date +%s)" 2>/dev/null || true
+      fi
       mv "$BACKUP_DIR" "$INSTALL_DIR"
+      echo "Rollback berhasil: instalasi lama telah dipulihkan."
     fi
   fi
   rm -rf "$TEMP_DIR" 2>/dev/null || true
@@ -103,8 +94,26 @@ fi
   npm run build
 )
 
-# Move from temp to actual install dir
+# Validasi hasil build sebelum menyentuh instalasi aktif
+if [ ! -f "$TEMP_DIR/dist/index.js" ]; then
+  echo "Error: Berkas distribusi 'dist/index.js' tidak ditemukan setelah build."
+  exit 1
+fi
+
+# Atomic swap: pindahkan instalasi lama ke backup, lalu tempatkan versi baru
+if [ -d "$INSTALL_DIR" ]; then
+  TIMESTAMP=$(date +%s)
+  BACKUP_DIR="${INSTALL_DIR}.bak.${TIMESTAMP}"
+  if [ "$FORCE" -eq 1 ]; then
+    echo "Instalasi lama ditemukan. Mencadangkan ke $BACKUP_DIR..."
+  else
+    echo "Instalasi lama ditemukan. Dicadangkan ke $BACKUP_DIR"
+  fi
+  mv "$INSTALL_DIR" "$BACKUP_DIR"
+fi
+
 mv "$TEMP_DIR" "$INSTALL_DIR"
+SWAPPED=1
 
 (
   cd "$INSTALL_DIR"
@@ -124,8 +133,12 @@ fi
 
 trap - EXIT
 if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
-  echo "Cleaning up backup..."
-  rm -rf "$BACKUP_DIR"
+  if [ "$FORCE" -eq 1 ]; then
+    echo "Membersihkan cadangan sementara mode --force..."
+    rm -rf "$BACKUP_DIR"
+  else
+    echo "Cadangan instalasi sebelumnya tersimpan di: $BACKUP_DIR"
+  fi
 fi
 
 echo ""

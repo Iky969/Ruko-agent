@@ -1,4 +1,4 @@
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { ExecResult } from '../types.js';
 import { summarizeLog } from './summarizer.js';
 import { sanitizeTerminalOutput } from './ui.js';
@@ -44,8 +44,13 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
     // Interleaved stream chunk collection for true sequential ordering of stdout & stderr
     const interleavedChunks: string[] = [];
 
-    const child = exec(
-      command,
+    const isWindows = process.platform === 'win32';
+    const shellBinary = isWindows ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh';
+    const shellArgs = isWindows ? ['/d', '/s', '/c', command] : ['-c', command];
+
+    const child = execFile(
+      shellBinary,
+      shellArgs,
       {
         cwd: options.cwd,
         env: cleanEnv,

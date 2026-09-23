@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Agent } from '../agent/agent.js';
 import { Context } from '../core/context.js';
-import { ChatOptions, ConnectionResult, LLMProvider } from '../agent/llm.js';
+import { ChatOptions, LLMProvider } from '../agent/llm.js';
 import { ContextMessage, DEFAULT_CONFIG } from '../types.js';
 
 class MockInterceptorProvider implements LLMProvider {

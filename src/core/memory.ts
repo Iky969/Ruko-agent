@@ -35,9 +35,11 @@ export function getMemoryPath(workspaceRoot: string = process.cwd()): string {
  */
 export function initMemoryFile(workspaceRoot: string = process.cwd()): string {
   const memPath = getMemoryPath(workspaceRoot);
-  if (!existsSync(memPath)) {
-    mkdirSync(dirname(memPath), { recursive: true });
-    writeFileSync(memPath, MEMORY_PLACEHOLDER_HEADER, { encoding: 'utf8', mode: 0o600 });
+  mkdirSync(dirname(memPath), { recursive: true });
+  try {
+    writeFileSync(memPath, MEMORY_PLACEHOLDER_HEADER, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  } catch (e: any) {
+    if (e?.code !== 'EEXIST') throw e;
   }
   try {
     chmodSync(memPath, 0o600);
@@ -53,9 +55,9 @@ export function initMemoryFile(workspaceRoot: string = process.cwd()): string {
 export function readMemory(workspaceRoot: string = process.cwd()): string | null {
   try {
     const memPath = getMemoryPath(workspaceRoot);
-    if (!existsSync(memPath)) return null;
     return readFileSync(memPath, 'utf8');
-  } catch {
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') return null;
     return null;
   }
 }
@@ -219,7 +221,12 @@ export async function appendMemory(
   initMemoryFile(workspaceRoot);
   const memPath = getMemoryPath(workspaceRoot);
 
-  const existing = existsSync(memPath) ? readFileSync(memPath, 'utf8') : '';
+  let existing = '';
+  try {
+    existing = readFileSync(memPath, 'utf8');
+  } catch (e: any) {
+    if (e?.code !== 'ENOENT') throw e;
+  }
   const dateStr = now.toISOString().slice(0, 10);
 
   let entryText = clean;

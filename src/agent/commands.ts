@@ -3,9 +3,8 @@ import { Confirmer, guardedExecute } from '../core/approval.js';
 import { join, relative as relativeFromCwd, resolve as resolvePath } from 'node:path';
 import { Context } from '../core/context.js';
 import { isHostnameOrSubdomain, isPrivateOrLocalHost, saveConfig } from '../core/config.js';
-import { execute } from '../core/executor.js';
 import { promptSetup, SetupResult } from '../core/wizard.js';
-import { bold, cyan, dim, formatDuration, formatK, green, renderBox, red, terminalWidth, visibleLength, yellow } from '../core/ui.js';
+import { bold, cyan, dim, formatDuration, formatK, green, renderBox, terminalWidth, visibleLength, yellow } from '../core/ui.js';
 import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
@@ -950,11 +949,10 @@ const COMMANDS: CommandDef[] = [
       const parts = args.trim().split(/\s+/);
       if (parts.length === 0 || parts[0] === '') {
         const c = env.config;
-        const key = maskApiKey(c.apiKey);
         console.log(
           renderBox('Config', [
             `provider: ${c.provider ?? env.llm.name}`,
-            `apiKey: ${key}`,
+            `apiKey: ${c.apiKey ? '•••••••• (terkonfigurasi)' : '•••••• (belum diatur)'}`,
             `baseUrl: ${maskBaseUrl(c)}`,
             `maxLogChars: ${c.maxLogChars}`,
             `maxContextChars: ${c.maxContextChars}`,
@@ -1048,7 +1046,7 @@ function describeProfile(p: ProviderProfile): string {
   const bits: string[] = [];
   if (p.model) bits.push(p.model);
   if (p.baseUrl) bits.push(p.baseUrl);
-  if (p.apiKeyEnv) bits.push(`key:$${p.apiKeyEnv}`);
+  if (p.apiKeyEnv) bits.push('env:configured');
   return bits.join('  ') || '(kosong)';
 }
 

@@ -77,7 +77,7 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Tanggal: 2026-09-12
 - Kontribusi: Subsistem Process Management (start_process, read_process_logs, get_status, stop_process), in-flight ESC cancel, pencarian lintas sesi (search_sessions, /search), dan siklus penuh skills system (delete_skill)
 - Tanggal: 2026-09-13
-- Kontribusi: Release v1.7.7 — Implementasi Smart Path Truncation (`truncatePath`) dengan relative path normalization & middle truncation, prioritas resolusi kolom terminal `process.env.COLUMNS` pada `terminalWidth()`, konsolidasi komprehensif `/context` vs `/ctx`, mitigasi pemulihan terminal raw mode pasca-SIGKILL (`reset`, `stty sane`, `tput cnorm`), arsitektur tri-layer anti-loop deduplication & $N$-gram cycle detection (Solusi 3-1-2: In-turn idempotent cache, stream-level deduplication, batch & cycle detector), ekspansi test suite hingga 800 passing tests (100% pass), serta sinkronisasi versi rilis v1.7.7
+- Kontribusi: Release v1.7.7 — Implementasi Smart Path Truncation (`truncatePath`) dengan relative path normalization & middle truncation, prioritas resolusi kolom terminal `process.env.COLUMNS` pada `terminalWidth()`, konsolidasi komprehensif `/context` vs `/ctx`, mitigasi pemulihan terminal raw mode pasca-SIGKILL (`reset`, `stty sane`, `tput cnorm`), arsitektur tri-layer anti-loop deduplication & $N$-gram cycle detection (Solusi 3-1-2: In-turn idempotent cache, stream-level deduplication, batch & cycle detector), ekspansi test suite hingga 773 passing unit tests + 1 E2E test (100% pass), serta sinkronisasi versi rilis v1.7.7
 - Tanggal: 2026-09-23
 
 ## Claude Opus 4.6
