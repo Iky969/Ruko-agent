@@ -13,7 +13,7 @@ import { runSubagent } from './subagent.js';
 import { webFetchTool } from './webtools.js';
 import { defaultProcessManager } from './processManager.js';
 import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs';
-import { open, readFile, writeFile } from 'node:fs/promises';
+import { open, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -753,31 +753,22 @@ async function writeWithDiff(
     );
   }
 
-  // Reject writing/editing through symbolic link
+  let oldContent = '';
+  let existed = false;
+  let readHandle;
   try {
-    const lst = lstatSync(abs);
-    if (lst.isSymbolicLink()) {
+    readHandle = await open(abs, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    oldContent = await readHandle.readFile('utf8');
+    existed = true;
+  } catch (err: any) {
+    if (err?.code === 'ELOOP' || (err instanceof Error && err.message.includes('symbolic link'))) {
       throw new Error(
         `Akses ditolak: "${fileLabel}" adalah symbolic link. Menulis atau mengubah file melalui symbolic link dilarang demi keamanan sandbox.`,
       );
     }
-  } catch (err) {
-    if (err instanceof Error && err.message.includes('symbolic link')) {
-      throw err;
-    }
-  }
-
-  // Pre-write re-validation
-  assertInsideWorkspace(abs, workspaceRoot);
-  assertNotSensitivePath(abs, workspaceRoot);
-
-  let oldContent = '';
-  let existed = false;
-  try {
-    oldContent = await readFile(abs, 'utf8');
-    existed = true;
-  } catch (err: any) {
     if (err?.code !== 'ENOENT') throw err;
+  } finally {
+    await readHandle?.close();
   }
 
   if (existed && oldContent === newContent) {
@@ -789,18 +780,17 @@ async function writeWithDiff(
 
   // Eliminate TOCTOU swap window: atomic open with O_NOFOLLOW
   const openFlags = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW || 0);
+  let writeHandle;
   try {
-    const handle = await open(abs, openFlags, 0o644);
-    try {
-      await handle.writeFile(newContent, 'utf8');
-    } finally {
-      await handle.close();
-    }
+    writeHandle = await open(abs, openFlags, 0o644);
+    await writeHandle.writeFile(newContent, 'utf8');
   } catch (err: any) {
     if (err?.code === 'ELOOP' || (err instanceof Error && err.message.includes('symbolic link'))) {
       throw new Error(`Akses ditolak: "${fileLabel}" terdeteksi sebagai symbolic link sebelum penulisan.`);
     }
     throw err;
+  } finally {
+    await writeHandle?.close();
   }
   onLog?.(green(`🟢 Edit(${fileLabel})`));
   const diff = renderFileDiff(
