@@ -57,6 +57,21 @@ export function isPrivateOrLocalHost(hostname: string): boolean {
 }
 
 /**
+ * Masks API key patterns for secure logging/display.
+ * Shows first 3 chars and last 4 chars, masks middle.
+ */
+export function redactApiKey(text: string | null | undefined): string {
+  if (!text) return '';
+  if (typeof text !== 'string') return '';
+  if (text.length < 10) return text;
+
+  if (text.startsWith('sk-') || text.startsWith('key-') || /^[A-Za-z0-9\-_]{20,}$/.test(text)) {
+    return `${text.substring(0, 3)}***${text.slice(-4)}`;
+  }
+  return text;
+}
+
+/**
  * Validates and sanitizes raw JSON parsed from a config file (M1 & H3).
  * Ignores invalid types, clamps numeric ranges, and filters empty allowlist items.
  * Rejects insecure remote HTTP baseUrls to prevent credential exfiltration.
