@@ -1,4 +1,5 @@
 import { AgentConfig, ContextMessage } from '../types.js';
+import { parseToolCalls } from './tools.js';
 
 /**
  * Ruko ships NO provider default: base URL and model are whatever the user
@@ -571,6 +572,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     }
     this.lastReasoning = reasoningBuffer || null;
     if (streamToolCalls.size > 0) {
+      const existingCalls = parseToolCalls(full).calls;
       for (const [, tc] of streamToolCalls) {
         if (tc.name) {
           let parsedArgs: Record<string, unknown> = {};
@@ -579,7 +581,23 @@ export class OpenAiCompatibleProvider implements LLMProvider {
           } catch {
             // fallback
           }
-          full += `\n\`\`\`tool\n${JSON.stringify({ tool: tc.name, ...parsedArgs })}\n\`\`\`\n`;
+
+          // Solusi 1: De-duplikasi level stream.
+          // Jika delta.content sudah mencetak pemanggilan tool yang sama
+          // (misal via blok ```tool atau DSML), jangan tambahkan sintesis duplikat.
+          const normName = tc.name.toLowerCase().replace(/_/g, '');
+          const candidateSig = `${normName}:${JSON.stringify(parsedArgs)}`;
+          const alreadyInFull = existingCalls.some((ec) => {
+            const { id: _eId, tool: ecTool, ...ecRest } = ec;
+            const normEcTool = (ecTool ?? '').toLowerCase().replace(/_/g, '');
+            return `${normEcTool}:${JSON.stringify(ecRest)}` === candidateSig;
+          });
+
+          if (!alreadyInFull) {
+            const toolObj: Record<string, unknown> = { tool: tc.name, ...parsedArgs };
+            if (tc.id) toolObj.id = tc.id;
+            full += `\n\`\`\`tool\n${JSON.stringify(toolObj)}\n\`\`\`\n`;
+          }
         }
       }
     }

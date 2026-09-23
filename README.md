@@ -1,10 +1,10 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-1.7.6-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.7.7-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-622%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-800%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
@@ -21,12 +21,30 @@ Jika muncul pesan `bash: .../usr/bin/ruko: Permission denied` saat menjalankan p
 ```bash
 chmod +x $PREFIX/bin/ruko
 ```
+
+### 🔧 Troubleshooting & Pemulihan Terminal Raw Mode (Post-Crash / SIGKILL)
+
+Ruko menggunakan terminal *raw mode* untuk mendukung *in-place live update*, multiline editing, dan visualisasi aktivitas responsif. Jika proses Ruko dihentikan secara paksa di level kernel melalui sinyal **SIGKILL** (`kill -9`) atau mengalami crash abnormal tanpa sempat mengeksekusi *emergency cleanup handler*, terminal pengguna berpotensi tertinggal dalam kondisi tidak responsif (karakter yang diketik tidak muncul di layar atau *echo* mati).
+
+Untuk memulihkan kondisi terminal ke keadaan normal secara instan:
+```bash
+# Opsi 1: Reset konfigurasi terminal sepenuhnya (paling disarankan)
+reset
+
+# Opsi 2: Kembalikan parameter terminal ke mode standar (sane mode)
+stty sane
+
+# Opsi 3: Bila kursor terminal menghilang
+tput cnorm
+```
+
 ---
 
 ## 📑 Daftar Isi
 
 - [Sorotan Utama](#-sorotan-utama)
 - [Instalasi & Memulai Cepat](#-instalasi--memulai-cepat)
+- [Troubleshooting & Pemulihan Terminal](#-troubleshooting--pemulihan-terminal-raw-mode-post-crash--sigkill)
 - [Arsitektur Keamanan (Dual-Layer Gate & Sandbox)](#-arsitektur-keamanan)
 - [Fitur Unggulan](#-fitur-unggulan)
 - [Daftar Tool Terintegrasi](#-daftar-tool-terintegrasi)
@@ -316,7 +334,7 @@ Ruko diuji secara intensif menggunakan test runner bawaan Node.js (`node:test`) 
 # Verifikasi tipe data statis
 npm run typecheck
 
-# Menjalankan 579 unit test anti-regresi
+# Menjalankan 800 unit test anti-regresi
 npm test
 
 # Menjalankan end-to-end (E2E) integration test

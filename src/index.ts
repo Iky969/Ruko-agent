@@ -623,7 +623,8 @@ function formatFatalError(label: string, err: unknown): string {
   // Diagnostic identifier — unique per crash for easier log correlation
   const diagId = `RUKO-${Date.now().toString(36).toUpperCase()}`;
   lines.push('');
-  lines.push(`[${diagId}] Jika masalah berlanjut, jalankan ulang dengan RUKO_DEBUG=1 untuk detail lengkap,`);
+  lines.push(`[${diagId}] Jika terminal tidak responsif atau karakter input tidak muncul, jalankan: reset atau stty sane`);
+  lines.push(`  Jika masalah berlanjut, jalankan ulang dengan RUKO_DEBUG=1 untuk detail lengkap,`);
   lines.push(`  atau laporkan di: https://github.com/Iky969/Ruko-agent/issues`);
 
   return lines.join('\n');

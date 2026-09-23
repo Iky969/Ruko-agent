@@ -61,7 +61,7 @@ test('CLI accepts literal --api-key when --insecure-api-key is supplied', () => 
     encoding: 'utf8',
     stdio: 'pipe',
   });
-  assert.ok(out.includes('1.7.6') || out.length > 0);
+  assert.ok(out.includes('1.7.7') || out.length > 0);
 });
 
 test('CLI securely loads --api-key from @file', () => {
@@ -72,7 +72,7 @@ test('CLI securely loads --api-key from @file', () => {
       encoding: 'utf8',
       stdio: 'pipe',
     });
-    assert.ok(out.includes('1.7.6') || out.length > 0);
+    assert.ok(out.includes('1.7.7') || out.length > 0);
   } finally {
     try { unlinkSync(tmpKeyFile); } catch {}
   }
@@ -84,6 +84,6 @@ test('CLI securely loads --api-key from stdin (-)', () => {
     input: 'sk-from-stdin-secret',
     stdio: 'pipe',
   });
-  assert.ok(out.includes('1.7.6') || out.length > 0);
+  assert.ok(out.includes('1.7.7') || out.length > 0);
 });
 

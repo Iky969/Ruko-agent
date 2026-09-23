@@ -105,6 +105,8 @@ export class Agent {
   private lastCallSignature: string | null = null;
   /** Tracks consecutive repetitive calls with identical signature. */
   private consecutiveRepeatCount = 0;
+  /** Sliding window history of recent tool call signatures for N-gram cycle detection. */
+  private callHistory: string[] = [];
 
   constructor(
     private readonly ctx: Context,
@@ -272,9 +274,23 @@ export class Agent {
       'move_file',
       'revert_file',
     ]);
+    const IDEMPOTENT_READ_TOOLS = new Set([
+      'read_file',
+      'glob',
+      'list_dir',
+      'list_directory',
+      'code_search',
+      'read_logs',
+    ]);
+    const turnToolCache = new Map<string, string>();
 
     const maxIterations = this.config.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
     let hasSeparatedFromTools = false;
+
+    this.callHistory = [];
+    this.callCounts.clear();
+    this.consecutiveRepeatCount = 0;
+    this.lastCallSignature = null;
 
     try {
       for (let i = 0; i < maxIterations; i += 1) {
@@ -294,6 +310,15 @@ export class Agent {
 
         const finishThinking = () => {
           if (ticker.isFinished()) return;
+          const showFull = process.env.RUKO_SHOW_REASONING === '1' || process.env.RUKO_REASONING === '1';
+          if (showFull && ticker.getBuffered().trim()) {
+            const framed = ticker.renderFramedReasoning();
+            ticker.flush();
+            if (framed) {
+              console.log(framed);
+            }
+            return;
+          }
           const summary = ticker.flush();
           if (summary) {
             console.log(summary);
@@ -466,6 +491,8 @@ export class Agent {
         const desc = inferStepDescription(calls, tree.currentStep + 1);
         tree.startStep(desc);
 
+        const batchSignatures = new Set<string>();
+
         for (let callIdx = 0; callIdx < calls.length; callIdx += 1) {
           const call = calls[callIdx];
           const toolCallId = toolCalls[callIdx]?.id || `call_${call.tool}_${Date.now()}`;
@@ -477,8 +504,12 @@ export class Agent {
             }
             return '';
           }
-          // Item 2: Deteksi pemanggilan tool berulang dengan argumen yang identik berturut-turut
+
+          // Item 2 & Solusi 2: Deteksi pemanggilan tool berulang & siklus N-gram
           const sig = this.getCallSignature(call);
+          const isBatchDuplicate = batchSignatures.has(sig);
+          batchSignatures.add(sig);
+
           if (sig === this.lastCallSignature) {
             this.consecutiveRepeatCount += 1;
           } else {
@@ -486,20 +517,32 @@ export class Agent {
             this.lastCallSignature = sig;
           }
 
-          // Item 2: Jika perulangan identik masih dipanggil > 2 kali berturut-turut,
-          // paksa interupsi loop agen dan arahkan model untuk menyimpulkan/melanjutkan ke respons akhir.
-          if (this.consecutiveRepeatCount > 2 || this.seenRepeat(call)) {
+          // Cycle detection across steps (N-gram cycle detector)
+          const cycle = this.detectCycle(this.callHistory, sig);
+
+          // 1. Interupsi loop agen jika:
+          // - Pemanggilan berturut-turut > 2 kali (consecutive loop)
+          // - Terdeteksi siklus N-gram berulang > 2 kali (cycle loop)
+          // - Tool signature dipanggil ulang melebihi repeat cap (> LOOP_REPEAT_LIMIT)
+          if (
+            this.consecutiveRepeatCount > 2 ||
+            (cycle && cycle.count > 2) ||
+            (this.callCounts.get(sig) ?? 0) > LOOP_REPEAT_LIMIT
+          ) {
             if (tree.isTreeActive) {
               tree.finish('Dihentikan karena deteksi loop');
             }
+            const cycleInfo = (cycle && cycle.count > 2)
+              ? `siklus pemanggilan ${cycle.cycleLength} tool berulang ${cycle.count}×`
+              : `tool "${call.tool}" dengan argumen sama sudah dipanggil > ${LOOP_REPEAT_LIMIT}×`;
             return (
-              `[deteksi loop] tool "${call.tool}" dengan argumen sama sudah dipanggil ` +
-              `> ${LOOP_REPEAT_LIMIT}× — eksekusi dihentikan. Silakan simpulkan atau lanjutkan ke respons akhir berdasarkan data yang sudah ada di riwayat.`
+              `[deteksi loop] ${cycleInfo} — eksekusi dihentikan. Silakan simpulkan atau lanjutkan ke respons akhir berdasarkan data yang sudah ada di riwayat.`
             );
           }
 
-          // Item 2: Jika perintah terdeteksi identik berturut-turut, cegah eksekusi ulang I/O.
-          if (this.consecutiveRepeatCount === 2) {
+          // 2. Jika perintah terdeteksi identik berturut-turut atau duplikat dalam batch yang sama,
+          // cegah eksekusi ulang I/O dan kirim warning terstandarisasi.
+          if (this.consecutiveRepeatCount === 2 || isBatchDuplicate) {
             const warn = 'Perintah identik terdeteksi berulang, dilewati';
             tree.log(yellow(`⚠ ${warn}`));
             messages.push({
@@ -509,6 +552,27 @@ export class Agent {
               tool_call_id: toolCallId,
               name: call.tool,
             });
+            this.callHistory.push(sig);
+            continue;
+          }
+
+          // Solusi 3: In-turn idempotent tool cache.
+          // Jika tool read-only sudah pernah dijalankan pada turn ini dengan argumen identik
+          // dan tidak ada mutasi file sejak itu, gunakan hasil dari cache tanpa disk I/O ulang.
+          if (IDEMPOTENT_READ_TOOLS.has(call.tool) && turnToolCache.has(sig)) {
+            const cachedResult = turnToolCache.get(sig)!;
+            tree.beginAction();
+            tree.completeAction(`${describeToolCallForLog(call)} — cached`, 0);
+            this.ctx.addToolCall(call.tool, call as Record<string, unknown>);
+            this.ctx.addToolResult(call.tool, cachedResult);
+            messages.push({
+              role: 'tool',
+              content: cachedResult,
+              timestamp: new Date().toISOString(),
+              tool_call_id: toolCallId,
+              name: call.tool,
+            });
+            this.callHistory.push(sig);
             continue;
           }
 
@@ -547,6 +611,11 @@ export class Agent {
             }
             return '';
           }
+          if (IDEMPOTENT_READ_TOOLS.has(call.tool)) {
+            turnToolCache.set(sig, result);
+          } else if (MUTATING_TOOLS.has(call.tool) || call.tool === 'exec') {
+            turnToolCache.clear();
+          }
           this.ctx.addToolCall(call.tool, call as Record<string, unknown>);
           this.ctx.addToolResult(call.tool, result);
           messages.push({
@@ -556,6 +625,10 @@ export class Agent {
             tool_call_id: toolCallId,
             name: call.tool,
           });
+          this.callHistory.push(sig);
+          if (this.callHistory.length > 100) {
+            this.callHistory.shift();
+          }
         }
       }
 
@@ -600,6 +673,39 @@ export class Agent {
     const n = (this.callCounts.get(sig) ?? 0) + 1;
     this.callCounts.set(sig, n);
     return n > LOOP_REPEAT_LIMIT;
+  }
+
+  /**
+   * Detects if appending `nextSig` creates a repeating cycle of length k (where 2 <= k <= 25)
+   * that has occurred at least twice consecutively in execution history.
+   */
+  private detectCycle(history: string[], nextSig: string): { cycleLength: number; count: number } | null {
+    const seq = [...history, nextSig];
+    const maxK = Math.min(25, Math.floor(seq.length / 2));
+    for (let k = 2; k <= maxK; k++) {
+      const pattern = seq.slice(-k);
+      let count = 1;
+      let pos = seq.length - 2 * k;
+      while (pos >= 0) {
+        let match = true;
+        for (let i = 0; i < k; i++) {
+          if (seq[pos + i] !== pattern[i]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          count++;
+          pos -= k;
+        } else {
+          break;
+        }
+      }
+      if (count >= 2) {
+        return { cycleLength: k, count };
+      }
+    }
+    return null;
   }
 }
 

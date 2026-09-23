@@ -62,18 +62,26 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Kontribusi: Comprehensive QA & Code Audit Remediation — Perbaikan stateful global RegExp lastIndex skip pada `codeSearchTool`, mitigasi path traversal & arbitrary file deletion/overwrite snapshot metadata `/undo` dengan validasi workspace sandboxing (`validateSnapshotPath`), restorasi persistensi `maxOutputTokens` & `provider` pada `sanitizeConfigFile` serta parsing multiplier `k`/`m` di `/config`, resolusi glitch visual responsive divider/approval header serta implementasi stateful `TerminalMarkdownFormatter` untuk streaming code blocks di `LineGate`, perbaikan seleksi menu "/" pada ambient mode di TUI, sanitasi quote stripping pada kredensial URL `OpenAiCompatibleProvider` & wizard, dan penambahan rangkaian unit test verifikasi (`audit_fixes.test.ts`).
 - Tanggal: 2026-09-17
 
-## Claude Opus 4.6
-- Kontribusi: Audit keamanan pre-publish & inisiasi implementasi hardening
+## Claude (Anthropic)
+- Kontribusi: Review dan cross-checking sesi pengembangan, prompt engineering, audit keamanan, strategi proyek
 - Tanggal: 2026-09-12
+- Kontribusi: Redesain arsitektur layout UI/TUI, perataan visual WorkflowTree & status panel responsif, spacing polish, dan mitigasi text-wrapping pada terminal layar sempit
+- Tanggal: 2026-09-23
+
+## DeepSeek (DeepSeek AI)
+- Kontribusi: Parser streaming tool protocol DSML & XML `<tool>`, ekstraksi token streaming penalaran `<thought>`, usulan format durasi tool sebaris (*inline duration* `(11ms)`), dan perancangan kotak penalaran berbingkai (*framed reasoning box* `┌─ Reasoning ──` open-ended ala Hermes CLI)
+- Tanggal: 2026-09-23
 
 ## Gemini (Google DeepMind)
 - Kontribusi: Implementasi Roadmap #1 (tool glob & code_search dengan deteksi biner), integrasi tool protocol, 22 unit test baru (v0.9.0)
 - Tanggal: 2026-09-12
 - Kontribusi: Subsistem Process Management (start_process, read_process_logs, get_status, stop_process), in-flight ESC cancel, pencarian lintas sesi (search_sessions, /search), dan siklus penuh skills system (delete_skill)
 - Tanggal: 2026-09-13
+- Kontribusi: Release v1.7.7 — Implementasi Smart Path Truncation (`truncatePath`) dengan relative path normalization & middle truncation, prioritas resolusi kolom terminal `process.env.COLUMNS` pada `terminalWidth()`, konsolidasi komprehensif `/context` vs `/ctx`, mitigasi pemulihan terminal raw mode pasca-SIGKILL (`reset`, `stty sane`, `tput cnorm`), arsitektur tri-layer anti-loop deduplication & $N$-gram cycle detection (Solusi 3-1-2: In-turn idempotent cache, stream-level deduplication, batch & cycle detector), ekspansi test suite hingga 800 passing tests (100% pass), serta sinkronisasi versi rilis v1.7.7
+- Tanggal: 2026-09-23
 
-## Claude (Anthropic)
-- Kontribusi: Review dan cross-checking sesi pengembangan, prompt engineering, audit keamanan, strategi proyek
+## Claude Opus 4.6
+- Kontribusi: Audit keamanan pre-publish & inisiasi implementasi hardening
 - Tanggal: 2026-09-12
 
 ## Chat AI (Deep Flow)
@@ -85,5 +93,5 @@ AI tools listed here assisted with development. Their inclusion does not imply e
 - Tanggal: 2026-09-13
 
 ## GLM 5.3 Flash
-- Kontribusi: Testing tools & feedback pengembang>
+- Kontribusi: Testing tools & feedback pengembang
 - Tanggal: 2026-09-13

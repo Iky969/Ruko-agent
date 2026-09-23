@@ -2,6 +2,66 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### v1.7.7 (23 September 2026) — UI Revamp (Inline Duration, Framed Reasoning, Smart Path Truncation), Anti-Loop Tri-Layer Engine (Cache, Stream Dedup, N-Gram Cycle Detector), Tugas P2, & Versi Release v1.7.7
+
+#### Ditambahkan & Diperbarui
+- **TUGAS 8: Prioritas Resolusi Kolom Terminal pada `terminalWidth()` (`src/core/ui.ts`)**:
+  * Mengubah evaluasi lebar kolom terminal agar `process.env.COLUMNS` (jika berupa angka positif valid) diutamakan dibandingkan `process.stdout.columns`:
+    `const cols = (Number.isFinite(envCols) && envCols > 0 ? envCols : undefined) ?? process.stdout.columns ?? 80;`
+  * Memungkinkan simulasi dan testing layar sempit (seperti lingkungan Termux Android `COLUMNS=40`) secara deterministik tanpa ter-override oleh nilai TTY stdout.
+- **TUGAS 9: Konsolidasi dan De-duplikasi Perintah `/context` vs `/ctx` (`src/agent/commands.ts`)**:
+  * Mengonsolidasikan `/context`, `/budget`, dan `/status` menjadi alias resmi dari perintah dashboard `/ctx`.
+  * Memanggil `/context` tanpa argumen kini menampilkan dashboard panel visual responsif lengkap (`Context Budget & Status Aktif`) dengan batas karakter aktif, estimasi token, max output token, dan persentase utilisasi.
+  * Memanggil `/context set <jumlah|50k>` mendelegasikan secara konsisten ke helper `applyContextLimit()` yang memvalidasi batas terhadap karakter aktif saat ini dan memperbarui konfigurasi.
+- **TUGAS 13: Mitigasi Kernel Signal SIGKILL & Panduan Pemulihan Terminal Raw Mode (`README.md`, `src/agent/commands.ts`, `src/index.ts`)**:
+  * Menambahkan section troubleshooting resmi di `README.md` ("Pemulihan Terminal Pasca Crash / SIGKILL") yang memandu penggunaan perintah shell `reset` atau `stty sane` serta `tput cnorm`.
+  * Menambahkan petunjuk pemulihan terminal pada ringkasan `/help` dan footer bantuan interaktif.
+  * Menambahkan panduan darurat langsung di `formatFatalError()` pada `src/index.ts`.
+- **Usulan Baru 1 & 3: Smart Path Truncation & Inline Tool Duration (`src/core/ui.ts`)**:
+  * Mengimplementasikan utility murni native `truncatePath(filePath, maxLen, options)`:
+    - *Relative Path First*: Selalu dinormalisasi relatif terhadap workspace root (`path.relative(cwd, filePath)`).
+    - *Middle Truncation*: Memotong direktori perantara menjadi `...` (`packages/.../auth.ts`) sambil mempertahankan folder pangkal dan nama file.
+    - *Narrow Terminal Fallback*: Jika lebar terminal < 45 kolom atau `isNarrow`, otomatis fallback menampilkan `path.basename` murni.
+  * Mengganti perataan durasi tool: menghapus spasi horizontal berlebih dan menyematkan durasi langsung di samping nama aksi/path dalam tanda kurung, misal `├── [1] 📖 Read src/core/ui.ts (11ms)`.
+  * Memastikan kalkulasi `maxPathLen` dinamis berdasarkan `terminalWidth() - overheadWidth` sehingga kurung durasi tidak pernah terputus ke baris baru.
+- **Usulan Baru 2: Framed Reasoning Box (`src/core/ui.ts`, `src/agent/agent.ts`)**:
+  * Mengimplementasikan `renderReasoningBox(reasoning, width)` dan `formatReasoningBox` bergaya Hermes CLI:
+    ```text
+    ┌─ Reasoning ─────────────────────────────────────────
+    │ <isi teks reasoning berwarna ANSI gray / dim \x1b[90m>
+    └─────────────────────────────────────────────────────
+    ```
+  * Menghilangkan penutup siku kanan yang kaku agar rendering tidak patah di layar ponsel sempit (Android Termux).
+  * Mengintegrasikan ke `ThinkingTicker.renderFramedReasoning()` dan `finishThinking` di `src/agent/agent.ts` yang otomatis aktif jika env `RUKO_SHOW_REASONING=1` atau `RUKO_REASONING=1`.
+- **Implementasi Solusi Anti-Loop (Urutan 3-1-2)**:
+  * **Solusi 3: In-Turn Idempotent Tool Cache (`src/agent/agent.ts`)**:
+    - Menambahkan `turnToolCache` dan `IDEMPOTENT_READ_TOOLS` (`read_file`, `glob`, `list_dir`, `code_search`, `read_logs`).
+    - Tool read-only yang dipanggil dengan argumen identik dalam turn yang sama langsung menggunakan hasil dari cache tanpa disk I/O ulang.
+    - Cache otomatis di-invalidasi bersih jika ada tool mutasi (`write_file`, `edit_file`, `patch_file`, `delete_file`, `exec`) dieksekusi.
+  * **Solusi 1: De-duplikasi Level Stream (`src/agent/llm.ts`)**:
+    - Pada `OpenAiCompatibleProvider.chat()`, memeriksa tool calls yang telah di-stream pada `full` via `parseToolCalls(full)` sebelum menambahkan sintesis blok `streamToolCalls`.
+    - Mencegah duplikasi tool blocks saat endpoint LLM mengirimkan baik `delta.content` (markdown/DSML tool block) maupun `delta.tool_calls`.
+  * **Solusi 2: Batch Deduplication & N-Gram Cycle Detection (`src/agent/agent.ts`)**:
+    - Menambahkan `batchSignatures` untuk mendeteksi pemanggilan tool duplikat dalam satu batch respons LLM yang sama, langsung melewati eksekusi kedua dengan warning terstandarisasi.
+    - Menambahkan sliding window history `callHistory` dan helper `detectCycle(history, nextSig)` untuk mendeteksi siklus urutan berulang ($k$-gram dari $k=2$ s/d $k=25$).
+    - Menginterupsi loop agen secara deterministik jika siklus multi-tool berulang > 2 kali dengan pesan pengarah konklusi `[deteksi loop]`.
+- **Rilis & Dokumentasi v1.7.7**:
+  * Bump versi package ke `1.7.7` di `package.json`, `package-lock.json`, `install.sh`, dan `README.md`.
+  * Memperbarui `CONTRIBUTORS.md` mendokumentasikan kontribusi model AI:
+    - **Claude (Anthropic)**: Redesain arsitektur layout UI/TUI, perataan visual WorkflowTree & status panel responsif, spacing polish, mitigasi wrapping layar sempit.
+    - **DeepSeek (DeepSeek AI)**: Parser streaming DSML & XML `<tool>`, ekstraksi token streaming `<thought>`, usulan format inline duration `(11ms)`, dan perancangan open-ended framed reasoning box (`┌─ Reasoning ──`).
+    - **Gemini (Google DeepMind)**: Smart path truncation (`truncatePath`), prioritas `COLUMNS` pada `terminalWidth()`, konsolidasi `/context` & `/ctx`, panduan pemulihan raw mode pasca-SIGKILL, tri-layer anti-loop (Solusi 3-1-2), dan ekspansi test suite hingga 800 passing tests.
+  * Memperbarui `src/tests/api_key_security.test.ts` untuk memverifikasi versi rilis v1.7.7.
+- **Rangkaian Pengujian Mandiri**:
+  * Menambahkan file pengujian baru:
+    - `src/tests/p2_and_smart_truncate.test.ts` (11 unit test).
+    - `src/tests/duplicate_tool_loop_fixes.test.ts` (5 unit test).
+  * Memperbarui ekspektasi format durasi di `src/tests/ui_revamp.test.ts`.
+  * Menjalankan seluruh test suite (`npm test`): **800 tests passing** (100% lulus, 0 fail).
+  * Typecheck (`npx tsc --noEmit`) dan build (`npm run build`) 100% bebas error.
+
+---
+
 ### Penutupan Penuh Audit P0 / md.md & Automasi CI/CD Pipeline (23 September 2026) — Tugas 11 & Gap Remediations
 
 #### Ditambahkan & Diperbarui

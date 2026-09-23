@@ -6,6 +6,8 @@
  * spinner, and a fence-aware streaming reveal filter.
  */
 
+import path from 'node:path';
+
 const ANSI_RE = /\u001b\[[0-9;]*[a-zA-Z]/g;
 
 /**
@@ -119,7 +121,7 @@ export function padVisible(text: string, width: number): string {
 /** Usable terminal width (fallback 80 when stdout is not a TTY). */
 export function terminalWidth(): number {
   const envCols = process.env.COLUMNS ? parseInt(process.env.COLUMNS, 10) : NaN;
-  const cols = process.stdout.columns ?? (Number.isFinite(envCols) && envCols > 0 ? envCols : undefined) ?? 80;
+  const cols = (Number.isFinite(envCols) && envCols > 0 ? envCols : undefined) ?? process.stdout.columns ?? 80;
   return Math.max(20, cols);
 }
 
@@ -635,14 +637,139 @@ const BRANCH_LABELS: Record<string, (arg: string) => string> = {
   subagent: (a) => `🟣 Subagent "${a}"`,
 };
 
+export interface TruncatePathOptions {
+  cwd?: string;
+  isNarrow?: boolean;
+  terminalCols?: number;
+}
+
+/**
+ * Smart path truncation utility:
+ *  - Relative Path First: normalized relative to cwd (workspace root).
+ *  - Middle Truncation: keeps root folder and filename, collapses middle to `...`
+ *    (e.g. `src/agent/subagent/tools/processManager.ts` -> `src/.../processManager.ts`).
+ *  - Narrow Terminal (< 45 cols / isNarrow): falls back to basename (`processManager.ts`),
+ *    with trailing truncate if still exceeding limit.
+ */
+export function truncatePath(filePath: string, maxLen: number, options?: TruncatePathOptions): string {
+  if (!filePath || maxLen <= 0) return '';
+  const cwd = options?.cwd ?? process.cwd();
+  let normalized = filePath.trim();
+
+  // Normalize path separators to forward slash
+  normalized = normalized.replace(/\\/g, '/');
+
+  // Relative path first: if path is inside cwd, normalize relative to cwd
+  if (path.isAbsolute(normalized)) {
+    const rel = path.relative(cwd, filePath).replace(/\\/g, '/');
+    if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+      normalized = rel;
+    }
+  }
+
+  if (normalized.startsWith('./')) {
+    normalized = normalized.slice(2);
+  }
+
+  const isNarrow = Boolean(
+    options?.isNarrow ||
+      (typeof options?.terminalCols === 'number' && options.terminalCols < 45),
+  );
+
+  // If path already fits and not in narrow mode, return as-is
+  if (normalized.length <= maxLen && !isNarrow) {
+    return normalized;
+  }
+
+  // Narrow fallback (< 45 cols / isNarrow): basename only
+  if (isNarrow) {
+    const base = path.posix.basename(normalized);
+    if (base.length <= maxLen) {
+      return base;
+    }
+    const ext = path.posix.extname(base);
+    if (ext && ext.length < maxLen - 4) {
+      const stem = base.slice(0, -ext.length);
+      const availStem = maxLen - ext.length - 3;
+      return `${stem.slice(0, Math.max(1, availStem))}...${ext}`;
+    }
+    return base.slice(0, Math.max(3, maxLen - 3)) + '...';
+  }
+
+  // Middle Truncation: root/.../file
+  const isAbs = normalized.startsWith('/');
+  const prefixSlash = isAbs ? '/' : '';
+  const parts = normalized.split('/').filter(Boolean);
+
+  if (parts.length >= 3) {
+    const root = prefixSlash + parts[0];
+    const file = parts[parts.length - 1];
+    const basic = `${root}/.../${file}`;
+    if (basic.length <= maxLen) {
+      // Try expanding intermediate folders if space permits
+      let leftIdx = 1;
+      let rightIdx = parts.length - 2;
+      let leftAcc = root;
+      let rightAcc = file;
+      while (leftIdx <= rightIdx) {
+        const nextRight = `${parts[rightIdx]}/${rightAcc}`;
+        const tryWithRight = `${leftAcc}/.../${nextRight}`;
+        if (tryWithRight.length <= maxLen && rightIdx > leftIdx) {
+          rightAcc = nextRight;
+          rightIdx--;
+          continue;
+        }
+        const nextLeft = `${leftAcc}/${parts[leftIdx]}`;
+        const tryWithLeft = `${nextLeft}/.../${rightAcc}`;
+        if (tryWithLeft.length <= maxLen) {
+          leftAcc = nextLeft;
+          leftIdx++;
+          continue;
+        }
+        break;
+      }
+      return `${leftAcc}/.../${rightAcc}`;
+    }
+
+    // basic root/.../file exceeds maxLen: fallback to basename
+    if (file.length <= maxLen) {
+      return file;
+    }
+    const ext = path.posix.extname(file);
+    if (ext && ext.length < maxLen - 4) {
+      const stem = file.slice(0, -ext.length);
+      const availStem = maxLen - ext.length - 3;
+      return `${stem.slice(0, Math.max(1, availStem))}...${ext}`;
+    }
+    return file.slice(0, Math.max(3, maxLen - 3)) + '...';
+  }
+
+  // parts.length === 2 (e.g. "src/file.ts")
+  if (parts.length === 2) {
+    const file = parts[1];
+    if (file.length <= maxLen) {
+      return file;
+    }
+  }
+
+  return normalized.slice(0, Math.max(3, maxLen - 3)) + '...';
+}
+
 /** Maps one captured tool line onto its `├── ` branch label. */
-function branchLabel(plain: string): string | null {
+function branchLabel(plain: string, maxPathLen?: number, isNarrow?: boolean): string | null {
   const withParens = /^(\S+)\s+([A-Za-z_][\w]*)\(([^)]*)\)\s*(.*)$/.exec(plain);
   if (withParens) {
     const toolName = withParens[2];
-    const arg = withParens[3].trim();
+    let arg = withParens[3].trim();
     const tail = withParens[4].trim();
-    const render = BRANCH_LABELS[toolName.toLowerCase()];
+
+    const lower = toolName.toLowerCase();
+    const isPathTool = ['read', 'readfile', 'read_file', 'edit', 'write', 'patch', 'delete', 'revert'].includes(lower);
+    if (isPathTool && arg && maxPathLen !== undefined) {
+      arg = truncatePath(arg, maxPathLen, { isNarrow });
+    }
+
+    const render = BRANCH_LABELS[lower];
     const head = render ? render(arg) : `🔧 ${toolName}(${arg})`;
     return tail ? `${head} ${tail}` : head;
   }
@@ -657,22 +784,51 @@ function branchLabel(plain: string): string | null {
 /**
  * Action-log history row (feedback §3): one branch per finished tool call.
  *
- *   ├── [1] 🔍 find PROGRESS.md · 12ms
- *   ├── [2] 🖥️ Bash(npm test) · 4.2s
+ *   ├── [1] 🔍 find PROGRESS.md (12ms)
+ *   ├── [2] 🖥️ Bash(npm test) (4.2s)
  *   ├── [3] 🟣 Subagent "read file halo.md"
  *
  * Returns `null` for lines that are not tool invocations.
  */
-export function formatActionLogLine(no: number, rawText: string, durationMs?: number): string | null {
+export function formatActionLogLine(no: number, rawText: string, durationMs?: number, maxCols?: number): string | null {
   const plain = stripAnsi(rawText).trim();
   if (!plain) return null;
-  const label = branchLabel(plain);
-  if (!label) return null;
+
+  const cols = maxCols ?? terminalWidth();
+  const isNarrow = cols < 45;
+
   const suffix =
     durationMs != null && Number.isFinite(durationMs) && durationMs >= 0
-      ? dim(` · ${formatDuration(durationMs)}`)
+      ? ` (${formatDuration(durationMs)})`
       : '';
-  return `${dim('├──')} ${cyan(`[${no}]`)} ${label}${suffix}`;
+
+  const prefix = `${dim('├──')} ${cyan(`[${no}]`)} `;
+  const prefixLen = visibleLength(prefix);
+  const suffixLen = visibleLength(suffix);
+
+  // Compute overhead width: prefix + tool badge + tail note + suffix
+  const match = /^(\S+)\s+([A-Za-z_][\w]*)\(([^)]*)\)\s*(.*)$/.exec(plain);
+  let overheadWidth = prefixLen + suffixLen + 8;
+  if (match) {
+    const toolName = match[2].toLowerCase();
+    const tailNote = match[4].trim();
+    const dummyHead = BRANCH_LABELS[toolName] ? BRANCH_LABELS[toolName]('') : `🔧 ${match[2]}()`;
+    overheadWidth = prefixLen + visibleLength(dummyHead) + (tailNote ? visibleLength(tailNote) + 1 : 0) + suffixLen;
+  }
+
+  const maxPathLen = Math.max(16, cols - overheadWidth);
+  const label = branchLabel(plain, maxPathLen, isNarrow);
+  if (!label) return null;
+
+  let finalLabel = label;
+  const availForLabel = cols - prefixLen - suffixLen;
+  if (visibleLength(finalLabel) > availForLabel) {
+    const maxLen = Math.max(8, availForLabel);
+    finalLabel = truncateVisible(finalLabel, maxLen - 1) + '…';
+  }
+
+  const coloredSuffix = suffix ? dim(suffix) : '';
+  return `${prefix}${finalLabel}${coloredSuffix}`;
 }
 
 /** First non-empty string value among `keys` (structural ToolCall accessor). */
@@ -1137,7 +1293,75 @@ export class ThinkingTicker {
   getBuffered(): string {
     return this.buffered;
   }
+
+  renderFramedReasoning(width?: number): string {
+    return renderReasoningBox(this.buffered, width);
+  }
 }
+
+/**
+ * Bungkus blok reasoning/thinking dengan frame pembatas garis tipis (ala Hermes CLI):
+ *
+ * ┌─ Reasoning ─────────────────────────────────────────
+ * │ <isi teks reasoning berwarna ANSI gray / dim \x1b[90m>
+ * └─────────────────────────────────────────────────────
+ *
+ * Panjang garis horizontal atas (`┌─ Reasoning ───`) dibuat responsif menyesuaikan
+ * process.stdout.columns / terminalWidth atau dipotong rapi tanpa penutup kanan kaku
+ * agar tidak patah di layar ponsel.
+ */
+export function renderReasoningBox(reasoning: string, width?: number): string {
+  const plain = reasoning.trim();
+  if (!plain) return '';
+
+  const cols = width ?? terminalWidth();
+  const prefix = '┌─ Reasoning ';
+  const prefixLen = visibleLength(prefix); // 13
+  const targetWidth = Math.max(prefixLen + 5, Math.min(cols, 80));
+  const topDashes = '─'.repeat(Math.max(3, targetWidth - prefixLen));
+  const bottomDashes = '─'.repeat(Math.max(prefixLen + 5, targetWidth - 1));
+
+  const topBorder = dim(`${prefix}${topDashes}`);
+  const bottomBorder = dim(`└${bottomDashes}`);
+
+  // Inside max width for wrapping
+  const maxInner = Math.max(10, cols - 3);
+
+  const lines = plain.split(/\r?\n/);
+  const framedLines: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trimEnd();
+    if (!trimmed) {
+      framedLines.push(dim('│'));
+      continue;
+    }
+
+    if (visibleLength(trimmed) <= maxInner) {
+      framedLines.push(`${dim('│')} ${dim(trimmed)}`);
+    } else {
+      const words = trimmed.split(' ');
+      let cur = '';
+      for (const w of words) {
+        if (!cur) {
+          cur = w;
+        } else if (visibleLength(cur + ' ' + w) <= maxInner) {
+          cur += ' ' + w;
+        } else {
+          framedLines.push(`${dim('│')} ${dim(cur)}`);
+          cur = w;
+        }
+      }
+      if (cur) {
+        framedLines.push(`${dim('│')} ${dim(cur)}`);
+      }
+    }
+  }
+
+  return [topBorder, ...framedLines, bottomBorder].join('\n');
+}
+
+export const formatReasoningBox = renderReasoningBox;
 
 /**
  * Options for ThoughtStreamParser.
@@ -1777,7 +2001,7 @@ export interface WorkflowTreeOptions {
  */
 export function formatCompactToolLog(no: number, text: string, durationMs?: number): string | null {
   const plain = stripAnsi(text).trim();
-  const suffix = durationMs != null ? ` · ${formatDuration(durationMs)}` : '';
+  const suffix = durationMs != null ? ` (${formatDuration(durationMs)})` : '';
   
   const editMatch = plain.match(/^(?:🟢|🟡)\s*(?:Edit|Write|Patch)\(([^)]+)\)/i);
   if (editMatch) {
