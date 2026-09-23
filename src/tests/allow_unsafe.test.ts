@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isHighRiskDangerousCommand, detectRisk } from '../core/approval.js';
 import { DEFAULT_CONFIG } from '../types.js';
 
-const PROJECT_ROOT = join(import.meta.dirname, '..', '..');
+const PROJECT_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const CLI_PATH = join(PROJECT_ROOT, 'dist', 'index.js');
 
 function runCli(args: string[], env: Record<string, string> = {}): { stdout: string; stderr: string; code: number } {

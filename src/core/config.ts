@@ -57,6 +57,24 @@ export function isPrivateOrLocalHost(hostname: string): boolean {
 }
 
 /**
+ * Checks if a given URL or hostname string strictly matches a target domain or is a subdomain of it.
+ * Prevents CodeQL incomplete URL substring sanitization (e.g. matching attacker-anthropic.com or evil.com/anthropic.com).
+ */
+export function isHostnameOrSubdomain(urlString: string | null | undefined, targetDomain: string): boolean {
+  if (!urlString || !targetDomain) return false;
+  try {
+    const raw = urlString.trim().replace(/^["'`]+|["'`]+$/g, '');
+    if (!raw) return false;
+    const url = new URL(raw.includes('://') ? raw : `https://${raw}`);
+    const host = url.hostname.toLowerCase();
+    const target = targetDomain.toLowerCase();
+    return host === target || host.endsWith(`.${target}`);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Masks API key patterns for secure logging/display.
  * Shows first 3 chars and last 4 chars, masks middle.
  */
@@ -68,7 +86,11 @@ export function redactApiKey(text: string | null | undefined): string {
   if (text.startsWith('sk-') || text.startsWith('key-') || /^[A-Za-z0-9\-_]{20,}$/.test(text)) {
     return `${text.substring(0, 3)}***${text.slice(-4)}`;
   }
-  return text;
+
+  // Redact inline keys inside messages or stack traces
+  return text
+    .replace(/\b(sk-[A-Za-z0-9_-]{6,})\b/g, (m) => `${m.substring(0, 3)}***${m.slice(-4)}`)
+    .replace(/\b(key-[A-Za-z0-9_-]{6,})\b/g, (m) => `${m.substring(0, 3)}***${m.slice(-4)}`);
 }
 
 /**

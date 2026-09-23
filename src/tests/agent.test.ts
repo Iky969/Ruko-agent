@@ -33,7 +33,7 @@ async function captureStdout<T>(fn: () => Promise<T>): Promise<{ result: T; out:
     ...args: any[]
   ) => {
     out += typeof s === 'string' ? s : s?.toString() ?? '';
-    return (original as any)(s, ...args);
+    return true;
   };
   try {
     const result = await fn();

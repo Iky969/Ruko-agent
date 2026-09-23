@@ -45,10 +45,11 @@ test('Finding 2: validateSnapshotPath blocks traversal and sensitive paths', () 
 
 test('Finding 2: undoLast rejects restoring a snapshot pointing outside workspace', () => {
   const ws = mkdtempSync(join(tmpdir(), 'ruko-undo-ws-'));
+  const outsideDir = mkdtempSync(join(tmpdir(), 'ruko-test-outside-'));
   const undoDir = join(ws, '.ruko', 'undo');
   try {
     // Manually forge or simulate a snapshot with outside path
-    const outsideFile = join(tmpdir(), 'outside.txt');
+    const outsideFile = join(outsideDir, 'outside.txt');
     const snapshot = takeSnapshot(outsideFile, undoDir);
     assert.ok(snapshot);
 
@@ -57,6 +58,7 @@ test('Finding 2: undoLast rejects restoring a snapshot pointing outside workspac
     }, /di luar workspace/);
   } finally {
     rmSync(ws, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
   }
 });
 

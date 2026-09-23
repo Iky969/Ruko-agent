@@ -52,12 +52,24 @@
     - **DeepSeek (DeepSeek AI)**: Parser streaming DSML & XML `<tool>`, ekstraksi token streaming `<thought>`, usulan format inline duration `(11ms)`, dan perancangan open-ended framed reasoning box (`┌─ Reasoning ──`).
     - **Gemini (Google DeepMind)**: Smart path truncation (`truncatePath`), prioritas `COLUMNS` pada `terminalWidth()`, konsolidasi `/context` & `/ctx`, panduan pemulihan raw mode pasca-SIGKILL, tri-layer anti-loop (Solusi 3-1-2), dan ekspansi test suite hingga 800 passing tests.
   * Memperbarui `src/tests/api_key_security.test.ts` untuk memverifikasi versi rilis v1.7.7.
-- **Rangkaian Pengujian Mandiri**:
-  * Menambahkan file pengujian baru:
-    - `src/tests/p2_and_smart_truncate.test.ts` (11 unit test).
-    - `src/tests/duplicate_tool_loop_fixes.test.ts` (5 unit test).
-  * Memperbarui ekspektasi format durasi di `src/tests/ui_revamp.test.ts`.
-  * Menjalankan seluruh test suite (`npm test`): **800 tests passing** (100% lulus, 0 fail).
+- **CI Test Runner IPC, Concurrency Hardening, & CodeQL Static Analysis Remediation (23 September 2026)**:
+  * **Resolusi Crash Deserialisasi Node Test Runner Worker (`src/tests/agent.test.ts`, `src/tests/pseudo_tool_parser.test.ts`)**:
+    - Memperbaiki `captureStdout` agar tidak me-relay teks mentah berisi ANSI escape code dan carriage returns (`\r\x1b[2K`) ke `process.stdout.write`.
+    - Mengeliminasi error V8 low-level deserialization: `Unable to deserialize cloned data due to invalid or unsupported version` pada runner socket worker thread Node 18 & 20 di GitHub Actions CI.
+  * **Isolasi Undo Snapshot & Verifikasi Laporan Rollback Subagent (`src/tests/feedback_v177.test.ts`)**:
+    - Mengisolasi `process.env.RUKO_UNDO_DIR` ke direktori sementara per test untuk mencegah tabrakan snapshot saat pengujian berjalan paralel secara bersamaan.
+    - Menambahkan pengujian deterministik untuk kedua kondisi timeout: saat tidak ada file yang termodifikasi (`Tidak ada file yang termodifikasi`) dan saat file termodifikasi (`file termodifikasi`, `Opsi rollback:`, `/undo`).
+    - Mengganti seluruh pembentukan direktori temporary berbasis `Date.now()` di `os.tmpdir()` menjadi `mkdtempSync(join(tmpdir(), 'ruko-test-search-'))` untuk keamanan pembuatan berkas sementara.
+  * **Penanganan Timeout `executeExternalTool` (`src/agent/external-tools.ts`)**:
+    - Menangani event `ETIMEDOUT` dari child process spawn serta mempertahankan status `timedOut: true` saat timer batas waktu terpicu.
+  * **Pembersihan Tuntas Seluruh Peringatan & Vulnerability CodeQL**:
+    - *Double Escaping/Unescaping* (`src/agent/webtools.ts`): Mengimplementasikan decoder entitas HTML single-pass regex menggunakan tabel hash `HTML_ENTITIES` sehingga tidak ada decoding bertingkat (`&amp;lt;` -> `&lt;` -> `<`).
+    - *Clear-Text Logging of Sensitive Information* (`src/index.ts`): Menghilangkan interpolasi variabel `keyFile` (yang bersumber dari `parsed.apiKey`) pada `console.error` saat gagal membaca file kunci API.
+    - *Useless Conditional* (`src/core/wizard.ts`): Menghapus evaluasi redundan `!baseUrl` yang selalu bernilai `false` pasca-guard clause.
+    - *Unused Imports*: Menghapus import `redactApiKey` di `src/agent/commands.ts` serta `unlinkSync` di `src/tests/api_key_security.test.ts` dan `src/tests/dotenv.test.ts`.
+  * **Verifikasi Komprehensif Multi-Environment**:
+    - Node 18.x dan Node 20.x: 100% tests lulus tanpa kegagalan (`npm test`, `npm run test:e2e`).
+    - TypeScript compilation & typecheck: 100% clean (`npm run typecheck`).
   * Typecheck (`npx tsc --noEmit`) dan build (`npm run build`) 100% bebas error.
 
 ---

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdirSync, symlinkSync, writeFileSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, symlinkSync, writeFileSync, rmSync, statSync, mkdtempSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import os from 'node:os';
@@ -19,8 +19,7 @@ import { takeSnapshot } from '../core/undo.js';
 import { inferStepDescription } from '../core/ui.js';
 
 test('start_process rejects chained commands, subshell, variable expansions, and blocked commands', async () => {
-  const ws = path.join(os.tmpdir(), `ruko-test-startproc-${Date.now()}`);
-  mkdirSync(ws, { recursive: true });
+  const ws = mkdtempSync(path.join(os.tmpdir(), 'ruko-test-startproc-'));
 
   try {
     // 1. Blocked command (fork bomb & rm -rf / in chain)
@@ -86,10 +85,8 @@ test('start_process rejects chained commands, subshell, variable expansions, and
 });
 
 test('assertInsideWorkspace blocks symlinked directories and non-existent files inside symlink directory', () => {
-  const ws = path.join(os.tmpdir(), `ruko-test-symdir-${Date.now()}`);
-  const outsideDir = path.join(os.tmpdir(), `outside-dir-${Date.now()}`);
-  mkdirSync(ws, { recursive: true });
-  mkdirSync(outsideDir, { recursive: true });
+  const ws = mkdtempSync(path.join(os.tmpdir(), 'ruko-test-symdir-'));
+  const outsideDir = mkdtempSync(path.join(os.tmpdir(), 'ruko-test-outsidedir-'));
 
   const outsideFile = path.join(outsideDir, 'secret.txt');
   writeFileSync(outsideFile, 'secret outside');
@@ -124,7 +121,7 @@ test('assertInsideWorkspace blocks symlinked directories and non-existent files 
 });
 
 test('assertNotSensitivePath detects symlinks pointing to sensitive files and .git/config', () => {
-  const ws = path.join(os.tmpdir(), `ruko-test-senssym-${Date.now()}`);
+  const ws = mkdtempSync(path.join(os.tmpdir(), 'ruko-test-senssym-'));
   mkdirSync(path.join(ws, '.ruko'), { recursive: true });
 
   const envFile = path.join(ws, '.env');
@@ -153,10 +150,8 @@ test('assertNotSensitivePath detects symlinks pointing to sensitive files and .g
 });
 
 test('file tools (read, write, edit, glob, code_search) resist symlink traversal and escapes', async () => {
-  const ws = path.join(os.tmpdir(), `ruko-test-filetools-${Date.now()}`);
-  const outsideDir = path.join(os.tmpdir(), `outside-data-${Date.now()}`);
-  mkdirSync(ws, { recursive: true });
-  mkdirSync(outsideDir, { recursive: true });
+  const ws = mkdtempSync(path.join(os.tmpdir(), 'ruko-test-filetools-'));
+  const outsideDir = mkdtempSync(path.join(os.tmpdir(), 'ruko-test-outsidedata-'));
 
   const outsideSecret = path.join(outsideDir, 'outside-secret.txt');
   writeFileSync(outsideSecret, 'SUPER_SECRET_TOKEN_XYZ_123');
@@ -292,8 +287,7 @@ test('webFetchTool detects redirect loops and exceeds limit', async () => {
 });
 
 test('skills system rejects path traversal in readSkill and deleteSkill', () => {
-  const ws = path.join(os.tmpdir(), `ruko-test-skills-${Date.now()}`);
-  mkdirSync(ws, { recursive: true });
+  const ws = mkdtempSync(path.join(os.tmpdir(), 'ruko-test-skills-'));
 
   try {
     // Normal save works
@@ -316,7 +310,7 @@ test('skills system rejects path traversal in readSkill and deleteSkill', () => 
 });
 
 test('session system rejects path traversal in loadSession and saveSession', () => {
-  const ws = path.join(os.tmpdir(), `ruko-test-sess-${Date.now()}`);
+  const ws = mkdtempSync(path.join(os.tmpdir(), 'ruko-test-sess-'));
   const sessDir = path.join(ws, '.ruko', 'sessions');
   mkdirSync(sessDir, { recursive: true });
 
@@ -470,8 +464,7 @@ test('subagent delegation recursion limit rejects nested delegate calls', async 
 });
 
 test('takeSnapshot sets mode 0600 on snapshot content and meta files', () => {
-  const ws = path.join(os.tmpdir(), `ruko-test-undo-${Date.now()}`);
-  mkdirSync(ws, { recursive: true });
+  const ws = mkdtempSync(path.join(os.tmpdir(), 'ruko-test-undo-'));
   const testFile = path.join(ws, 'test.txt');
   writeFileSync(testFile, 'initial content');
 

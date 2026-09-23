@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { execFileSync, execSync } from 'node:child_process';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Tests for Tugas 10: Global error handling hardening.
@@ -13,7 +14,7 @@ import { join } from 'node:path';
  * - emergencyCleanup does not throw on non-TTY
  */
 
-const PROJECT_ROOT = join(import.meta.dirname, '..', '..');
+const PROJECT_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const CLI_JS = join(PROJECT_ROOT, 'dist', 'index.js');
 
 function runCli(args: string[], env: Record<string, string> = {}): { stdout: string; stderr: string; code: number } {

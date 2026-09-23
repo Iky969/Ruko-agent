@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { Confirmer, guardedExecute } from '../core/approval.js';
 import { join, relative as relativeFromCwd, resolve as resolvePath } from 'node:path';
 import { Context } from '../core/context.js';
-import { isPrivateOrLocalHost, saveConfig } from '../core/config.js';
+import { isHostnameOrSubdomain, isPrivateOrLocalHost, saveConfig } from '../core/config.js';
 import { execute } from '../core/executor.js';
 import { promptSetup, SetupResult } from '../core/wizard.js';
 import { bold, cyan, dim, formatDuration, formatK, green, renderBox, red, terminalWidth, visibleLength, yellow } from '../core/ui.js';
@@ -1081,9 +1081,9 @@ async function runSetupFlow(env: CommandEnv): Promise<void> {
     const ml = r.model.toLowerCase();
     let pType: string | undefined = r.provider;
     if (!pType) {
-      if (rb.includes('anthropic.com') || ml.startsWith('claude-')) {
+      if (isHostnameOrSubdomain(rb, 'anthropic.com') || ml.startsWith('claude-')) {
         pType = 'anthropic';
-      } else if (rb.includes('googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
+      } else if (isHostnameOrSubdomain(rb, 'googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
         pType = 'gemini';
       } else {
         pType = 'openai-compatible';
@@ -1102,9 +1102,9 @@ async function runSetupFlow(env: CommandEnv): Promise<void> {
   if (!providerType) {
     const rawBase = result.baseUrl.toLowerCase();
     const modelLower = result.model.toLowerCase();
-    if (rawBase.includes('anthropic.com') || modelLower.startsWith('claude-')) {
+    if (isHostnameOrSubdomain(rawBase, 'anthropic.com') || modelLower.startsWith('claude-')) {
       providerType = 'anthropic';
-    } else if (rawBase.includes('googleapis.com') || (!rawBase && modelLower.startsWith('gemini-'))) {
+    } else if (isHostnameOrSubdomain(rawBase, 'googleapis.com') || (!rawBase && modelLower.startsWith('gemini-'))) {
       providerType = 'gemini';
     } else {
       providerType = 'openai-compatible';

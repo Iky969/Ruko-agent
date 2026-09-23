@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline/promises';
 import { Agent } from './agent/agent.js';
 import { createProvider } from './agent/llm.js';
 import { Confirmer, guardedExecute, isHighRiskDangerousCommand } from './core/approval.js';
-import { defaultConfigPath, loadResolvedConfig, saveConfig } from './core/config.js';
+import { defaultConfigPath, loadResolvedConfig, redactApiKey, saveConfig } from './core/config.js';
 import { Context } from './core/context.js';
 import { SystemLoop } from './core/loop.js';
 import { summarizeLog } from './core/summarizer.js';
@@ -428,14 +428,14 @@ async function main(): Promise<void> {
       try {
         config.apiKey = readFileSync(keyFile, 'utf8').trim();
       } catch (e) {
-        console.error(red(`Error membaca file API key "${keyFile}": ${(e as Error).message}`));
+        console.error(red(`Error membaca file API key: ${redactApiKey((e as Error).message)}`));
         process.exit(1);
       }
     } else if (parsed.apiKey === '-') {
       try {
         config.apiKey = readFileSync(0, 'utf8').trim();
       } catch (e) {
-        console.error(red(`Error membaca API key dari stdin: ${(e as Error).message}`));
+        console.error(red(`Error membaca API key dari stdin: ${redactApiKey((e as Error).message)}`));
         process.exit(1);
       }
     } else {
@@ -613,11 +613,12 @@ function emergencyCleanup(): void {
  * and a diagnostic reference for troubleshooting.
  */
 function formatFatalError(label: string, err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err);
+  const rawMsg = err instanceof Error ? err.message : String(err);
+  const msg = redactApiKey(rawMsg);
   const lines: string[] = [`${label}: ${msg}`];
 
   if (isDebugMode() && err instanceof Error && err.stack) {
-    lines.push(err.stack);
+    lines.push(redactApiKey(err.stack));
   }
 
   // Diagnostic identifier — unique per crash for easier log correlation
