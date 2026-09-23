@@ -152,6 +152,7 @@ export function resolveProfileCredentials(
   if (profile.model) out.model = profile.model;
   if (profile.provider) out.provider = profile.provider;
   const envKey = profile.apiKeyEnv ? env[profile.apiKeyEnv] : undefined;
+  // If apiKeyEnv is set and available in env, it takes priority over the literal apiKey.
   const key = (envKey || profile.apiKey || '').trim();
   if (key) out.apiKey = key;
   return out;

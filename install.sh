@@ -3,9 +3,23 @@ set -e
 
 REPO="https://github.com/Iky969/Ruko-agent.git"
 INSTALL_DIR="$HOME/.ruko-agent"
-TAG="${RUKO_VERSION:-main}"
+TAG="${RUKO_VERSION:-v1.7.6}"
+
+# Parse args
+FORCE=0
+for arg in "$@"; do
+  if [ "$arg" = "--force" ]; then
+    FORCE=1
+  fi
+done
 
 echo "== Ruko Agent Installer =="
+
+# Path validation
+if [[ "$INSTALL_DIR" == *".."* ]] || [[ "$INSTALL_DIR" != "$HOME"* ]]; then
+  echo "Error: Invalid INSTALL_DIR path: $INSTALL_DIR"
+  exit 1
+fi
 
 # 1. Cek Node.js
 if ! command -v node >/dev/null 2>&1; then
@@ -25,29 +39,68 @@ if ! command -v git >/dev/null 2>&1; then
   exit 1
 fi
 
+if [ "$FORCE" -eq 1 ]; then
+  echo "Force flag detected, removing existing installation..."
+  rm -rf "$INSTALL_DIR"
+fi
+
+TEMP_DIR=$(mktemp -d)
+BACKUP_DIR=""
+
+if [ -d "$INSTALL_DIR" ]; then
+  TIMESTAMP=$(date +%s)
+  BACKUP_DIR="${INSTALL_DIR}.bak.${TIMESTAMP}"
+  echo "Existing installation found. Backing up to $BACKUP_DIR"
+  mv "$INSTALL_DIR" "$BACKUP_DIR"
+fi
+
+cleanup() {
+  local exit_code=$?
+  if [ $exit_code -ne 0 ]; then
+    echo "Installation failed!"
+    if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
+      echo "Rolling back to previous installation..."
+      rm -rf "$INSTALL_DIR"
+      mv "$BACKUP_DIR" "$INSTALL_DIR"
+    fi
+  fi
+  rm -rf "$TEMP_DIR" 2>/dev/null || true
+  exit $exit_code
+}
+
+trap cleanup EXIT
+
 echo "Mengambil kode Ruko ($TAG)..."
-rm -rf "$INSTALL_DIR"
-git clone --depth 1 --branch "$TAG" "$REPO" "$INSTALL_DIR"
+if [ -n "$RUKO_COMMIT_SHA" ]; then
+  git clone "$REPO" "$TEMP_DIR"
+  (
+    cd "$TEMP_DIR"
+    git checkout "$RUKO_COMMIT_SHA"
+  )
+else
+  git clone --depth 1 --branch "$TAG" "$REPO" "$TEMP_DIR"
+fi
 
-cd "$INSTALL_DIR"
-echo "Memasang dependensi pembangunan..."
-npm install
+(
+  cd "$TEMP_DIR"
+  echo "Memasang dependensi pembangunan..."
+  npm ci
 
-echo "Membangun distribusi (TypeScript -> ESM)..."
-npm run build
+  echo "Membangun distribusi (TypeScript -> ESM)..."
+  npm run build
+)
 
-echo "Memasang perintah global 'ruko'..."
-npm install -g .
+# Move from temp to actual install dir
+mv "$TEMP_DIR" "$INSTALL_DIR"
 
-echo ""
-echo "Instalasi selesai!"
-echo "Masuk ke direktori proyek Anda lalu ketik: ruko"
+(
+  cd "$INSTALL_DIR"
+  # Pastikan dist index dan biner global diberi izin eksekusi
+  chmod +x dist/index.js 2>/dev/null || true
 
-# Pastikan dist index dan biner global diberi izin eksekusi
-chmod +x dist/index.js 2>/dev/null || true
-
-# Pasang secara global
-npm install -g .
+  echo "Memasang perintah global 'ruko'..."
+  npm install -g .
+)
 
 # Amankan izin biner global di Termux maupun Linux biasa
 if [ -n "$PREFIX" ] && [ -f "$PREFIX/bin/ruko" ]; then
@@ -55,3 +108,13 @@ if [ -n "$PREFIX" ] && [ -f "$PREFIX/bin/ruko" ]; then
 elif [ -f "/usr/local/bin/ruko" ]; then
   chmod +x "/usr/local/bin/ruko"
 fi
+
+trap - EXIT
+if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
+  echo "Cleaning up backup..."
+  rm -rf "$BACKUP_DIR"
+fi
+
+echo ""
+echo "Instalasi selesai!"
+echo "Masuk ke direktori proyek Anda lalu ketik: ruko"

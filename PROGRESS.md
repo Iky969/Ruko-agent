@@ -2,6 +2,62 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### Audit Keamanan, Supply Chain Hardening & Approval Gate Restructuring (23 September 2026) — Tugas 1, 2, 3, 4, 10
+
+#### Ditambahkan & Diperbarui
+- **TUGAS 1: Pengamanan dan Refactoring Installer (`install.sh`)**:
+  * Mengubah default tag release ke tag immutable `v1.7.6` (`TAG="${RUKO_VERSION:-v1.7.6}"`). Hanya beralih ke snapshot mutable bila `RUKO_VERSION` di-set eksplisit.
+  * Menambahkan dukungan verifikasi commit hash via `RUKO_COMMIT_SHA`.
+  * Menghilangkan penghapusan destruktif `rm -rf "$INSTALL_DIR"`. Menerapkan safe-upgrade: backup instalasi lama ke `$INSTALL_DIR.bak.<timestamp>`, git clone dan build di temporary directory terisolasi (`mktemp -d`), lalu atomic move ke target instalasi.
+  * Menambahkan mekanisme rollback otomatis: jika tahapan clone, `npm ci`, atau `npm run build` gagal, installer secara otomatis mengembalikan instalasi lama dari backup.
+  * Menambahkan flag `--force` untuk pembersihan instalasi sebelumnya tanpa backup.
+  * Mengganti `npm install` dengan `npm ci` untuk instalasi build yang deterministik dan terkunci sesuai `package-lock.json`.
+  * Menghapus duplikasi pemanggilan `npm install -g .` (kini dieksekusi tepat 1 kali).
+  * Validasi ketat path `$INSTALL_DIR` untuk mencegah path traversal (`..`) atau penghapusan di luar `$HOME`.
+
+- **TUGAS 2: Proteksi Secrets & API Key Argument (`src/index.ts`, `src/types.ts`, `src/core/config.ts`)**:
+  * Menambahkan security warning mencolok (kuning ANSI) di CLI saat flag `--api-key` digunakan, memperingatkan pengguna terkait risiko paparan di tabel proses sistem (`ps aux`) dan shell history.
+  * Mengimplementasikan utility `redactApiKey(text)` di `src/core/config.ts` untuk menyamarkan token/key (`sk-...`, `key-...`, atau string 20+ alfanumerik) menjadi `abc***xyz` agar kredensial tidak pernah bocor mentah di error log atau output diagnostik.
+  * Memastikan file konfigurasi `.ruko/config.json` selalu dibuat dan dijaga dengan mode permission `0600` (POSIX owner-only read/write).
+  * Menegaskan prioritas `apiKeyEnv` dibanding literal `apiKey` di `resolveProfileCredentials` (`src/types.ts`).
+  * Unit test di `src/tests/api_key_security.test.ts`.
+
+- **TUGAS 3: Hardening Approval Bypass & Pengamanan YOLO Mode (`src/index.ts`)**:
+  * Memisahkan bypass folder trust dari bypass command approval: `bypassTrust` kini HANYA dipicu oleh `--trust-folder` atau `RUKO_TRUST_FOLDER=1`. Flag `--yes` tidak lagi mem-bypass workspace trust secara otomatis.
+  * Menambahkan banner peringatan keamanan mencolok (*High Risk / Unsafe Mode Banner*) saat `--yes` atau `RUKO_YOLO_MODE=1` digunakan bersamaan dengan `--exec`.
+  * Mempertahankan penegakan pola `BLOCKED` meskipun `--yes` diaktifkan.
+  * Unit test di `src/tests/yolo_hardening.test.ts`.
+
+- **TUGAS 4: Rekonstruksi Approval Allowlist dari Substring ke Policy Terstruktur (`src/core/approval.ts`)**:
+  * Mengeliminasi kerentanan chaining bypass pada allowlist substring (`git status; rm -rf /`).
+  * Mengimplementasikan helper `containsShellOperators(cmd)` untuk mendeteksi operator shell (`;`, `&&`, `||`, `|`, `&`, `>`, `>>`, `<`, `$()`, backticks, newline).
+  * Mengimplementasikan `allSegmentsAllowlisted(cmd, allowlist)` yang membagi perintah berdasarkan seluruh operator shell dan memvalidasi setiap segmen secara independen ke allowlist.
+  * Jika terdapat operator shell dan salah satu segmen tidak terdaftar di allowlist, approval gate menolak bypass allowlist dan tetap meminta konfirmasi atau memblokir eksekusi.
+  * Mempertahankan invarian utama: pola `BLOCKED` (seperti `rm -rf /etc`, `mkfs`, `dd ke /dev/sd*`, fork bomb) tidak dapat pernah di-downgrade oleh allowlist.
+  * Unit test di `src/tests/allowlist_bypass.test.ts`.
+
+- **TUGAS 10: Penguatan Error Handling Global `uncaughtException` & `unhandledRejection` (`src/index.ts`)**:
+  * Menambahkan deteksi mode debug via `isDebugMode()` (`process.env.DEBUG` atau `process.env.RUKO_DEBUG`). Jika aktif, mencetak full stack trace ke stderr saat terjadi uncaught exception atau unhandled rejection.
+  * Menambahkan diagnostic identifier acak unik per crash (`RUKO-<TIMESTAMP>`) serta petunjuk pelaporan issue GitHub untuk mempercepat korelasi log dan troubleshooting pengguna.
+  * Menambahkan prosedur `emergencyCleanup()` sebelum `process.exit(1)` untuk mengembalikan terminal raw mode jika TTY sedang berada dalam raw mode, mencegah terminal pengguna hang/rusak setelah proses crash.
+  * Unit test di `src/tests/error_handling.test.ts`.
+
+- **Verifikasi Komprehensif Skenario Adversarial Approval-Gate (`src/tests/adversarial_revalidation.test.ts`)**:
+  * Menjalankan ulang 107 skenario adversarial komprehensif untuk memastikan refactor allowlist tidak melemahkan proteksi yang sudah ada:
+    - 48 skenario variasi `rm -rf` ke root, wildcards, direktori sistem/home kritis (`/etc`, `/bin`, `/usr`, `/lib`, `/boot`, `/sys`, `/proc`, `/var`, `/dev`, `/home`, `/root`, `~`, `$HOME`, dll.).
+    - Seluruh bentuk variasi flag (`-fr`, `-rfv`, `-r -f`, `-f -r`, `--recursive --force`, `--no-preserve-root`).
+    - Destructive non-rm patterns: `mkfs`, `mkfs.ext4`, `dd` ke disk fisik (`/dev/sd*`, `/dev/nvme*`), fork bomb (klasik & kustom nama fungsi), disk direct redirection (`> /dev/sda`).
+    - Obfuscation & bypass attempts: variable substitution (`DIR=/etc; rm -rf $DIR`), bash subshell quoting (`bash -c "rm -rf /etc"`), chaining (`&&`, `;`, `|`), backslash escape (`r\m -rf /etc`).
+    - Uji invarian: seluruh command kategori BLOCKED tetap BLOCKED meskipun allowlist berisi `rm`, `rm -rf`, `mkfs`, dsb.
+    - Uji penolakan chaining bypass pada allowlist dan retensi level DANGEROUS serta NONE pada command aman.
+
+- **Rangkaian Pengujian Mandiri**:
+  * Menambahkan 5 file test suite baru: `api_key_security.test.ts`, `yolo_hardening.test.ts`, `allowlist_bypass.test.ts`, `error_handling.test.ts`, dan `adversarial_revalidation.test.ts`.
+  * Total unit test meningkat drastis dari **622 tests** (baseline) menjadi **755 tests passing** (100% lulus, 0 fail).
+  * `npm run build` dan `npm run typecheck` 100% lulus tanpa galat.
+
+---
+
 ### v1.7.6 (23 September 2026) — Non-ASCII Corrupted Tool Tag Robustness, Active Context Budget (/ctx), TUI Activity Tray, Thinking Ticker, & Universal Glyphs
 
 #### Ditambahkan & Diperbarui

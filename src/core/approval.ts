@@ -288,6 +288,28 @@ export function extractAndResolveShellVariables(command: string): string {
   return resolvedCommand;
 }
 
+export function containsShellOperators(cmd: string): boolean {
+  return /;|&&|\|\||\||&|>>|>|<|\n|\$\(|`/.test(cmd);
+}
+
+export function allSegmentsAllowlisted(cmd: string, allowlist: string[]): boolean {
+  const segments = cmd.split(/;|&&|\|\||\||&|>>|>|<|\n|\$\(|\)|`/).map(s => s.trim()).filter(Boolean);
+  if (segments.length === 0) return false;
+  for (const seg of segments) {
+    let matched = false;
+    for (const allow of allowlist) {
+      if (!allow || !allow.trim()) continue;
+      const a = allow.trim();
+      if (seg === a || seg.startsWith(a + ' ')) {
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) return false;
+  }
+  return true;
+}
+
 /** Classifies a shell command. */
 export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
   const resolved = extractAndResolveShellVariables(command);
@@ -328,12 +350,19 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
   // BLOCKED can NEVER be bypassed by allowlist (hardline safety).
   // Only DANGEROUS commands can be downgraded to NONE via allowlist.
   if (worst.risk === 'dangerous') {
-    const trimmed = command.trim();
-    for (const allow of config.approvalAllowlist) {
-      if (!allow || !allow.trim()) continue; // skip empty strings (H2: prevent universal bypass)
-      const a = allow.trim();
-      if (trimmed === a || trimmed.startsWith(a + ' ')) {
+    // BLOCKED patterns can NEVER be downgraded by allowlist (checked above)
+    if (containsShellOperators(command)) {
+      if (allSegmentsAllowlisted(command, config.approvalAllowlist)) {
         return { risk: 'none', reason: null };
+      }
+    } else {
+      const trimmed = command.trim();
+      for (const allow of config.approvalAllowlist) {
+        if (!allow || !allow.trim()) continue; // skip empty strings (H2: prevent universal bypass)
+        const a = allow.trim();
+        if (trimmed === a || trimmed.startsWith(a + ' ')) {
+          return { risk: 'none', reason: null };
+        }
       }
     }
   }

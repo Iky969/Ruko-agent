@@ -391,12 +391,17 @@ async function main(): Promise<void> {
   if (parsed.model) config.model = parsed.model;
   if (parsed.provider) config.provider = parsed.provider;
   if (parsed.baseUrl) config.baseUrl = parsed.baseUrl;
-  if (parsed.apiKey) config.apiKey = parsed.apiKey;
+  if (parsed.apiKey) {
+    config.apiKey = parsed.apiKey;
+    console.warn(yellow(
+      '⚠ PERINGATAN KEAMANAN: Flag --api-key mengekspos kunci API di process table (ps aux) dan shell history.\n' +
+      '  Gunakan environment variable atau konfigurasi interaktif (ruko setup wizard) sebagai alternatif lebih aman.'
+    ));
+  }
 
   // Workspace / Folder trust verification
   const configPath = defaultConfigPath();
   const bypassTrust =
-    parsed.yes ||
     parsed.trustFolder ||
     process.env.RUKO_TRUST_FOLDER === '1' ||
     process.env.RUKO_TRUST_FOLDER === 'true';
@@ -417,7 +422,15 @@ async function main(): Promise<void> {
   // One-shot shell execution (through the approval gate)
   if (parsed.exec !== undefined) {
     const command = parsed.exec;
-    const confirm: Confirmer | null = parsed.yes
+    const isYolo = parsed.yes || process.env.RUKO_YOLO_MODE === '1' || process.env.RUKO_YOLO_MODE === 'true';
+    if (isYolo) {
+      console.log('┌─────────────────────────────────────────────┐');
+      console.log('│  ⚠ UNSAFE MODE: Persetujuan otomatis aktif  │');
+      console.log('│  Semua command akan dieksekusi tanpa konfirmasi. │');
+      console.log('└─────────────────────────────────────────────┘');
+      // Note: BLOCKED patterns are still enforced. Future work: add --allow-unsafe flag.
+    }
+    const confirm: Confirmer | null = isYolo
       ? async () => true
       : process.stdin.isTTY
         ? makeTtyConfirmer()
@@ -510,25 +523,64 @@ async function main(): Promise<void> {
   loop.start();
 }
 
+// ─────────────────────────────────────────────────────────────
+// Global Error Handling — hardened (Tugas 10)
+// ─────────────────────────────────────────────────────────────
+
+/** Returns true when debug output is enabled via environment. */
+function isDebugMode(): boolean {
+  return !!(process.env.DEBUG || process.env.RUKO_DEBUG);
+}
+
+/**
+ * Emergency cleanup before forced exit: restores terminal raw mode if TTY
+ * is currently in raw mode, preventing a broken terminal after a crash.
+ */
+function emergencyCleanup(): void {
+  try {
+    if (process.stdin.isTTY && process.stdin.isRaw) {
+      process.stdin.setRawMode(false);
+    }
+  } catch {
+    // Best-effort — cleanup itself must never throw
+  }
+}
+
+/**
+ * Formats a fatal error message with optional stack trace (when DEBUG is on)
+ * and a diagnostic reference for troubleshooting.
+ */
+function formatFatalError(label: string, err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  const lines: string[] = [`${label}: ${msg}`];
+
+  if (isDebugMode() && err instanceof Error && err.stack) {
+    lines.push(err.stack);
+  }
+
+  // Diagnostic identifier — unique per crash for easier log correlation
+  const diagId = `RUKO-${Date.now().toString(36).toUpperCase()}`;
+  lines.push('');
+  lines.push(`[${diagId}] Jika masalah berlanjut, jalankan ulang dengan RUKO_DEBUG=1 untuk detail lengkap,`);
+  lines.push(`  atau laporkan di: https://github.com/Iky969/Ruko-agent/issues`);
+
+  return lines.join('\n');
+}
+
 // Global resilience: prevent unhandled rejections from showing raw stack traces
 process.on('unhandledRejection', (reason) => {
-  const msg = reason instanceof Error ? reason.message : String(reason);
-  console.error(`Unhandled error: ${msg}`);
+  console.error(formatFatalError('Unhandled error', reason));
   // Don't exit immediately - let main catch handle it, but log cleanly
 });
 
 process.on('uncaughtException', (err) => {
-  console.error(`Fatal: ${err instanceof Error ? err.message : String(err)}`);
+  emergencyCleanup();
+  console.error(formatFatalError('Fatal', err));
   process.exit(1);
 });
 
 main().catch((err) => {
-  // Clean error without raw stack trace unless DEBUG is set
-  const msg = err instanceof Error ? err.message : String(err);
-  if (process.env.DEBUG || process.env.RUKO_DEBUG) {
-    console.error(`Fatal: ${msg}\n${err instanceof Error ? err.stack : ''}`);
-  } else {
-    console.error(`Fatal: ${msg}`);
-  }
+  emergencyCleanup();
+  console.error(formatFatalError('Fatal', err));
   process.exit(1);
 });
