@@ -1,7 +1,10 @@
 import { Confirmer, guardedExecute } from '../core/approval.js';
 import { Context } from '../core/context.js';
+import { ActivityTray } from '../core/activity.js';
 import {
-  createSpinner,
+  activityIconForTool,
+  activityLabelForTool,
+  describeToolCallForLog,
   formatDuration,
   formatTerminalMarkdown,
   green,
@@ -10,6 +13,7 @@ import {
   RevealFilter,
   stripThoughtBlocks,
   TerminalMarkdownFormatter,
+  ThinkingTicker,
   ThoughtStreamParser,
   WorkflowTree,
   yellow,
@@ -88,6 +92,14 @@ export class Agent {
   };
   /** Plan mode toggle — enforced at the tool layer, not just in the prompt. */
   planMode = false;
+  /**
+   * Live bottom activity tray (feedback §4). Shared with the REPL: the loop
+   * draws `activityTray.renderRows()` inside the editor's live region, and a
+   * subagent inherits its parent's tray so delegation is visible while it runs.
+   */
+  activityTray: ActivityTray = new ActivityTray();
+  /** Monotonic id source for tray activities (unique per depth). */
+  private activitySeq = 0;
   private callCounts = new Map<string, number>();
   /** Tracks the most recent executed tool call signature to guard against consecutive duplicates (§5). */
   private lastCallSignature: string | null = null;
@@ -242,10 +254,12 @@ export class Agent {
     this.lastUsage = usage;
 
     this.lastResponseStreamed = false;
+    // Branch action-log history (feedback §3/§4): each tool call is committed
+    // to scrollback exactly once, as `├── [n] …`, the moment it finishes.
     const tree = new WorkflowTree((line) => {
       process.stdout.write('\r\u001b[2K');
       console.log(line);
-    }, { compact: true });
+    }, { compact: true, branch: true });
 
     let emptyFollowUpSent = false;
     let actionNudgeSent = false;
@@ -275,34 +289,14 @@ export class Agent {
           return '';
         }
         usage.promptChars += messages.reduce((s, m) => s + m.content.length, 0);
-        const usePacman = this.config.funAnimations ?? (this.config.mode !== 'pro');
-        const spinner = createSpinner('Thinking', { pacman: usePacman });
+        const ticker = new ThinkingTicker();
         const mdFormatter = new TerminalMarkdownFormatter();
 
-        let bufferedThinking = '';
-        let thoughtStartTime = 0;
-        let thoughtTokenEstimate = 0;
-        let thinkingFinished = false;
-
-        const handleThoughtChunk = (chunk: string) => {
-          if (!chunk) return;
-          if (!thoughtStartTime) {
-            thoughtStartTime = Date.now();
-          }
-          bufferedThinking += chunk;
-          thoughtTokenEstimate += Math.max(1, Math.round(chunk.length / 4));
-          const elapsed = Date.now() - thoughtStartTime;
-          const status = `Thinking (${formatDuration(elapsed)} / ${thoughtTokenEstimate} token)...`;
-          spinner.update?.(status);
-        };
-
         const finishThinking = () => {
-          if (bufferedThinking.length > 0 && !thinkingFinished) {
-            thinkingFinished = true;
-            spinner.stop();
-            process.stdout.write('\r\u001b[2K');
-          } else {
-            spinner.stop();
+          if (ticker.isFinished()) return;
+          const summary = ticker.flush();
+          if (summary) {
+            console.log(summary);
           }
         };
 
@@ -318,7 +312,7 @@ export class Agent {
         const reveal = new RevealFilter((text) => gate.push(text));
         const thoughtParser = new ThoughtStreamParser({
           onText: (text) => reveal.feed(text),
-          onThought: (thoughtChunk) => handleThoughtChunk(thoughtChunk),
+          onThought: (thoughtChunk) => ticker.feed(thoughtChunk),
           onThoughtEnd: () => {
             finishThinking();
           },
@@ -327,7 +321,7 @@ export class Agent {
         try {
           raw = await this.llmProvider.chat(messages, {
             onToken: (token) => thoughtParser.feed(token),
-            onThought: (chunk) => handleThoughtChunk(chunk),
+            onThought: (chunk) => ticker.feed(chunk),
             signal,
             maxTokens: this.config.maxOutputTokens ?? 4096,
           });
@@ -347,24 +341,29 @@ export class Agent {
           thoughtParser.end();
           finishThinking();
           reveal.end();
-          spinner.stop();
         }
         usage.completionChars += raw.length;
         const { calls, malformedBlocks } = parseToolCalls(raw);
         // Final answers keep their trailing line; tool iterations drop the dangling
         // preamble that sat right before the hidden ```tool block (§2).
-        const iterStreamed = gate.finish(calls.length === 0);
+        const iterStreamed = gate.finish(calls.length === 0 && malformedBlocks.length === 0);
         finishThinking();
 
         if (malformedBlocks.length > 0 && calls.length === 0) {
+          if (process.env.DEBUG || process.env.RUKO_DEBUG) {
+            console.error(`[DEBUG] Malformed tool-call detected: ${malformedBlocks.join('; ')}`);
+          }
           messages.push({
             role: 'assistant',
             content: raw.trim(),
             timestamp: new Date().toISOString(),
           });
+          const isTagError = malformedBlocks.some((b) => /^[<＜]/.test(b.trim()));
           messages.push({
             role: 'tool',
-            content: '[FORMAT ERROR: Tool call JSON tidak valid. Periksa format JSON Anda — pastikan tidak ada trailing commas, semua string menggunakan double quotes, dan struktur JSON valid. Coba ulangi tool call dengan format yang benar.]',
+            content: isTagError
+              ? '[FORMAT ERROR: Tag tool-call tidak valid atau rusak (terdeteksi tag malformed / karakter non-ASCII di nama tag). Jangan gunakan tag mentah atau rusak. Gunakan format blok tool Markdown standar yang valid:\n```tool\n{"tool": "<nama_tool>", ...}\n```\nSilakan ulangi pemanggilan tool dengan format yang benar.]'
+              : '[FORMAT ERROR: Tool call JSON tidak valid. Periksa format JSON Anda — pastikan tidak ada trailing commas, semua string menggunakan double quotes, dan struktur JSON valid. Coba ulangi tool call dengan format yang benar.]',
             timestamp: new Date().toISOString(),
           });
           continue;
@@ -514,17 +513,32 @@ export class Agent {
           }
 
           const toolStart = Date.now();
-          const result = await runToolCall(call, {
-            confirm: this.confirm,
-            config: this.config,
-            onLog: (line) => tree.log(line),
-            planMode: this.planMode,
-            signal,
-            llmProvider: this.llmProvider,
-            workspaceRoot: this.workspaceRoot,
-            subagentDepth: this.subagentDepth,
+          // Feedback §4: the call is a live runner in the bottom tray while it
+          // runs, and becomes ONE `├── ` history line when it finishes.
+          tree.beginAction();
+          const activityId = `tool:${this.subagentDepth}:${++this.activitySeq}`;
+          this.activityTray.start(activityId, activityLabelForTool(call), {
+            icon: activityIconForTool(call),
+            group: 'tool',
           });
-          const toolElapsedMs = Date.now() - toolStart;
+          let result: string;
+          try {
+            result = await runToolCall(call, {
+              confirm: this.confirm,
+              config: this.config,
+              onLog: (line) => tree.log(line),
+              planMode: this.planMode,
+              signal,
+              llmProvider: this.llmProvider,
+              workspaceRoot: this.workspaceRoot,
+              subagentDepth: this.subagentDepth,
+              activityTray: this.activityTray,
+            });
+          } finally {
+            const toolElapsedMs = Date.now() - toolStart;
+            this.activityTray.finish(activityId);
+            tree.completeAction(describeToolCallForLog(call), toolElapsedMs);
+          }
           if (signal?.aborted) {
             if (tree.isTreeActive) {
               tree.finish('Dibatalkan oleh pengguna');

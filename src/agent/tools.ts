@@ -3,6 +3,7 @@ import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
 import { DEFAULT_TIMEOUT_MS } from '../core/executor.js';
 import { renderFileDiff, splitLines } from '../core/diff.js';
 import { revertFile, takeSnapshot } from '../core/undo.js';
+import type { ActivityTray } from '../core/activity.js';
 import { cyan, dim, green, magenta, red, yellow } from '../core/ui.js';
 import { codeSearchTool, globTool, listDirTool, readFileTool } from './filetools.js';
 import { appendMemory } from '../core/memory.js';
@@ -82,6 +83,7 @@ const DSML_INVOKE_RE = /<\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*invok
 const DSML_INVOKE_SELF_RE = /<\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*invoke\s+name=["']?([^"'>\s]+)["']?[^>]*\/>/gi;
 const DSML_PARAM_RE = /<\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*parameter\s+name=["']?([^"'>\s]+)["']?(?:\s+string=["']?(true|false)["']?)?[^>]*>([\s\S]*?)<\/\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*parameter\s*>/gi;
 const XML_TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
+export const MALFORMED_TOOL_TAG_RE = /[<＜]\s*([^\s>]+)\s+([^>]*?\b(?:name|tool|query|path|command|action)\s*=\s*(?:["'][^"']*["']|[^\s>]+)[^>]*?)(?:\/>|>([\s\S]*?)<\/\s*\1\s*>|>|$)/gi;
 
 export interface ParseToolCallsResult {
   calls: ToolCall[];
@@ -216,6 +218,18 @@ export function parseToolCalls(text: string): ParseToolCallsResult {
     }
   }
 
+  // 5. Corrupted or malformed tool-call tags (e.g. non-ASCII/Kanji in tag name: <認 name=code_search tool="code_search" .../>)
+  for (const match of text.matchAll(MALFORMED_TOOL_TAG_RE)) {
+    const rawTag = match[0].trim();
+    if (!rawTag) continue;
+    const tagName = match[1].trim().toLowerCase();
+    // Skip if it was already parsed as standard DSML or XML call
+    if (tagName.includes('dsml') || tagName === 'tool_call' || tagName === 'tool') {
+      continue;
+    }
+    malformedBlocks.push(rawTag);
+  }
+
   // Normalize parameters in all standard calls before returning
   const normalizedCalls = calls.map(c => {
     const norm = normalizeToolParams(c);
@@ -236,6 +250,7 @@ export function stripToolBlocks(text: string): string {
     .replace(XML_TOOL_CALL_RE, '')
     .replace(/<tool>\s*[\s\S]*?\s*<\/tool>/gi, '')
     .replace(/<tool>\s*[\s\S]*$/gi, '')
+    .replace(MALFORMED_TOOL_TAG_RE, '')
     .trim();
 }
 
@@ -269,6 +284,12 @@ export interface ToolDeps {
    * Delegation nesting depth to prevent infinite recursion / subagent bomb.
    */
   subagentDepth?: number;
+  /**
+   * Live bottom activity tray (feedback §4). Passed down so a delegated
+   * subagent reports its own running tools into the SAME tray instead of
+   * spawning a second, invisible one.
+   */
+  activityTray?: ActivityTray;
 }
 
 /** Tools refused while plan mode is active (read_file stays available). */
@@ -1981,6 +2002,19 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         2,
       );
     }
+    // ── Tool: delegate ─────────────────────────────────────────────────
+    // PENTING — Sifat Eksekusi Sekuensial:
+    // Tool delegate mengeksekusi SATU tool call per giliran secara SEKUENSIAL
+    // (bukan concurrent/paralel). Setiap delegate berjalan di konteks terisolasi
+    // sendiri dengan Context terpisah, namun TIDAK berjalan bersamaan dengan
+    // delegate lain maupun tool call lain dalam turn yang sama.
+    //
+    // Default timeout: 60 detik. Jika subagent timeout:
+    // - Sistem otomatis melaporkan file yang sempat termodifikasi
+    // - User dapat melakukan rollback via /undo
+    //
+    // Nesting limit: 1 level (subagent tidak boleh memanggil delegate lagi).
+    // ────────────────────────────────────────────────────────────────────
     case 'delegate': {
       if (deps.subagentDepth && deps.subagentDepth >= 1) {
         const msg = 'delegate ditolak: subagent tidak diizinkan memanggil delegate secara bertingkat (delegation recursion limit = 1).';
@@ -2009,6 +2043,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
             confirm: deps.confirm,
             onLog: deps.onLog,
             signal: deps.signal,
+            activityTray: deps.activityTray,
           },
           {
             planMode: deps.planMode,

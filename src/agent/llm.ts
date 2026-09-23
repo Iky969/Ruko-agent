@@ -267,6 +267,9 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     const sleep =
       this.retry.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     for (let attempt = 0; ; attempt += 1) {
+      if (init.signal?.aborted) {
+        throw init.signal.reason || new Error('Aborted');
+      }
       const response = await fetch(url, init);
       if (response.ok || attempt >= retries || !RETRYABLE_STATUSES.has(response.status)) {
         return response;
@@ -318,7 +321,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       return { ok: false, message: `Belum lengkap: ${missing.join(', ')} — jalankan /login.` };
     }
     try {
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+      const response = await this.requestWithRetry(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: this.authHeaders(),
         body: JSON.stringify({
@@ -629,6 +632,9 @@ export class AnthropicProvider implements LLMProvider {
     const sleep =
       this.retry.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     for (let attempt = 0; ; attempt += 1) {
+      if (init.signal?.aborted) {
+        throw init.signal.reason || new Error('Aborted');
+      }
       const response = await fetch(url, init);
       if (response.ok || attempt >= retries || !RETRYABLE_STATUSES.has(response.status)) {
         return response;
@@ -644,7 +650,7 @@ export class AnthropicProvider implements LLMProvider {
     }
     try {
       const url = this.buildEndpointUrl('/messages');
-      const response = await fetch(url, {
+      const response = await this.requestWithRetry(url, {
         method: 'POST',
         headers: this.authHeaders(),
         body: JSON.stringify({
@@ -891,6 +897,9 @@ export class GeminiProvider implements LLMProvider {
     const sleep =
       this.retry.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     for (let attempt = 0; ; attempt += 1) {
+      if (init.signal?.aborted) {
+        throw init.signal.reason || new Error('Aborted');
+      }
       const response = await fetch(url, init);
       if (response.ok || attempt >= retries || !RETRYABLE_STATUSES.has(response.status)) {
         return response;
@@ -906,7 +915,7 @@ export class GeminiProvider implements LLMProvider {
     }
     try {
       const url = this.buildEndpointUrl(`/models/${this.currentModel}:generateContent`);
-      const response = await fetch(url, {
+      const response = await this.requestWithRetry(url, {
         method: 'POST',
         headers: this.authHeaders(),
         body: JSON.stringify({

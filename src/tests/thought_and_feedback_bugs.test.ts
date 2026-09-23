@@ -599,11 +599,6 @@ test('/settings command displays unified dashboard and allows tuning context, ma
     logs.length = 0;
     await handleCommand('/settings approval yolo', env);
     assert.equal(config.approvalEnabled, false);
-
-    // 8. /settings anim
-    logs.length = 0;
-    await handleCommand('/settings anim off', env);
-    assert.equal(config.funAnimations, false);
   } finally {
     console.log = origLog;
   }

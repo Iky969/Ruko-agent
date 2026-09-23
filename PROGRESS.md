@@ -2,6 +2,76 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### v1.7.6 (23 September 2026) — Non-ASCII Corrupted Tool Tag Robustness, Active Context Budget (/ctx), TUI Activity Tray, Thinking Ticker, & Universal Glyphs
+
+#### Ditambahkan & Diperbarui
+- **Ketahanan Parser Tool-Call terhadap Karakter Rusak / Non-ASCII (`src/agent/tools.ts`, `src/core/ui.ts`, `src/agent/agent.ts`)**:
+  * *Deteksi Tag Rusak/Malformed (`MALFORMED_TOOL_TAG_RE`)*: Mendeteksi tag yang menyerupai format tool-call (diawali `<` atau `＜` dengan nama tag non-ASCII/CJK seperti `<認 name=code_search tool="code_search" .../>` atau atribut `name=`, `tool=`, `query=`, dll.) yang gagal diparse sebagai tool call valid. Dimasukkan ke `malformedBlocks` sebagai error format tool alih-alih teks biasa.
+  * *Perlindungan Streaming Terminal (`RevealFilter`)*: Menahan in-flight tag (`malformedPrefixHold`) dan membuang tag malformed tersebut selama streaming (baik chunk maupun token karakter demi karakter) sehingga tidak bocor sedikit pun ke layar pengguna.
+  * *Pembersihan Output Akhir (`stripToolBlocks`)*: Menghapus seluruh representasi tag malformed dari teks asisten akhir.
+  * *Penanganan Retry Terpisah (`src/agent/agent.ts`)*: Menahan preamble bocor via `gate.finish(calls.length === 0 && malformedBlocks.length === 0)`, mencatat debug log terpisah saat mode debug aktif, dan mengirimkan instruksi eksplisit kepada model completions untuk mengulangi tool call dalam format blok Markdown ```` ```tool ```` standar.
+- **Perintah Verifikasi Context & Token Budget Aktif (`/ctx`, `src/agent/commands.ts`)**:
+  * Menambahkan perintah `/ctx` beserta alias `/budget` dan `/status` tanpa argumen untuk menampilkan ringkasan visual status aktif: model aktif, limit context window aktif, token budget aktif, max output tokens (`maxOutputTokens`), dan persentase context terpakai.
+  * *Penataan Teks Responsif (Anti-Truncate)*: Baris teks di-wrap otomatis secara cerdas pada layar sempit (<= 60 kolom, seperti Termux) sehingga seluruh nilai numerik dan teks penting tidak terpotong oleh pembatas `renderBox`.
+  * Mengekspos properti `aliases` pada fungsi registri `listCommands()`.
+- **Rangkaian Pengujian Mandiri**:
+  * Menambahkan 7 unit test komprehensif di `src/tests/feedback_corrupted_tag_and_ctx.test.ts`.
+  * Seluruh **622 tests** lulus 100% tanpa regresi (`npm test`), dan `npm run typecheck` 100% bersih.
+
+---
+
+### TUI Stream Polish, Ephemeral Thinking Ticker, Universal Glyph, & 429 Backoff (22 September 2026)
+
+#### Ditambahkan & Diperbarui
+- **Ephemeral Thinking Ticker (`ThinkingTicker`, `src/core/ui.ts` & `src/agent/agent.ts`)**:
+  * Menggantikan log thinking berulang/nyampah dengan single-line dynamic in-place ticker: `• Thinking: <cuplikan>...` (dim/gray ANSI `\x1b[90m`), diperbarui via `\r\u001b[2K` dan auto-truncate mengikuti lebar terminal (`Math.max(10, cols - 2)`).
+  * Ticker aktif secara murni *on-demand* saat chunk reasoning (`<think>`, `<thought>`, payload `reasoning_content`) pertama kali diterima; tidak pernah mencetak line jika model tidak bernalar.
+  * Final flush: membersihkan baris dinamis dari layar dan mencetak **tepat satu** baris ringkasan permanen: `• Thought for <detik>s (<tokens> tokens)`.
+  * Menjamin teks penalaran internal tidak bocor ke output history biasa atau pesan akhir asisten.
+- **Pembersihan Total Pac-Man & Perintah `/anim` (`src/agent/commands.ts`, `src/core/ui.ts`)**:
+  * Menghapus perintah `/anim` dari registry perintah, autocomplete, dan helper menu (`/?`, `/help`, `/settings`).
+  * Menghilangkan animasi pacman dan hantu dari `createSpinner`, beralih ke dot spinner minimalis yang bersih.
+  * Menghapus seluruh test lama yang menargetkan `/anim` dan animasi pacman.
+- **Perbaikan Missing Glyph Termux (`buildStatusPanel`, `src/core/ui.ts`)**:
+  * Mengganti karakter icon yang ter-render kotak kosong (``) di font bawaan Android/Termux dengan simbol universal `⚡` (`⚡ ${shortModelName(input.model)}`).
+  * Memastikan 100% bebas dari karakter Private Use Area (NerdFont) U+E000..U+F8FF.
+- **Penanganan HTTP 429 Rate-Limit Exponential Backoff (`src/agent/llm.ts`)**:
+  * Menerapkan retry loop otomatis dengan exponential backoff sederhana (1s, 2s) pada `requestWithRetry` di seluruh provider (`OpenAiCompatibleProvider`, `AnthropicProvider`, `GeminiProvider`).
+  * Menghormati header `retry-after` jika disediakan, serta memeriksa `signal.aborted` di setiap jeda retry agar interupsi pengguna tetap responsif.
+- **Rangkaian Pengujian Mandiri**:
+  * Unit test komprehensif di `src/tests/feedback_v176.test.ts` untuk verifikasi ticker in-place, zero leak reasoning text, ketiadaan `/anim`, dot spinner bersih, universal glyph `⚡`, dan retry loop HTTP 429.
+  * Seluruh **587 tests** lulus 100% tanpa regresi (`npm test`), dan `npm run typecheck` 100% bersih.
+
+---
+
+### UI Revamp — Responsive Status Panel, Action Log `├──`, & Live Bottom Activity Tray (22 September 2026)
+
+#### Ditambahkan & Diperbarui
+- **Pemotongan Nama Model (`shortModelName`, `src/core/ui.ts`)**:
+  * Helper ringkas yang mengambil hanya nama inti keluarga model untuk panel status: `gemini-3.8-flash` → `gemini`, `claude-opus-3.7` → `claude`, `qwen3.8-flash` → `qwen`, `nvidia/nemotron-3-ultra-550b-a55b:free` → `nemotron`, `gpt-4o-mini` → `gpt`.
+  * Prefix provider (`vendor/`), tag kuantisasi (`:free`, `:70b`), dan digit versi dibuang; nama lengkap tetap dapat dilihat via `/config` dan `/settings`.
+- **Responsive Status & Input Box (`buildStatusPanel` / `renderStatusPanel`)**:
+  * Kotak 5 baris (`┌─┬─┐ / │ model │ badge │ stats │ / ├─┴─┴─┤ / │ hint │ / └─┘`) menggantikan status bar satu baris dengan background hijau blok.
+  * **Tidak ada lebar kolom statis**: seluruh run `─` dihitung dari lebar terminal aktual (`process.stdout.columns`), frame selalu ditutup pada `cols - 1` sehingga tidak pernah memicu *pending-wrap* yang dulu menumpuk baris border di scrollback.
+  * Kolom opsional (badge `YOLO`/`PLAN`/`⏳`/`⚙️n`, stats `↑ Xt ↓ Yt`) dilepas lebih dulu sebelum sel nama model dipotong; indikator `ctx N%` muncul saat belum ada statistik turn.
+  * Baris bawah kotak berisi hint/placeholder (`/? for help, ask anything...`, atau pesan "AI sedang bekerja" saat turn berjalan) sehingga baris input tetap bersih.
+- **Action Log History Beraksen Cabang (`├── `)**:
+  * `formatActionLogLine` + mode `branch` pada `WorkflowTree` (`src/core/ui.ts`) mencetak satu baris cabang per tool **tepat saat tool selesai** — bukan saat dimulai: `├── [1] 🔍 find PROGRESS.md · 12ms`, `├── [2] 🖥️ Bash(npm test) · 4.2s`, `├── [3] 🟣 Subagent "read file halo.md"`.
+  * Baris "start" per tool (`🟢 Read(x)`, `🟡 Edit(x) — tidak ada perubahan`, dst.) ditangkap dan tidak dicetak ulang, sehingga tidak ada duplikasi; detail output tool (diff, peringatan) di-buffer lalu dicetak menjorok di bawah baris cabangnya.
+  * `flush()` menjamin tidak ada output yang hilang saat turn dibatalkan atau tool melempar error.
+- **Live Bottom Activity Tray (`src/core/activity.ts` + `LineEditor`)**:
+  * `ActivityTray` menyimpan status runner aktif (tool, subagent, proses latar belakang) dan mencetak baris tray: `🟢 npm test  45s`, `🟣 Subagent (read_file) halo.md  23s`, plus `-- N more, ctrl+o to expand` saat melebihi 2 baris.
+  * Baris tray digambar **di dalam region live `LineEditor`** (di bawah baris input) dan diperbarui *in-place* memakai `ESC[2K` + reposisi kursor (`ESC[nA`/`ESC[0J`) — bukan `console.log` — sehingga tidak ada lagi jejak menumpuk di terminal saat error/input baru.
+  * Ticker 1 detik me-render ulang region agar penghitung detik tetap berjalan; Ctrl+O membuka/melipat tray.
+  * Saat runner selesai: baris live dihapus dari tray, lalu hasil ringkasnya dicetak **satu kali** ke scroll history utama sebagai `├── ...`.
+  * Subagent mewarisi tray induknya (`activityTray` pada `ToolDeps`/`SubagentDeps`), jadi delegasi terlihat live; proses latar belakang disinkronkan lewat `syncGroup('proc', …)` tanpa me-reset timer berjalan.
+- **Catatan**: fitur reasoning/thinking teks belum ada di core engine, sehingga tidak ada mock fitur think yang dibuat — fokus murni pada penataan UI, action log, status box, dan tray.
+- **Rangkaian Pengujian Mandiri**:
+  * Unit test baru `src/tests/ui_revamp.test.ts` (16 test) untuk pemotongan nama model, geometri kotak responsif (120→24 kolom), format baris cabang, tray (overflow/expand/resync/in-place), integrasi `LineEditor` (climb + `ESC[0J`, tanpa `console.log`), dan integrasi agent (`├──` + siklus hidup tray).
+  * Seluruh **579 tests** lulus 100% tanpa regresi (`npm test`), dan `npm run typecheck` 100% bersih.
+
+---
+
 ### v1.7.6 (22 September 2026) — Universal Fallback Tool Parser, CLI Visual Spacing Polish, & /yolo Mode Integration
 
 #### Ditambahkan & Diperbarui

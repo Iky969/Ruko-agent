@@ -1,10 +1,10 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-1.7.4-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.7.6-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-563%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-622%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
@@ -52,7 +52,7 @@ chmod +x $PREFIX/bin/ruko
 - ⏪ **Snapshot Undo Otomatis**:
   Setiap modifikasi berkas dicadangkan ke `.ruko/undo/` sebelum ditulis. Anda dapat membatalkan perubahan kapan saja lewat perintah `/undo` tanpa bergantung pada Git.
 - 🎮 **Modern Terminal UX & Ambient Input**:
-  REPL interaktif dengan status bar *real-time*, menu navigasi `/`, animasi Pac-Man *Thinking...* rata kiri, serta mode *ambient input* yang memungkinkan pengguna mengetik, mengantre, atau membatalkan instruksi saat AI sedang bekerja.
+  REPL interaktif dengan **status & input box responsif** (lebar border dihitung dinamis mengikuti terminal — aman di layar sempit Termux), **action log beraksen cabang `├── `** yang dicetak sekali saat tool selesai, **live bottom activity tray** yang diperbarui *in-place* (tanpa menumpuk di scrollback, `Ctrl+O` untuk memperluas), menu navigasi `/`, animasi Pac-Man *Thinking...* rata kiri, serta mode *ambient input* yang memungkinkan pengguna mengetik, mengantre, atau membatalkan instruksi saat AI sedang bekerja.
 - 🔑 **Multi-Provider & Privasi Utama**:
   Wizard interaktif untuk konfigurasi mudah (dengan tes koneksi langsung dan konfirmasi eksplisit untuk protokol HTTP unencrypted). Mendukung model cloud (OpenAI, OpenRouter, DeepSeek, Groq, Together) maupun server lokal (Ollama, LM Studio, vLLM). Kredensial disimpan dengan izin berkas ketat `0600`.
 
@@ -227,7 +227,7 @@ Agen menggunakan protokol tool call terstruktur dalam blok kode:
 | `save_skill` | Skill | Menyimpan alur kerja sukses sebagai skill baru yang reusable (hanya jika diminta / instruksi berulang). |
 | `delete_skill` | Skill | Menghapus skill yang sudah usang dari `.ruko/skills/` (wajib konfirmasi `[Y/N]` dan menampilkan preview isi). |
 | `list_skills` | Skill | Membaca dan menampilkan daftar seluruh nama dan deskripsi skill yang tersimpan. |
-| `delegate` | Delegasi | Menjalankan subagent mandiri dengan context terisolasi. |
+| `delegate` | Delegasi | Menjalankan subagent mandiri dengan context terisolasi. **Catatan penting**: delegate mengeksekusi satu tool call per giliran secara **sekuensial** (bukan concurrent/paralel), meskipun setiap delegate berjalan di konteks terisolasi sendiri. Default timeout: 60 detik. Jika subagent timeout, sistem otomatis melaporkan file yang sempat termodifikasi dan menawarkan opsi rollback via `/undo`. |
 | `start_process` | Proses | Menjalankan perintah non-blocking / background (wajib konfirmasi `[Y/N]`, batas maks. 3 proses aktif). |
 | `read_process_logs` | Proses | Membaca ring buffer log proses (maks. 100 baris) dengan redaksi kredensial otomatis. |
 | `get_status` | Proses | Memeriksa status deterministik proses latar belakang (`running`, `exited`, `stale`). |
@@ -316,7 +316,7 @@ Ruko diuji secara intensif menggunakan test runner bawaan Node.js (`node:test`) 
 # Verifikasi tipe data statis
 npm run typecheck
 
-# Menjalankan 464 unit test anti-regresi
+# Menjalankan 579 unit test anti-regresi
 npm test
 
 # Menjalankan end-to-end (E2E) integration test

@@ -72,6 +72,9 @@ const RM_CRITICAL_RE =
 const BLOCKED_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // rm destruktif ke root, wildcard root, atau direktori sistem/home kritis
   [RM_CRITICAL_RE, 'rm destruktif ke path sistem/home kritis'],
+  // rm/rmdir ANY form targeting critical system paths (even without -rf flags)
+  // Catches: rm /etc, rm -r /usr, rmdir /boot, sudo rm /bin, etc.
+  [/\b(?:rm|rmdir)\b(?:\s+--?\S+)*\s+(?:\/[*]?(?:\s|$)|\/(?:etc|bin|usr|lib(?:64)?|boot|sys|proc|var|dev|home|root|run|opt|srv)(?:[\/\s*]|$)|~(?:\/|\s|$)|\$(?:HOME|USER)(?:\/|\s|$))/i, 'rm/rmdir ke path sistem kritis (selalu diblokir)'],
   // rm dengan --no-preserve-root (melewati perlindungan root secara eksplisit)
   [/\brm\b[^|;&\n]*--no-preserve-root/i, 'rm --no-preserve-root (melewati proteksi root)'],
   // Format filesystem

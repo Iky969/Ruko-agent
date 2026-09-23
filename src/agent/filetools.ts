@@ -808,17 +808,31 @@ export async function codeSearchTool(
   if (!opts.caseSensitive) flags += 'i';
 
   let matcher: RegExp;
-  if (opts.isRegex) {
+
+  // Auto-detect regex patterns: if the query contains alternation groups (a|b),
+  // character classes [abc], or anchors ^/$, treat as regex automatically.
+  // This allows grep-E-style alternation like "(limitation|known issue|todo)"
+  // to work without requiring explicit isRegex: true.
+  const looksLikeRegex = opts.isRegex || /[|]/.test(query.replace(/\\\|/g, '')) && /[()[\]^$.*+?]/.test(query);
+  const useRegex = opts.isRegex || looksLikeRegex;
+
+  if (useRegex) {
     try {
       matcher = new RegExp(query, flags);
     } catch (err) {
-      return {
-        ok: false,
-        text: `code_search: pola regex tidak valid: ${errorMessage(err)}`,
-        totalMatches: 0,
-        totalFiles: 0,
-        truncated: false,
-      };
+      if (opts.isRegex) {
+        // Explicit isRegex: report the error
+        return {
+          ok: false,
+          text: `code_search: pola regex tidak valid: ${errorMessage(err)}`,
+          totalMatches: 0,
+          totalFiles: 0,
+          truncated: false,
+        };
+      }
+      // Auto-detected regex failed: fall back to literal search
+      const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      matcher = new RegExp(escaped, flags);
     }
   } else {
     const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
