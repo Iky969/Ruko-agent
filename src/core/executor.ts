@@ -56,7 +56,7 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
       (error, rawStdout, rawStderr) => {
         const durationMs = Date.now() - started;
         // `error.code` is the process exit code; `null` when killed by timeout.
-        const code = error ? (typeof error.code === 'number' ? error.code : null) : 0;
+        let code = error ? (typeof error.code === 'number' ? error.code : null) : 0;
         let stdout = sanitizeTerminalOutput(rawStdout);
         let stderr = sanitizeTerminalOutput(rawStderr);
         let output = interleavedChunks.length > 0
@@ -67,6 +67,10 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
         const killedByTimeout = Boolean(
           error && (error.killed || (error as any).signal === 'SIGTERM') && durationMs >= Math.max(0, timeoutMs - 1500),
         );
+        // Standard timeout exit code is 124
+        if (killedByTimeout && code === null) {
+          code = 124;
+        }
         if (killedByTimeout) {
           const timeoutMsg =
             `\n[Command dihentikan: waktu eksekusi melebihi batas timeout ${timeoutMs}ms (${Math.round(timeoutMs / 1000)}s). ` +

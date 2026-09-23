@@ -269,7 +269,7 @@ test('codeSearchTool skips ignored directories and binary files', async () => {
 
 // --- runToolCall protocol integration tests ---
 test('runToolCall dispatches glob call', async () => {
-  const calls = parseToolCalls(
+  const { calls } = parseToolCalls(
     '```tool\n' + JSON.stringify({ tool: 'glob', pattern: '*.ts', path: tmpDir }) + '\n```',
   );
   assert.equal(calls.length, 1);
@@ -278,7 +278,7 @@ test('runToolCall dispatches glob call', async () => {
 });
 
 test('runToolCall dispatches code_search call', async () => {
-  const calls = parseToolCalls(
+  const { calls } = parseToolCalls(
     '```tool\n' + JSON.stringify({ tool: 'code_search', query: 'helper', path: tmpDir }) + '\n```',
   );
   assert.equal(calls.length, 1);

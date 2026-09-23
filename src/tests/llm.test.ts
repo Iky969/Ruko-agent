@@ -346,3 +346,41 @@ test('chat normalizes role tool messages with valid tool_call_id and includes to
   });
 });
 
+test('OpenAiCompatibleProvider buffers reasoning_content without logging and invokes onThought', async () => {
+  await withCleanEnv(async () => {
+    const p = createProvider({ apiKey: 'k', baseUrl: 'https://x/v1', model: 'm' });
+    const frames = [
+      'data: {"choices":[{"delta":{"reasoning_content":"Menganalisis "}}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_content":"masalah..."}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"Hasil akhir."},"finish_reason":"stop"}]}\n\n',
+    ];
+    const thoughts: string[] = [];
+    let content = '';
+
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: any[]) => logs.push(args.join(' '));
+
+    try {
+      await withFetchStub(
+        async () => sseResponse(frames),
+        async () => {
+          const text = await p.chat([{ role: 'user', content: 'test', timestamp: '' }], {
+            onThought: (th) => thoughts.push(th),
+            onToken: (t) => {
+              content += t;
+            },
+          });
+          assert.equal(text, 'Hasil akhir.');
+          assert.equal(content, 'Hasil akhir.');
+          assert.deepEqual(thoughts, ['Menganalisis ', 'masalah...']);
+          assert.equal(p.lastReasoning, 'Menganalisis masalah...');
+          assert.equal(logs.length, 0, 'No console.log should be invoked on reasoning_content');
+        },
+      );
+    } finally {
+      console.log = origLog;
+    }
+  });
+});
+

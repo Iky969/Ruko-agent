@@ -29,6 +29,24 @@ export class Context {
     this.messages = [];
   }
 
+  /** Add a tool call record to the conversation history. */
+  addToolCall(toolName: string, args: Record<string, unknown>): void {
+    this.messages.push({
+      role: 'tool_call' as ContextRole,
+      content: JSON.stringify({ tool: toolName, args }),
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /** Add a tool result record to the conversation history. */
+  addToolResult(toolName: string, result: string): void {
+    this.messages.push({
+      role: 'tool' as ContextRole,
+      content: `[${toolName}] ${result}`,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   /** Replaces the whole history (used when resuming a saved session). */
   replace(messages: ContextMessage[]): void {
     this.messages = [...messages];

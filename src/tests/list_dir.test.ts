@@ -146,7 +146,7 @@ test('listDirTool respects showHidden option', async () => {
 });
 
 test('runToolCall dispatches list_dir and list_directory alias', async () => {
-  const calls = parseToolCalls(
+  const { calls } = parseToolCalls(
     '```tool\n' + JSON.stringify({ tool: 'list_dir', path: 'src' }) + '\n```',
   );
   assert.equal(calls.length, 1);

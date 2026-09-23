@@ -201,6 +201,56 @@ test('RevealFilter hides generic XML <tool_call>...</tool_call> blocks', () => {
   assert.equal(revealed, 'Memeriksa:\nLanjut.');
 });
 
+test('RevealFilter hides feedback.txt leaked DSML format (<|DSML||calls><|DSML||invoke name="read_file">...)', () => {
+  let revealed = '';
+  const filter = new RevealFilter((chunk) => {
+    revealed += chunk;
+  });
+
+  const chunk1 = 'Membaca file README.md...\n';
+  const chunk2 = '<|DSML||calls><|DSML||invoke name="read_file"><|DSML||parameter name="path" string="true">README.md</|DSML||parameter></|DSML||invoke></|DSML||calls>\n';
+  const chunk3 = 'File berhasil dibaca.';
+
+  filter.feed(chunk1);
+  filter.feed(chunk2);
+  filter.feed(chunk3);
+  filter.end();
+
+  assert.ok(!revealed.includes('<|DSML||'), 'DSML tags must not leak');
+  assert.ok(!revealed.includes('read_file'), 'tool payload must not leak');
+  assert.equal(revealed, 'Membaca file README.md...\nFile berhasil dibaca.');
+
+  // Also test character-by-character token streaming
+  let charRevealed = '';
+  const charFilter = new RevealFilter((c) => {
+    charRevealed += c;
+  });
+  const full = `${chunk1}${chunk2}${chunk3}`;
+  for (const ch of full) {
+    charFilter.feed(ch);
+  }
+  charFilter.end();
+  assert.equal(charRevealed, 'Membaca file README.md...\nFile berhasil dibaca.');
+});
+
+test('RevealFilter hides live deepseek-v4.1-flash full-width double-pipe format (<｜｜DSML｜｜ calls>...)', () => {
+  let revealed = '';
+  const filter = new RevealFilter((chunk) => {
+    revealed += chunk;
+  });
+
+  const rawDsml = '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="read_file">\n<｜｜DSML｜｜ parameter name="path" string="true">README.md</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name="limit" string="false">200</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>\n';
+
+  filter.feed('Awal pemeriksaan:\n');
+  filter.feed(rawDsml);
+  filter.feed('Akhir pemeriksaan.');
+  filter.end();
+
+  assert.ok(!revealed.includes('DSML'), 'DSML must not leak');
+  assert.ok(!revealed.includes('read_file'), 'tool payload must not leak');
+  assert.equal(revealed, 'Awal pemeriksaan:\nAkhir pemeriksaan.');
+});
+
 // ============================================================================
 // 4. parseToolCalls & stripToolBlocks (BUG A)
 // ============================================================================
@@ -215,7 +265,7 @@ test('parseToolCalls parses DeepSeek DSML tool calls correctly', () => {
 </|DSML|invoke>
 `;
 
-  const calls = parseToolCalls(rawDsml);
+  const { calls } = parseToolCalls(rawDsml);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].tool, 'code_search');
   assert.equal(calls[0].query, 'authLogin');
@@ -225,6 +275,37 @@ test('parseToolCalls parses DeepSeek DSML tool calls correctly', () => {
   const stripped = stripToolBlocks(rawDsml);
   assert.ok(!stripped.includes('<|DSML|'));
   assert.ok(!stripped.includes('authLogin'));
+});
+
+test('parseToolCalls parses feedback.txt leaked DSML format (<|DSML||calls><|DSML||invoke...>)', () => {
+  const raw = '<|DSML||calls><|DSML||invoke name="read_file"><|DSML||parameter name="path" string="true">README.md</|DSML||parameter></|DSML||invoke></|DSML||calls>';
+  const { calls } = parseToolCalls(raw);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].tool, 'read_file');
+  assert.equal(calls[0].path, 'README.md');
+
+  const stripped = stripToolBlocks(`Pemeriksaan:\n${raw}\nSelesai.`);
+  assert.ok(!stripped.includes('DSML'));
+  assert.ok(!stripped.includes('read_file'));
+  assert.equal(stripped, 'Pemeriksaan:\n\nSelesai.');
+});
+
+test('parseToolCalls parses live deepseek-v4.1-flash format with whitespace and double pipes', () => {
+  const raw = `<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read_file">
+<｜｜DSML｜｜ parameter name="path" string="true">README.md</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="limit" string="false">200</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>`;
+
+  const { calls } = parseToolCalls(raw);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].tool, 'read_file');
+  assert.equal(calls[0].path, 'README.md');
+  assert.equal(calls[0].limit, 200);
+
+  const stripped = stripToolBlocks(raw);
+  assert.equal(stripped, '');
 });
 
 test('parseToolCalls parses unicode full-width DSML with numeric and boolean parameters', () => {
@@ -238,7 +319,7 @@ test('parseToolCalls parses unicode full-width DSML with numeric and boolean par
 </｜DSML｜tool_calls>
 `;
 
-  const calls = parseToolCalls(raw);
+  const { calls } = parseToolCalls(raw);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].tool, 'read_file');
   assert.equal(calls[0].path, 'PROGRESS.md');
@@ -253,7 +334,7 @@ test('parseToolCalls parses generic XML <tool_call> blocks', () => {
 </tool_call>
 `;
 
-  const calls = parseToolCalls(raw);
+  const { calls } = parseToolCalls(raw);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].tool, 'patch_file');
   assert.equal(calls[0].path, 'src/app.ts');
@@ -518,11 +599,6 @@ test('/settings command displays unified dashboard and allows tuning context, ma
     logs.length = 0;
     await handleCommand('/settings approval yolo', env);
     assert.equal(config.approvalEnabled, false);
-
-    // 8. /settings anim
-    logs.length = 0;
-    await handleCommand('/settings anim off', env);
-    assert.equal(config.funAnimations, false);
   } finally {
     console.log = origLog;
   }
@@ -580,3 +656,46 @@ test('formatDuration and /usage active working time tracking', async () => {
     console.log = origLog;
   }
 });
+
+// ============================================================================
+// 10. DeepSeek v4.1 Flash DSML End-to-End Agent Execution
+// ============================================================================
+
+test('Agent executes deepseek-v4.1-flash DSML response without leaking to terminal and completes read_file tool call', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ruko-deepseek-dsml-'));
+  setWorkspaceRoot(tmp);
+  writeFileSync(join(tmp, 'README.md'), '# Test DeepSeek DSML\nIni adalah file proyek testing.\n', 'utf-8');
+
+  let callCount = 0;
+  const mockProvider = {
+    name: 'openai-compatible',
+    isConfigured: true,
+    model: 'deepseek-v4.1-flash',
+    setModel() {},
+    async chat(messages: any[], options?: any) {
+      callCount++;
+      if (callCount === 1) {
+        const raw = '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="read_file">\n<｜｜DSML｜｜ parameter name="path" string="true">README.md</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name="limit" string="false">200</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>';
+        for (const ch of raw) {
+          options?.onToken?.(ch);
+        }
+        return raw;
+      }
+      return 'File README.md berisi dokumentasi proyek testing Ruko.';
+    },
+  };
+
+  const config = { ...DEFAULT_CONFIG, maxToolIterations: 5, mode: 'beginner' as const };
+  const ctx = new Context(config);
+  const agent = new Agent(ctx, mockProvider as any, config, async () => true, tmp);
+
+  try {
+    const res = await agent.handleInstruction('baca file README.md dan jelaskan isinya');
+    assert.equal(callCount, 2);
+    assert.ok(res.includes('README.md'));
+    assert.ok(!res.includes('DSML'), 'Result text must not contain DSML tags');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+

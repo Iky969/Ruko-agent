@@ -97,6 +97,8 @@ export interface RenderDiffOptions {
   context?: number;
   /** Hard cap on rendered lines. */
   maxLines?: number;
+  /** Compact mode: only delta lines (+/-), no unchanged context lines or boilerplate. */
+  compact?: boolean;
 }
 
 /**
@@ -109,12 +111,26 @@ export function renderFileDiff(
   newText: string,
   opts: RenderDiffOptions = {},
 ): string {
-  const context = opts.context ?? 3;
   const maxLines = opts.maxLines ?? 160;
   const oldLines = splitLines(oldText);
   const newLines = splitLines(newText);
   const ops = diffLines(oldLines, newLines);
 
+  // Item 5: Compact mode displays only delta changes (+/-) without boilerplate lines
+  if (opts.compact) {
+    const out: string[] = [];
+    for (const op of ops) {
+      if (op.type === 'del') out.push(red(`- ${op.line}`));
+      else if (op.type === 'add') out.push(green(`+ ${op.line}`));
+    }
+    if (out.length === 0) return dim('  (tidak ada perubahan baris)');
+    if (out.length > maxLines) {
+      return [...out.slice(0, maxLines), dim('  … (diff dipotong) …')].join('\n');
+    }
+    return out.join('\n');
+  }
+
+  const context = opts.context ?? 3;
   // Mark which eq lines are kept (within `context` of a change).
   const keep = new Array<boolean>(ops.length).fill(false);
   let lastChange = -Infinity;

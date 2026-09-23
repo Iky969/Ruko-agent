@@ -81,7 +81,7 @@ export async function promptWorkspaceTrust(
 
   try {
     const answer = (
-      await io.question(yellow('  Apakah kamu mempercayai folder ini? (y/n): '))
+      await io.question(yellow('  Percayai folder? (y/n): '))
     ).trim().toLowerCase();
 
     if (/^(y|yes|ya)$/i.test(answer)) {

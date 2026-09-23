@@ -10,9 +10,10 @@ import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
 import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot } from './tools.js';
-import { AgentConfig, ProviderProfile, UiMode } from '../types.js';
-import { ConnectionResult, LLMProvider } from './llm.js';
+import { AgentConfig, DEFAULT_CONFIG, ProviderProfile, UiMode } from '../types.js';
+import { ConnectionResult, createProvider, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
+import { scanSkills } from '../core/skills.js';
 import type { Agent } from './agent.js';
 
 /** Loop internals a command may touch. */
@@ -233,6 +234,38 @@ const COMMANDS: CommandDef[] = [
     },
   },
   {
+    name: 'yolo',
+    category: 'Operasi & Eksekusi',
+    help: 'Mode YOLO: auto-approve semua eksekusi tool tanpa konfirmasi manual.',
+    hint: 'on | off',
+    run: (args, env) => {
+      const arg = args.trim().toLowerCase();
+      let turnOn: boolean;
+      if (arg === 'on') {
+        turnOn = true;
+      } else if (arg === 'off') {
+        turnOn = false;
+      } else if (arg === '') {
+        const isCurrentlyYolo = !env.config.approvalEnabled;
+        turnOn = !isCurrentlyYolo;
+      } else {
+        console.log('Gunakan: /yolo [on|off] untuk mengubah status auto-approval mode.');
+        return;
+      }
+
+      if (turnOn) {
+        env.config.approvalEnabled = false;
+        env.updateConfig({ approvalEnabled: false });
+        console.log(yellow('⚡ YOLO mode ON: semua perintah tool akan disetujui otomatis.'));
+      } else {
+        delete process.env.RUKO_YOLO_MODE;
+        env.config.approvalEnabled = true;
+        env.updateConfig({ approvalEnabled: true });
+        console.log(green('🛡️ YOLO mode OFF: kembali ke mode verifikasi manual.'));
+      }
+    },
+  },
+  {
     name: 'undo',
     category: 'Operasi & Eksekusi',
     help: 'Batalkan perubahan berkas terakhir.',
@@ -326,7 +359,6 @@ const COMMANDS: CommandDef[] = [
       const current = env.config.role ?? 'default';
       if (wanted === 'beginner' && (current === 'default' || current === 'minimal')) patch.role = 'teacher';
       if (wanted === 'pro' && (current === 'default' || current === 'teacher')) patch.role = 'minimal';
-      patch.funAnimations = wanted !== 'pro';
       env.updateConfig(patch);
       if (wanted === 'beginner') {
         // The beginner guide is rendered by the CLI through the SHARED box
@@ -336,37 +368,32 @@ const COMMANDS: CommandDef[] = [
             'Role: teacher — setiap langkah dijelaskan dengan bahasa sederhana.',
             'Konfirmasi penuh: perintah berisiko selalu ditanya dulu (y/N).',
             'Tips slash command aktif di setiap jawaban AI.',
-            'Animasi Pac-Man thinking: aktif.',
             '',
             'Mulai cepat: /help daftar perintah · /undo batal edit terakhir · /mode pro untuk ringkas.',
           ]),
         );
       } else {
-        console.log('Mode PRO: role minimal, spinner polos cepat, hanya aksi destruktif yang dikonfirmasi. (pemula: /mode beginner)');
+        console.log('Mode PRO aktif — role minimal, tanpa tips slash command.');
       }
     },
   },
   {
-    name: 'anim',
+    name: 'skills',
     category: 'Sistem & Bantuan',
-    help: 'Toggle animasi Pac-Man saat AI berpikir (on/off).',
-    hint: '[on|off]',
-    run: (args, env) => {
-      const arg = args.trim().toLowerCase();
-      let next: boolean;
-      if (arg === 'on' || arg === 'true' || arg === '1') {
-        next = true;
-      } else if (arg === 'off' || arg === 'false' || arg === '0') {
-        next = false;
-      } else if (!arg) {
-        const current = env.config.funAnimations ?? (env.config.mode !== 'pro');
-        next = !current;
-      } else {
-        console.log('Usage: /anim  |  /anim on  |  /anim off');
+    help: 'Tampilkan daftar skill yang sedang aktif.',
+    run: (_args, _env) => {
+      const skills = scanSkills(getWorkspaceRoot(), { includeGlobal: true });
+      if (skills.length === 0) {
+        console.log('Tidak ada skill yang aktif. Tambahkan file .md di .ruko/skills/ atau ~/.ruko/skills/.');
         return;
       }
-      env.updateConfig({ funAnimations: next });
-      console.log(`Animasi Pac-Man ${next ? 'DIAKTIFKAN' : 'DIMATIKAN'}.`);
+      console.log(
+        renderBox(
+          `Skills Aktif (${skills.length})`,
+          skills.map((s) => `${green('●')} ${bold(s.name.padEnd(20))} ${s.description}`),
+        ),
+      );
+      console.log(dim('Direktori: .ruko/skills/ (lokal) dan ~/.ruko/skills/ (global)'));
     },
   },
   {
@@ -498,7 +525,7 @@ const COMMANDS: CommandDef[] = [
     aliases: ['setting', 'set'],
     category: 'Konfigurasi & Budget',
     help: 'Dashboard konfigurasi: lihat & ubah budget context, max token, model, role, approval, dan mode.',
-    hint: '[context|max-tokens|role|mode|approval|anim|save] [nilai]',
+    hint: '[context|max-tokens|iterations|role|mode|approval|save] [nilai]',
     run: async (args, env) => {
       const parts = args.trim().split(/\s+/);
       const sub = parts[0]?.toLowerCase();
@@ -511,6 +538,7 @@ const COMMANDS: CommandDef[] = [
         const usedTokens = Math.round(usedChars / 4);
         const pct = budgetChars > 0 ? Math.min(100, Math.round((usedChars / budgetChars) * 100)) : 0;
         const maxOut = env.config.maxOutputTokens ?? 4096;
+        const maxIter = env.config.maxToolIterations ?? 30;
 
         const lines = [
           `MODEL & PROVIDER:`,
@@ -522,21 +550,21 @@ const COMMANDS: CommandDef[] = [
           `  • Context Window:   ${budgetChars.toLocaleString()} chars (~${budgetTokens.toLocaleString()} tokens)`,
           `  • Status Konteks:   ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}% terpakai`,
           `  • Max Output:       ${maxOut.toLocaleString()} tokens per-turn (max_tokens)`,
+          `  • Max Iterations:   ${maxIter} iterasi tool per-turn`,
           ``,
           `BEHAVIOR & SAFETY:`,
           `  • Role:             ${env.config.role ?? 'default'}`,
           `  • Mode:             ${env.config.mode ?? 'beginner'}`,
           `  • Approval Gate:    ${env.config.approvalEnabled ? 'ON (konfirmasi perintah berisiko)' : 'OFF (YOLO mode)'}`,
           `  • Exec Timeout:     ${Math.round(env.config.execTimeoutMs / 1000)} detik`,
-          `  • Fun Animations:   ${env.config.funAnimations ?? true ? 'ON (Pac-Man spinner)' : 'OFF'}`,
           `───────────────────────────────────────────────────────`,
           `Ubah pengaturan dengan perintah:`,
           `  • /settings context <128k|500k|unlimited>   Atur limit context window`,
           `  • /settings max-tokens <jumlah|4096>       Atur limit token output per-turn`,
+          `  • /settings iterations <jumlah|30>         Atur limit iterasi tool per-turn`,
           `  • /settings role <default|reviewer|teacher> Atur peran aktif`,
           `  • /settings mode <beginner|pro>             Ganti mode UI`,
           `  • /settings approval <on|off|yolo>          Atur konfirmasi perintah`,
-          `  • /settings anim <on|off>                   Animasi berpikir Pac-Man`,
           `  • /settings save                            Simpan ke .ruko/config.json`,
         ];
 
@@ -606,6 +634,22 @@ const COMMANDS: CommandDef[] = [
         return;
       }
 
+      if (sub === 'iterations' || sub === 'iteration' || sub === 'iter') {
+        if (!val) {
+          console.log(`Batas iterasi tool saat ini: ${env.config.maxToolIterations ?? 30} iterasi.`);
+          console.log(`Gunakan: /settings iterations <jumlah> (contoh: /settings iterations 30)`);
+          return;
+        }
+        const count = Number(val);
+        if (!Number.isFinite(count) || count <= 0 || !Number.isInteger(count)) {
+          console.log('Error: nilai iterations harus berupa bilangan bulat positif (contoh: /settings iterations 30).');
+          return;
+        }
+        env.updateConfig({ maxToolIterations: count });
+        console.log(green(`✔ Batas maksimal iterasi tool diperbarui menjadi ${count} iterasi.`));
+        return;
+      }
+
       if (sub === 'role') {
         if (!val) {
           console.log(`Peran aktif saat ini: ${env.config.role ?? 'default'}.`);
@@ -648,20 +692,6 @@ const COMMANDS: CommandDef[] = [
           console.log(yellow('⚠ Approval gate dinonaktifkan (YOLO mode aktif — perintah berisiko langsung dieksekusi).'));
         } else {
           console.log('Gunakan: /settings approval <on|off|yolo>');
-        }
-        return;
-      }
-
-      if (sub === 'anim') {
-        const v = val.toLowerCase();
-        if (v === 'on' || v === '1' || v === 'true') {
-          env.updateConfig({ funAnimations: true });
-          console.log(green('✔ Animasi terminal (Pac-Man spinner) diaktifkan.'));
-        } else if (v === 'off' || v === '0' || v === 'false') {
-          env.updateConfig({ funAnimations: false });
-          console.log(green('✔ Animasi terminal dinonaktifkan (spinner titik minimalis).'));
-        } else {
-          console.log('Gunakan: /settings anim <on|off>');
         }
         return;
       }
@@ -766,7 +796,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'ctx',
-    aliases: ['status'],
+    aliases: ['status', 'budget'],
     category: 'Konfigurasi & Budget',
     help: 'Lihat limit context aktif, token budget, dan persentase penggunaan saat ini.',
     run: (_args, env) => {
@@ -775,22 +805,70 @@ const COMMANDS: CommandDef[] = [
       const usedChars = env.ctx.totalChars;
       const usedTokens = Math.round(usedChars / 4);
       const pct = budgetChars > 0 ? Math.min(100, Math.round((usedChars / budgetChars) * 100)) : 0;
+      const maxOut = env.config.maxOutputTokens ?? DEFAULT_CONFIG.maxOutputTokens ?? 4096;
       const ws = getWorkspaceRoot();
       const cfgPath = join(ws, '.ruko', 'config.json');
       const isPersistent = existsSync(cfgPath);
 
-      console.log(
-        renderBox('Context Budget & Status Aktif', [
-          `Model aktif: ${env.llm.model} (${env.llm.name})`,
-          `Context window limit aktif: ${budgetChars.toLocaleString()} karakter (~${formatK(budgetChars)})`,
-          `Token budget aktif: ~${budgetTokens.toLocaleString()} tokens (1 token ≈ 4 karakter)`,
-          `Karakter aktif saat ini: ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}%`,
-          `Pesan dalam konteks: ${env.ctx.size} pesan`,
-          `Status konfigurasi: ${isPersistent ? 'Tersimpan di .ruko/config.json (survive lintas sesi)' : 'Menggunakan nilai default sesi (belum disimpan)'}`,
-          `───────────────────────────────────────────────────────`,
-          `Hint: Atur budget dengan /settings context <128k|500k|unlimited>`,
-        ]),
-      );
+      const rawLines = [
+        `Model aktif: ${env.llm.model} (${env.llm.name})`,
+        `Context window limit aktif: ${budgetChars.toLocaleString()} karakter (~${formatK(budgetChars)})`,
+        `Token budget aktif: ~${budgetTokens.toLocaleString()} tokens (1 token ≈ 4 karakter)`,
+        `Max output tokens aktif: ${maxOut.toLocaleString()} tokens (per-turn)`,
+        `Karakter aktif saat ini: ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}%`,
+        `Pesan dalam konteks: ${env.ctx.size} pesan`,
+        `Status konfigurasi: ${isPersistent ? 'Tersimpan di .ruko/config.json (survive lintas sesi)' : 'Menggunakan nilai default sesi (belum disimpan)'}`,
+        `───────────────────────────────────────────────────────`,
+        `Hint: Atur budget dengan /settings context <128k|500k|unlimited>`,
+      ];
+
+      // Responsive line wrapping for narrow terminals (<= 60 cols) to ensure
+      // lines are not cut off by renderBox visible length clamping.
+      const maxInner = Math.max(10, terminalWidth() - 4);
+      const availWidth = maxInner - 2;
+
+      const wrappedLines: string[] = [];
+      for (const line of rawLines) {
+        if (visibleLength(line) <= availWidth || line.startsWith('───')) {
+          wrappedLines.push(line);
+          continue;
+        }
+        const colonIdx = line.indexOf(': ');
+        if (colonIdx !== -1 && colonIdx <= availWidth) {
+          const key = line.slice(0, colonIdx + 1);
+          const val = line.slice(colonIdx + 2);
+          wrappedLines.push(key);
+          if (visibleLength(val) + 2 <= availWidth) {
+            wrappedLines.push(`  ${val}`);
+          } else {
+            const words = val.split(' ');
+            let cur = '  ';
+            for (const w of words) {
+              if (cur === '  ') cur += w;
+              else if (visibleLength(cur + ' ' + w) <= availWidth) cur += ' ' + w;
+              else {
+                wrappedLines.push(cur);
+                cur = '  ' + w;
+              }
+            }
+            if (cur.trim()) wrappedLines.push(cur);
+          }
+          continue;
+        }
+        const words = line.split(' ');
+        let cur = '';
+        for (const w of words) {
+          if (!cur) cur = w;
+          else if (visibleLength(cur + ' ' + w) <= availWidth) cur += ' ' + w;
+          else {
+            wrappedLines.push(cur);
+            cur = '  ' + w;
+          }
+        }
+        if (cur.trim()) wrappedLines.push(cur);
+      }
+
+      console.log(renderBox('Context Budget & Status Aktif', wrappedLines));
     },
   },
   {
@@ -1005,16 +1083,18 @@ function describeProfile(p: ProviderProfile): string {
 /** Applies a provider profile live: credentials + model + persist alias. */
 function applyProfile(env: CommandEnv, alias: string, profile: ProviderProfile): void {
   const apiKey = (profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : profile.apiKey) ?? '';
-  if (profile.baseUrl || apiKey) {
-    env.llm.setCredentials?.(apiKey || (env.config.apiKey ?? ''), profile.baseUrl ?? (env.config.baseUrl ?? ''));
-  }
-  if (profile.model) env.llm.setModel(profile.model);
-  env.updateConfig({
+  const patch: Partial<AgentConfig> = {
     activeProfile: alias,
     ...(apiKey ? { apiKey } : {}),
     ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
     ...(profile.model ? { model: profile.model } : {}),
-  });
+  };
+  env.updateConfig(patch);
+  const newProvider = createProvider({ ...env.config, ...patch });
+  if (env.agent) {
+    env.agent.setLlmProvider(newProvider);
+  }
+  env.llm = newProvider;
   console.log(`✔ Profil aktif: ${alias} (${describeProfile(profile)})`);
 }
 
@@ -1025,15 +1105,52 @@ async function runSetupFlow(env: CommandEnv): Promise<void> {
     return;
   }
   const probe = async (r: SetupResult): Promise<ConnectionResult> => {
-    const { OpenAiCompatibleProvider } = await import('./llm.js');
-    return new OpenAiCompatibleProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model })
-      .testConnection();
+    let pType: string | undefined;
+    const rb = r.baseUrl.toLowerCase();
+    const ml = r.model.toLowerCase();
+    if (rb.includes('anthropic.com') || ml.startsWith('claude-')) {
+      pType = 'anthropic';
+    } else if (rb.includes('googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
+      pType = 'gemini';
+    } else {
+      pType = 'openai-compatible';
+    }
+    const testProvider = createProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model, provider: pType });
+    if (testProvider.testConnection) {
+      return testProvider.testConnection();
+    }
+    return { ok: true, message: r.model };
   };
   const result = await promptSetup({ question: env.ask, readSecret: env.askSecret }, { probe });
   if (!result) return;
-  env.llm.setCredentials?.(result.apiKey, result.baseUrl);
-  env.llm.setModel(result.model);
-  env.updateConfig({ apiKey: result.apiKey, baseUrl: result.baseUrl, model: result.model, activeProfile: undefined });
+
+  let providerType: string | undefined;
+  const rawBase = result.baseUrl.toLowerCase();
+  const modelLower = result.model.toLowerCase();
+  if (rawBase.includes('anthropic.com') || modelLower.startsWith('claude-')) {
+    providerType = 'anthropic';
+  } else if (rawBase.includes('googleapis.com') || (!rawBase && modelLower.startsWith('gemini-'))) {
+    providerType = 'gemini';
+  } else {
+    providerType = 'openai-compatible';
+  }
+
+  const patch: Partial<AgentConfig> = {
+    apiKey: result.apiKey,
+    baseUrl: result.baseUrl,
+    model: result.model,
+    provider: providerType,
+    activeProfile: undefined,
+  };
+  env.updateConfig(patch);
+
+  // Item 1: Re-instantiate provider immediately and replace the active provider instance in memory
+  const newProvider = createProvider({ ...env.config, ...patch });
+  if (env.agent) {
+    env.agent.setLlmProvider(newProvider);
+  }
+  env.llm = newProvider;
+
   console.log(`Konfigurasi tersimpan: baseUrl=${result.baseUrl}, model=${result.model} (API key di-mask).`);
 }
 
@@ -1126,7 +1243,7 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
             const answer = (
               await env.ask(
                 yellow(
-                  `Protokol HTTP (cleartext) terdeteksi untuk "${cleanUrl}". Apakah kamu mempercayai protokol/URL ini? (y/n): `,
+                  `Protokol HTTP (cleartext) terdeteksi untuk "${cleanUrl}". Percayai URL ini? (y/n): `,
                 ),
               )
             )
@@ -1136,7 +1253,7 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
           } else if (env.confirm) {
             trusted = await env.confirm(
               `Set Base URL ke "${cleanUrl}" (HTTP cleartext)`,
-              'Apakah kamu mempercayai protokol/URL ini?',
+              'Percayai URL ini?',
             );
           }
           if (!trusted) {
@@ -1162,6 +1279,11 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
       return;
   }
   env.updateConfig(patch);
+  if (patch.apiKey !== undefined || patch.baseUrl !== undefined || patch.model !== undefined || patch.provider !== undefined) {
+    const newProvider = createProvider({ ...env.config, ...patch });
+    if (env.agent) env.agent.setLlmProvider(newProvider);
+    env.llm = newProvider;
+  }
   const shown = key === 'apiKey' ? '(tersembunyi)' : JSON.stringify(patch[key as keyof AgentConfig]);
   console.log(`Konfigurasi diupdate: ${key} = ${shown}`);
 }
@@ -1172,8 +1294,8 @@ export function isCommand(input: string): boolean {
 }
 
 /** Command registry exposed for the `/` menu + generated docs (§3.17). */
-export function listCommands(): Array<{ name: string; help: string; hint?: string; category?: string }> {
-  return COMMANDS.map((c) => ({ name: c.name, help: c.help, hint: c.hint, category: c.category }));
+export function listCommands(): Array<{ name: string; help: string; hint?: string; category?: string; aliases?: string[] }> {
+  return COMMANDS.map((c) => ({ name: c.name, help: c.help, hint: c.hint, category: c.category, aliases: c.aliases }));
 }
 
 /** Filtered registry for incremental autocomplete. */

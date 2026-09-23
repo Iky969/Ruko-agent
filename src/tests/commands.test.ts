@@ -24,9 +24,9 @@ test('matchCommands filters by prefix for autocomplete (§3.16)', () => {
   assert.equal(matchCommands('/zzz').length, 0);
 });
 
-test('/anim command exists in registry', () => {
+test('/anim command is not in registry', () => {
   const names = new Set(listCommands().map((c) => c.name));
-  assert.ok(names.has('anim'), 'missing /anim');
+  assert.ok(!names.has('anim'), 'anim should be completely removed');
 });
 
 test('maskApiKey never exposes full secret for short, medium, or long keys (M3)', async () => {

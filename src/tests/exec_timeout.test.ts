@@ -42,7 +42,7 @@ test('execute terminates long command when timeout is exceeded and appends infor
     summarize: false,
   });
 
-  assert.equal(result.code, null, 'code must be null when killed by timeout');
+  assert.equal(result.code, 124, 'code must be 124 (standard timeout exit code) when killed by timeout');
   assert.ok(result.durationMs >= 450, `durationMs (${result.durationMs}) should be around 500ms`);
   assert.ok(result.output.includes('[Command dihentikan: waktu eksekusi melebihi batas timeout'));
   assert.ok(result.output.includes('Gunakan parameter timeoutMs lebih besar'));
@@ -69,7 +69,7 @@ test('tool exec respects per-call timeoutMs parameter and kills command accordin
   );
 
   const res = JSON.parse(resRaw);
-  assert.equal(res.code, null);
+  assert.equal(res.code, 124);
   assert.ok(res.output.includes('[Command dihentikan: waktu eksekusi melebihi batas timeout 600ms'));
 });
 
@@ -84,6 +84,6 @@ test('tool exec supports timeout parameter in seconds (e.g. timeout: 1)', async 
   );
 
   const res = JSON.parse(resRaw);
-  assert.equal(res.code, null);
+  assert.equal(res.code, 124);
   assert.ok(res.output.includes('batas timeout 1000ms'));
 });

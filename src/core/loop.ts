@@ -2,7 +2,7 @@ import * as readline from 'node:readline';
 import { readFileSync } from 'node:fs';
 import { Agent } from '../agent/agent.js';
 import { buildHelpText, handleCommand, listCommands } from '../agent/commands.js';
-import { Confirmer } from './approval.js';
+import { Confirmer, isYoloMode } from './approval.js';
 import { saveConfig } from './config.js';
 import { AgentConfig } from '../types.js';
 import { Context } from './context.js';
@@ -11,6 +11,7 @@ import { createLineEditor, LineEditor, MenuItem } from './tui.js';
 import {
   bold,
   buildStatusBar,
+  buildStatusPanel,
   cyan,
   dim,
   formatTerminalMarkdown,
@@ -20,7 +21,10 @@ import {
   renderApprovalBox,
   renderBox,
   renderDivider,
+  renderStatusPanel,
+  STATUS_PANEL_HINT,
   stripAnsi,
+  terminalWidth,
   yellow,
 } from './ui.js';
 import { playSplash, SplashInfo } from './splash.js';
@@ -119,23 +123,33 @@ export class SystemLoop {
         this.stop();
         process.exit(0);
       });
+      // A tray change (tool finished, process exited, Ctrl+O) repaints the live
+      // region immediately instead of waiting for the next keystroke/tick.
+      this.agent.activityTray.on('change', () => this.editor?.refresh());
       void this.runInteractive();
       return;
     }
     this.startPipeLoop();
   }
 
-  /** TTY path: one LIVE status bar + raw-mode line read, redrawn in place. */
+  /**
+   * TTY path: one LIVE status panel + raw-mode line read, redrawn in place.
+   */
   private async runInteractive(): Promise<void> {
     while (this.running) {
-      // The bar rides INSIDE the editor's managed region (statusLine): every
-      // frame redraws it in place and submit() erases it, so stale versions
-      // can never pile up in scrollback (feedback v0.6.2 — third site of the
-      // render-loop bug, after splash and the beginner guide).
+      // The panel and the activity tray both ride INSIDE the editor's managed
+      // region: every frame redraws them in place and submit() erases them, so
+      // stale versions can never pile up in scrollback (feedback v0.6.2 / §4).
       const line = await this.editor!.readLine({
         prompt: promptGlyph(),
-        statusLine: (w?: number) => this.statusBarLine(w),
-        placeholder: PROMPT_HINT,
+        statusLine: (w?: number) => this.statusPanel(w),
+        activityRows: (w?: number) => this.activityRows(w),
+        onToggleTray: () => {
+          this.agent.activityTray.toggleExpanded();
+        },
+        // The hint lives inside the panel's bottom row, so the input line
+        // stays clean and the placeholder never duplicates it.
+        placeholder: '',
         getMenu: (buffer) => this.slashMenuItems(buffer),
         // Enter on a lone "/" just closes the overlay — nothing is echoed
         // (feedback v0.6 #2: help listings must not settle in scrollback).
@@ -179,6 +193,7 @@ export class SystemLoop {
 
   /** Dark-green status bar, refreshed before every input (§3/§8). */
   private statusBarLine(width?: number): string {
+    const isYolo = !this.config.approvalEnabled || isYoloMode();
     return buildStatusBar({
       width,
       model: this.agent.llm.model,
@@ -186,12 +201,65 @@ export class SystemLoop {
       budgetChars: this.config.maxContextChars,
       role: this.config.role ?? 'default',
       planMode: this.agent.planMode,
+      yoloMode: isYolo,
       // v0.7: busy flag + queue badge live in the bar (same redraw machine).
       busy: this.busy,
       pending: this.queue.length,
       // §8: last turn's token-ish stats ride in the bar, not a separate line.
       turn: this.agent.lastUsage ?? undefined,
       activeProcesses: defaultProcessManager.getActiveProcesses(),
+    });
+  }
+
+  /** Bottom-row hint of the status panel (it doubles as the input placeholder). */
+  private panelHint(): string {
+    return this.busy ? 'AI sedang bekerja — ketik tetap bisa, Enter untuk antre…' : STATUS_PANEL_HINT;
+  }
+
+  /**
+   * Responsive status + input box (feedback §2). Every border run is derived
+   * from the live terminal width, so nothing wraps on a narrow Termux screen;
+   * the full model id stays available via /config and /settings.
+   */
+  private statusPanel(width?: number): string {
+    const isYolo = !this.config.approvalEnabled || isYoloMode();
+    const cols = width ?? terminalWidth();
+    return renderStatusPanel({
+      width: cols,
+      model: this.agent.llm.model,
+      usedChars: this.ctx.totalChars,
+      budgetChars: this.config.maxContextChars,
+      role: this.config.role ?? 'default',
+      planMode: this.agent.planMode,
+      yoloMode: isYolo,
+      busy: this.busy,
+      pending: this.queue.length,
+      turn: this.agent.lastUsage ?? undefined,
+      processes: defaultProcessManager.getActiveProcesses().length,
+      hint: this.panelHint(),
+    });
+  }
+
+  /**
+   * Live bottom activity tray rows (feedback §4): running tools + subagents
+   * (owned by the agent) merged with background processes, so `npm test 45s`
+   * is visible at the prompt without ever touching scrollback.
+   */
+  private activityRows(width?: number): string[] {
+    const processes = defaultProcessManager.getActiveProcesses();
+    this.agent.activityTray.syncGroup(
+      'proc',
+      processes.map((p) => ({
+        id: `proc:${p.id}`,
+        label: p.command.length > 40 ? `${p.command.slice(0, 39)}…` : p.command,
+        icon: '🟢',
+        startedAt: p.startTime,
+      })),
+    );
+    return this.agent.activityTray.renderRows({
+      width: width ?? terminalWidth(),
+      expanded: this.agent.activityTray.expanded,
+      maxRows: 2,
     });
   }
 
@@ -217,6 +285,7 @@ export class SystemLoop {
   private stop(): void {
     this.running = false;
     this.saveSession();
+    this.agent.activityTray.clear();
     this.editor?.close();
     this.rl?.close();
   }
@@ -338,8 +407,14 @@ export class SystemLoop {
     this.turnAbort = new AbortController();
     this.editor?.startAmbient({
       prompt: promptGlyph(),
-      statusLine: (w?: number) => this.statusBarLine(w),
-      placeholder: 'AI sedang bekerja — ketik tetap bisa, Enter untuk antre…',
+      statusLine: (w?: number) => this.statusPanel(w),
+      activityRows: (w?: number) => this.activityRows(w),
+      onToggleTray: () => {
+        this.agent.activityTray.toggleExpanded();
+      },
+      // The busy hint lives in the panel's bottom row (same text), so the
+      // input line stays clean while the AI works.
+      placeholder: '',
       getMenu: (buffer) => this.slashMenuItems(buffer),
       onSubmit: (line) => {
         void this.handleAmbientSubmit(line);

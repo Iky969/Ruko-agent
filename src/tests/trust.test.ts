@@ -65,7 +65,7 @@ test('promptWorkspaceTrust marks folder trusted when user answers y', async () =
 
     const trusted = await promptWorkspaceTrust(io, ws, configPath);
     assert.equal(trusted, true);
-    assert.ok(asked.some((q) => q.includes('mempercayai folder ini')));
+    assert.ok(asked.some((q) => q.includes('Percayai folder')));
     assert.equal(isWorkspaceTrusted(ws, configPath), true);
   });
 });
@@ -83,7 +83,7 @@ test('promptWorkspaceTrust returns false and does not trust folder when user ans
 
     const trusted = await promptWorkspaceTrust(io, ws, configPath);
     assert.equal(trusted, false);
-    assert.ok(asked.some((q) => q.includes('mempercayai folder ini')));
+    assert.ok(asked.some((q) => q.includes('Percayai folder')));
     assert.equal(isWorkspaceTrusted(ws, configPath), false);
   });
 });

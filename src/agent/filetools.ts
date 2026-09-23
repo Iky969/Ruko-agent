@@ -83,6 +83,28 @@ export const TEXT_EXTENSIONS = new Set([
   '.eslintrc', '.prettierrc',
 ]);
 
+export interface FileCacheEntry {
+  mtimeMs: number;
+  size: number;
+  result: ReadFileResult;
+}
+
+/** In-memory cache for file reads in the current session (§Item 3). */
+export const fileReadCache = new Map<string, FileCacheEntry>();
+
+/** Clears file read cache entries (either for a specific file or all files). */
+export function clearFileReadCache(targetAbsPath?: string): void {
+  if (targetAbsPath) {
+    for (const key of fileReadCache.keys()) {
+      if (key.startsWith(targetAbsPath)) {
+        fileReadCache.delete(key);
+      }
+    }
+  } else {
+    fileReadCache.clear();
+  }
+}
+
 /**
  * Reads a text file with 1-indexed line numbers and pagination.
  *
@@ -133,6 +155,13 @@ export async function readFileTool(
     return { ok: false, text: `read_file: '${filePath}' bukan file reguler.` };
   }
 
+  // Item 3: Return from in-memory cache directly if file has not changed
+  const cacheKey = `${abs}::${offset}::${limit}`;
+  const cached = fileReadCache.get(cacheKey);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.result;
+  }
+
   let content: string;
   try {
     content = await fs.readFile(abs, 'utf8');
@@ -151,12 +180,18 @@ export async function readFileTool(
   const totalLines = lines.length;
   const start = offset - 1;
   if (start >= totalLines) {
-    return {
+    const res: ReadFileResult = {
       ok: true,
       text: `(offset melewati akhir file: file punya ${totalLines} baris)`,
       totalLines,
       truncated: false,
     };
+    fileReadCache.set(cacheKey, {
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      result: res,
+    });
+    return res;
   }
 
   const end = Math.min(totalLines, start + limit);
@@ -168,13 +203,19 @@ export async function readFileTool(
 
   const truncated = end < totalLines;
   const header = `File: ${abs} (${totalLines} baris, menampilkan ${start + 1}-${end})${truncated ? ` — gunakan offset/limit untuk bagian lain` : ''}`;
-  return {
+  const res: ReadFileResult = {
     ok: true,
     text: `${header}\n${slice.join('\n')}`,
     totalLines,
     truncated,
     nextOffset: end < totalLines ? end + 1 : undefined,
   };
+  fileReadCache.set(cacheKey, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    result: res,
+  });
+  return res;
 }
 
 /**
@@ -767,17 +808,31 @@ export async function codeSearchTool(
   if (!opts.caseSensitive) flags += 'i';
 
   let matcher: RegExp;
-  if (opts.isRegex) {
+
+  // Auto-detect regex patterns: if the query contains alternation groups (a|b),
+  // character classes [abc], or anchors ^/$, treat as regex automatically.
+  // This allows grep-E-style alternation like "(limitation|known issue|todo)"
+  // to work without requiring explicit isRegex: true.
+  const looksLikeRegex = opts.isRegex || /[|]/.test(query.replace(/\\\|/g, '')) && /[()[\]^$.*+?]/.test(query);
+  const useRegex = opts.isRegex || looksLikeRegex;
+
+  if (useRegex) {
     try {
       matcher = new RegExp(query, flags);
     } catch (err) {
-      return {
-        ok: false,
-        text: `code_search: pola regex tidak valid: ${errorMessage(err)}`,
-        totalMatches: 0,
-        totalFiles: 0,
-        truncated: false,
-      };
+      if (opts.isRegex) {
+        // Explicit isRegex: report the error
+        return {
+          ok: false,
+          text: `code_search: pola regex tidak valid: ${errorMessage(err)}`,
+          totalMatches: 0,
+          totalFiles: 0,
+          truncated: false,
+        };
+      }
+      // Auto-detected regex failed: fall back to literal search
+      const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      matcher = new RegExp(escaped, flags);
     }
   } else {
     const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

@@ -34,6 +34,10 @@ export interface ReadLineOptions {
    * every REPL iteration, so stale versions piled up in scrollback). The
    * editor redraws it in place on every frame and ERASES it on submit/cancel,
    * so at most one status bar is ever alive on screen.
+   *
+   * May return MULTIPLE rows (feedback UI revamp: the responsive status panel
+   * is a 5-row box); every row is clamped to `width - 1` and counted in the
+   * rewind math.
    */
   statusLine?: (width?: number) => string;
   /** Dim hint shown only while the buffer is empty (§3). */
@@ -42,6 +46,15 @@ export interface ReadLineOptions {
   mask?: boolean;
   /** Live overlay items for the current buffer; return [] to hide the menu. */
   getMenu?: (buffer: string) => MenuItem[];
+  /**
+   * Live bottom activity tray rows (feedback §4): drawn BELOW the input line
+   * and repainted in place with the rest of the region, so running tools,
+   * subagents and background processes never pile up in scrollback. Returns
+   * `[]` when nothing is running (no rows are reserved).
+   */
+  activityRows?: (width?: number) => string[];
+  /** Ctrl+O — toggles the tray's "expand all rows" mode. */
+  onToggleTray?: () => void;
   /**
    * When true for the submitted buffer, Enter only CLOSES the overlay: the
    * region is erased and the line resolves to `null` WITHOUT echoing anything
@@ -59,10 +72,14 @@ interface Pending {
 export interface AmbientOptions {
   prompt: string;
   placeholder?: string;
-  /** Live status line drawn above the input (same renderer as readLine). */
+  /** Live status block drawn above the input (same renderer as readLine). */
   statusLine?: (width?: number) => string;
   /** Slash overlay while the AI works — identical filtering rules. */
   getMenu?: (buffer: string) => MenuItem[];
+  /** Live bottom activity tray rows (feedback §4) — same renderer. */
+  activityRows?: (width?: number) => string[];
+  /** Ctrl+O — toggles the tray's "expand all rows" mode. */
+  onToggleTray?: () => void;
   /** Enter pressed while the AI is busy — the loop shows the queue modal. */
   onSubmit: (line: string) => void;
   /** Ctrl+C pressed while the AI is busy — interrupt the turn, not the session. */
@@ -134,11 +151,19 @@ export class LineEditor {
   private lastRenderedStatus = '';
   private lastRenderedLine = '';
   private lastRenderedMenuKey = '';
+  private lastRenderedTrayKey = '';
   private lastRenderedModalPrompt = '';
   private lastRenderedWidth = 0;
   private lastDrawnCursorCol = 0;
   private renderThrottleTimer: NodeJS.Timeout | null = null;
   private lastRenderTimestamp = 0;
+  /**
+   * 1s ticker that repaints the live region while an activity tray is present,
+   * so `23s` style counters advance without any `console.log` (feedback §4).
+   */
+  private liveTicker: NodeJS.Timeout | null = null;
+  /** True while a frame is being composed (drops re-entrant repaints). */
+  private rendering = false;
 
   constructor(
     private readonly input: ReadStream = process.stdin as ReadStream,
@@ -241,6 +266,7 @@ export class LineEditor {
       clearTimeout(this.renderThrottleTimer);
       this.renderThrottleTimer = null;
     }
+    this.stopLiveTicker();
     this.eraseRegion();
     this.ambient = null;
     // The partial output line (if any) already sits ABOVE the erased region
@@ -315,6 +341,7 @@ export class LineEditor {
       clearTimeout(this.renderThrottleTimer);
       this.renderThrottleTimer = null;
     }
+    this.stopLiveTicker();
     const pending = this.pending;
     this.pending = null;
     this.buffer = '';
@@ -346,9 +373,26 @@ export class LineEditor {
   }
 
   /** The options driving the live region right now (readLine wins over ambient). */
-  private activeOptions(): Pick<ReadLineOptions, 'prompt' | 'placeholder' | 'statusLine' | 'getMenu' | 'mask'> {
+  private activeOptions(): Pick<
+    ReadLineOptions,
+    'prompt' | 'placeholder' | 'statusLine' | 'getMenu' | 'mask' | 'activityRows' | 'onToggleTray'
+  > {
     if (this.pending) return this.pending.options;
     return this.ambient ?? { prompt: '› ' };
+  }
+
+  /** Rows the live status block occupies right now (0 when there is none). */
+  private statusRowCount(): number {
+    const statusLine = this.activeOptions().statusLine;
+    if (!statusLine) return 0;
+    return Math.max(1, statusLine(this.termWidth()).split('\n').length);
+  }
+
+  /** Tray rows for the current frame, already clamped to `width - 1`. */
+  private trayRowsFor(width: number): string[] {
+    const provider = this.activeOptions().activityRows;
+    if (!provider) return [];
+    return provider(width).map((r) => truncateVisible(r, width - 1));
   }
 
   /** Terminal height (fallback 24 when stdout is not a TTY). */
@@ -364,9 +408,12 @@ export class LineEditor {
    * duplicate blocks.
    */
   private overlayBudget(lineRows: number): number {
-    const hasStatus = !!this.activeOptions().statusLine;
     const hasModal = this.modal ? 1 : 0;
-    return Math.max(0, this.termRows() - 3 - lineRows - (hasStatus ? 1 : 0) - hasModal);
+    const trayRows = this.trayRowsFor(this.termWidth()).length;
+    return Math.max(
+      0,
+      this.termRows() - 3 - lineRows - this.statusRowCount() - trayRows - hasModal,
+    );
   }
 
   /**
@@ -418,7 +465,23 @@ export class LineEditor {
     return { rows, heights: outHeights };
   }
 
+  /**
+   * Repaints the live region. Re-entrancy guarded: the activity-tray provider
+   * runs inside the frame (it resyncs background processes) and can emit a
+   * `change` that asks for another repaint — the frame in flight already draws
+   * the fresh state, so a nested render is dropped instead of recursing.
+   */
   private render(): void {
+    if (this.rendering) return;
+    this.rendering = true;
+    try {
+      this.renderFrame();
+    } finally {
+      this.rendering = false;
+    }
+  }
+
+  private renderFrame(): void {
     if (this.renderThrottleTimer) {
       clearTimeout(this.renderThrottleTimer);
       this.renderThrottleTimer = null;
@@ -431,13 +494,25 @@ export class LineEditor {
     const { rows, heights } = this.modal ? { rows: [], heights: [] } : this.menuRows();
     const width = this.termWidth();
 
-    const status = options.statusLine ? truncateVisible(options.statusLine(width), width - 1) : '';
+    // Status block: one or more rows (the responsive status panel is a box).
+    // Every row is clamped to width-1 so it can never wrap and break the
+    // rewind math (feedback v0.6.2 — the bar used to pile up in scrollback).
+    const statusLines = options.statusLine
+      ? options.statusLine(width)
+          .split('\n')
+          .map((l) => truncateVisible(l, width - 1))
+      : [];
+    const status = statusLines.join('\n');
+    // Live bottom activity tray (feedback §4): redrawn in place with the rest
+    // of the region, below the input line, so runners never hit scrollback.
+    const trayRows = this.trayRowsFor(width);
     const line = this.renderedLine();
     const lineRows = Math.max(1, Math.ceil(visibleLength(line) / width));
     const col = visibleLength(options.prompt) + this.cursor;
     const cursorRow = Math.min(lineRows - 1, Math.floor(col / width));
     const cursorCol = col - cursorRow * width;
     const menuKey = rows.join('|');
+    const trayKey = trayRows.join('|');
     const modalPrompt = this.modal?.prompt ?? '';
 
     // Anti-flickering dirty check: jika tidak ada perubahan data nyata pada region,
@@ -447,11 +522,13 @@ export class LineEditor {
       this.lastRenderedStatus === status &&
       this.lastRenderedLine === line &&
       this.lastRenderedMenuKey === menuKey &&
+      this.lastRenderedTrayKey === trayKey &&
       this.lastRenderedModalPrompt === modalPrompt &&
       this.lastRenderedWidth === width &&
       this.drawnCursorRow === cursorRow &&
       this.lastDrawnCursorCol === cursorCol
     ) {
+      this.ensureLiveTicker(!!options.activityRows);
       return;
     }
 
@@ -463,21 +540,21 @@ export class LineEditor {
     const climb = this.drawnCursorRow + this.statusRows;
     if (climb > 0) out += `\u001b[${climb}A`;
     out += `\r\u001b[0J`;
-    // Live status line (e.g. the green bar): redrawn IN PLACE every frame and
-    // clamped to width-1 so it can never wrap and break the rewind math
-    // (feedback v0.6.2 — the bar used to pile up in scrollback per iteration).
-    if (options.statusLine) {
-      out += `${status}\n`;
-      this.statusRows = 1;
-    } else {
-      this.statusRows = 0;
-    }
+    for (const statusRow of statusLines) out += `${statusRow}\n`;
+    this.statusRows = statusLines.length;
     out += line;
     // Rows this draw occupies once the terminal wraps it naturally.
     this.drawnRows = lineRows;
     // Cursor cell = prompt width + caret index within the buffer.
     this.drawnCursorRow = cursorRow;
     this.lastDrawnCursorCol = cursorCol;
+    // Activity tray rows sit directly BELOW the input line (feedback §4) and
+    // are clamped to width-1, so each one is exactly one terminal row.
+    let trayHeight = 0;
+    for (const trayRow of trayRows) {
+      trayHeight += Math.max(1, Math.ceil(visibleLength(trayRow) / width));
+      out += `\n\u001b[2K${trayRow}`;
+    }
     // Overlay rows sit below the input line and wrap like the line does —
     // counting them as 1 row each (the old bug) left the cursor buried in
     // the previous menu, so the next ESC[0J only cleared DOWNWARD and stale
@@ -496,7 +573,7 @@ export class LineEditor {
     }
     // From the bottom of the drawn region, walk back up to the cursor row of
     // the input line, then right to the exact column.
-    const upFromBottom = lineRows - 1 + menuRows + modalRows - cursorRow;
+    const upFromBottom = lineRows - 1 + trayHeight + menuRows + modalRows - cursorRow;
     if (upFromBottom > 0) out += `\u001b[${upFromBottom}A`;
     out += '\r';
     if (cursorCol > 0) out += `\u001b[${cursorCol}C`;
@@ -504,10 +581,42 @@ export class LineEditor {
     this.lastRenderedStatus = status;
     this.lastRenderedLine = line;
     this.lastRenderedMenuKey = menuKey;
+    this.lastRenderedTrayKey = trayKey;
     this.lastRenderedModalPrompt = modalPrompt;
     this.lastRenderedWidth = width;
 
     this.rawWrite(out);
+    this.ensureLiveTicker(!!options.activityRows);
+  }
+
+  /**
+   * Keeps the tray's elapsed counters moving. The ticker only repaints the
+   * live region (the dirty check suppresses identical frames), and it is
+   * cleared the moment the region goes away — no `console.log`, no scrollback.
+   */
+  private ensureLiveTicker(wanted: boolean): void {
+    if (!wanted) {
+      if (this.liveTicker) {
+        clearInterval(this.liveTicker);
+        this.liveTicker = null;
+      }
+      return;
+    }
+    if (this.liveTicker) return;
+    this.liveTicker = setInterval(() => this.render(), 1000);
+    this.liveTicker.unref?.();
+  }
+
+  private stopLiveTicker(): void {
+    if (this.liveTicker) {
+      clearInterval(this.liveTicker);
+      this.liveTicker = null;
+    }
+  }
+
+  /** Public repaint hook (used by the loop when the activity tray changes). */
+  refresh(): void {
+    this.render();
   }
 
   /** Write that BYPASSES the stdout interception (used by the renderer itself). */
@@ -530,6 +639,7 @@ export class LineEditor {
     this.lastRenderedStatus = '';
     this.lastRenderedLine = '';
     this.lastRenderedMenuKey = '';
+    this.lastRenderedTrayKey = '';
     this.lastRenderedModalPrompt = '';
     this.lastRenderedWidth = 0;
   }
@@ -555,6 +665,7 @@ export class LineEditor {
     this.lastRenderedStatus = '';
     this.lastRenderedLine = '';
     this.lastRenderedMenuKey = '';
+    this.lastRenderedTrayKey = '';
     this.lastRenderedModalPrompt = '';
     this.lastRenderedWidth = 0;
   }
@@ -761,6 +872,13 @@ export class LineEditor {
       }
       if (ch === '\u0005') {
         this.cursor = this.buffer.length;
+        i += 1;
+        continue;
+      }
+      if (ch === '\u000f') {
+        // Ctrl+O — expand/collapse the live activity tray (feedback §4:
+        // "-- N more, ctrl+o to expand").
+        this.activeOptions().onToggleTray?.();
         i += 1;
         continue;
       }
