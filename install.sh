@@ -3,7 +3,9 @@ set -e
 
 REPO="https://github.com/Iky969/Ruko-agent.git"
 INSTALL_DIR="$HOME/.ruko-agent"
+PINNED_COMMIT_SHA="049b45beffed3188d4961314b2a8c0cd17014d42" # v1.7.6 release
 TAG="${RUKO_VERSION:-v1.7.6}"
+TARGET_SHA="${RUKO_COMMIT_SHA:-$PINNED_COMMIT_SHA}"
 
 # Parse args
 FORCE=0
@@ -19,6 +21,16 @@ echo "== Ruko Agent Installer =="
 if [[ "$INSTALL_DIR" == *".."* ]] || [[ "$INSTALL_DIR" != "$HOME"* ]]; then
   echo "Error: Invalid INSTALL_DIR path: $INSTALL_DIR"
   exit 1
+fi
+
+# Mutable branch protection: prevent pointing to mutable branches without explicit override
+if [ "$TAG" = "main" ] || [ "$TAG" = "master" ] || [ "$TAG" = "HEAD" ]; then
+  if [ "${RUKO_ALLOW_MUTABLE:-0}" -ne 1 ]; then
+    echo "Error: Menargetkan branch mutable ('$TAG') ditolak demi keamanan supply chain."
+    echo "  Gunakan release tag immutable (misal: v1.7.6) atau commit SHA spesifik via RUKO_COMMIT_SHA."
+    echo "  Jika Anda sengaja ingin menggunakan branch mutable untuk pengembangan, set RUKO_ALLOW_MUTABLE=1"
+    exit 1
+  fi
 fi
 
 # 1. Cek Node.js
@@ -39,18 +51,19 @@ if ! command -v git >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ "$FORCE" -eq 1 ]; then
-  echo "Force flag detected, removing existing installation..."
-  rm -rf "$INSTALL_DIR"
-fi
-
 TEMP_DIR=$(mktemp -d)
 BACKUP_DIR=""
 
+# Safe-upgrade: Never delete up front with rm -rf, even in --force mode.
+# Always preserve the existing installation until the new build succeeds.
 if [ -d "$INSTALL_DIR" ]; then
   TIMESTAMP=$(date +%s)
   BACKUP_DIR="${INSTALL_DIR}.bak.${TIMESTAMP}"
-  echo "Existing installation found. Backing up to $BACKUP_DIR"
+  if [ "$FORCE" -eq 1 ]; then
+    echo "Existing installation found. Staging backup to $BACKUP_DIR (will be cleaned after success)..."
+  else
+    echo "Existing installation found. Backing up to $BACKUP_DIR"
+  fi
   mv "$INSTALL_DIR" "$BACKUP_DIR"
 fi
 
@@ -60,7 +73,7 @@ cleanup() {
     echo "Installation failed!"
     if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
       echo "Rolling back to previous installation..."
-      rm -rf "$INSTALL_DIR"
+      rm -rf "$INSTALL_DIR" 2>/dev/null || true
       mv "$BACKUP_DIR" "$INSTALL_DIR"
     fi
   fi
@@ -71,11 +84,11 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Mengambil kode Ruko ($TAG)..."
-if [ -n "$RUKO_COMMIT_SHA" ]; then
+if [ -n "$TARGET_SHA" ] && [ "${RUKO_ALLOW_MUTABLE:-0}" -ne 1 ]; then
   git clone "$REPO" "$TEMP_DIR"
   (
     cd "$TEMP_DIR"
-    git checkout "$RUKO_COMMIT_SHA"
+    git checkout "$TARGET_SHA"
   )
 else
   git clone --depth 1 --branch "$TAG" "$REPO" "$TEMP_DIR"

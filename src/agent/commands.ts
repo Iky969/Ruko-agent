@@ -1105,15 +1105,17 @@ async function runSetupFlow(env: CommandEnv): Promise<void> {
     return;
   }
   const probe = async (r: SetupResult): Promise<ConnectionResult> => {
-    let pType: string | undefined;
     const rb = r.baseUrl.toLowerCase();
     const ml = r.model.toLowerCase();
-    if (rb.includes('anthropic.com') || ml.startsWith('claude-')) {
-      pType = 'anthropic';
-    } else if (rb.includes('googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
-      pType = 'gemini';
-    } else {
-      pType = 'openai-compatible';
+    let pType: string | undefined = r.provider;
+    if (!pType) {
+      if (rb.includes('anthropic.com') || ml.startsWith('claude-')) {
+        pType = 'anthropic';
+      } else if (rb.includes('googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
+        pType = 'gemini';
+      } else {
+        pType = 'openai-compatible';
+      }
     }
     const testProvider = createProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model, provider: pType });
     if (testProvider.testConnection) {
@@ -1121,18 +1123,20 @@ async function runSetupFlow(env: CommandEnv): Promise<void> {
     }
     return { ok: true, message: r.model };
   };
-  const result = await promptSetup({ question: env.ask, readSecret: env.askSecret }, { probe });
+  const result = await promptSetup({ question: env.ask, readSecret: env.askSecret }, { probe, askProvider: true });
   if (!result) return;
 
-  let providerType: string | undefined;
-  const rawBase = result.baseUrl.toLowerCase();
-  const modelLower = result.model.toLowerCase();
-  if (rawBase.includes('anthropic.com') || modelLower.startsWith('claude-')) {
-    providerType = 'anthropic';
-  } else if (rawBase.includes('googleapis.com') || (!rawBase && modelLower.startsWith('gemini-'))) {
-    providerType = 'gemini';
-  } else {
-    providerType = 'openai-compatible';
+  let providerType: string | undefined = result.provider;
+  if (!providerType) {
+    const rawBase = result.baseUrl.toLowerCase();
+    const modelLower = result.model.toLowerCase();
+    if (rawBase.includes('anthropic.com') || modelLower.startsWith('claude-')) {
+      providerType = 'anthropic';
+    } else if (rawBase.includes('googleapis.com') || (!rawBase && modelLower.startsWith('gemini-'))) {
+      providerType = 'gemini';
+    } else {
+      providerType = 'openai-compatible';
+    }
   }
 
   const patch: Partial<AgentConfig> = {

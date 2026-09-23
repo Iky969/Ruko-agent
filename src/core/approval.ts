@@ -117,6 +117,36 @@ const DANGEROUS_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bwipefs\b/i, 'wipefs (penghapusan signature filesystem)'],
 ];
 
+/** High-risk dangerous patterns that can cause irreversible data loss or disruption (Tugas 12). */
+const HIGH_RISK_DANGEROUS_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/(?:^|[;&|]\s*|\bsudo\s+)(?:(?:\/usr)?\/bin\/)?(rm|rmdir)(?:\s+|$)/i, 'rm / rmdir (penghapusan file/direktori)'],
+  [/\bgit\s+reset\s+--hard\b/i, 'git reset --hard (menghapus kerja lokal secara permanen)'],
+  [/\bgit\s+clean\s+-f[d]*\b/i, 'git clean -f (menghapus file untracked secara permanen)'],
+  [/\bchmod\s+-R\s+[0-7]{3}\b/i, 'chmod -R (pengubahan izin massal rekursif)'],
+  [/\bkill\s+-9\b/i, 'kill -9 (memaksa mematikan proses tanpa graceful shutdown)'],
+  [/\b(shutdown|poweroff|reboot|halt)(\s|$)/i, 'mematikan atau me-restart mesin'],
+  [/\bfind\b[^|;&\n]*-delete\b/i, 'find -delete (penghapusan file secara rekursif)'],
+  [/\btruncate\b/i, 'truncate (pengosongan/pemotongan ukuran file)'],
+  [/\bshred\b/i, 'shred (penghancuran file/disk secara permanen)'],
+  [/\bwipefs\b/i, 'wipefs (penghapusan signature filesystem)'],
+  [/\b(curl|wget)\b[^|]*\|\s*(ba|z)?sh\b/i, 'pipe ke shell (eksekusi remote tak terverifikasi)'],
+  [/\bbase64\b[^|]*\|\s*(ba|z)?sh\b/i, 'base64 pipe ke shell (eksekusi tersembunyi)'],
+];
+
+/**
+ * Returns true if the command matches a high-risk dangerous pattern.
+ * Used for requiring explicit --allow-unsafe in non-interactive / unattended mode (Tugas 12).
+ */
+export function isHighRiskDangerousCommand(command: string): { isHighRisk: boolean; reason: string | null } {
+  const resolved = extractAndResolveShellVariables(command);
+  for (const [pattern, reason] of HIGH_RISK_DANGEROUS_PATTERNS) {
+    if (pattern.test(resolved) || pattern.test(command)) {
+      return { isHighRisk: true, reason };
+    }
+  }
+  return { isHighRisk: false, reason: null };
+}
+
 /** Helper to decode URL-encoded components safely. */
 export function decodePathSafely(p: string): string {
   let decoded = p;

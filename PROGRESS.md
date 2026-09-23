@@ -2,6 +2,70 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### Penutupan Penuh Audit P0 / md.md & Automasi CI/CD Pipeline (23 September 2026) — Tugas 11 & Gap Remediations
+
+#### Ditambahkan & Diperbarui
+- **Poin 1 md.md: Safe `--force` Tanpa Data Loss pada Installer (`install.sh`)**:
+  * Menghilangkan perilaku `rm -rf "$INSTALL_DIR"` langsung pada opsi `--force`.
+  * Mode `--force` kini selalu memindahkan instalasi lama ke direktori backup bertanggal (`$INSTALL_DIR.bak.<timestamp>`), menjamin ketersediaan mekanisme rollback deterministik jika build gagal.
+  * Backup lama hanya dihapus bersih setelah instalasi baru berhasil diverifikasi (atomic switch).
+- **Poin 2 md.md: Immutable Commit SHA Pinning & Proteksi Branch Mutable (`install.sh`)**:
+  * Menyematkan `PINNED_COMMIT_SHA="049b45beffed3188d4961314b2a8c0cd17014d42"` yang sesuai dengan tag rilis `v1.7.6`.
+  * Mencegah eksploitasi supply-chain via mutable branch (`main`, `master`, `HEAD`) jika diarahkan melalui `RUKO_VERSION`: installer menolak mutable branch kecuali flag eksplisit `RUKO_ALLOW_MUTABLE=1` diberikan.
+- **Poin 3 md.md: Penutupan Mutlak Paparan Secret Argv CLI (`src/index.ts`, `src/tests/api_key_security.test.ts`)**:
+  * Menambahkan security gate awal pada eksekusi CLI: memblokir pemberian kunci API mentah (`--api-key sk-...`) secara langsung untuk mencegah paparan kredensial di tabel proses OS (`ps aux`), `/proc/<PID>/cmdline`, dan history shell (`~/.bash_history`).
+  * Menyediakan 3 opsi alternatif yang aman: environment variable `RUKO_API_KEY`, pembacaan file terproteksi (`--api-key @/path/to/key.txt`), dan pembacaan stdin terisolasi (`echo "$KEY" | ruko --api-key -`).
+  * Jika pengguna tetap ingin memasukkan literal key di CLI (misal untuk testing ad-hoc), diwajibkan menyertakan flag eksplisit `--insecure-api-key` atau env `RUKO_INSECURE_API_KEY=1`.
+  * Menambahkan unit test baru di `src/tests/api_key_security.test.ts` (9 tests passing).
+- **Poin 4 md.md & TUGAS 11: Automasi CI/CD, CodeQL, Dependabot & Kebijakan Keamanan (`.github/`)**:
+  * Membuat workflow CI multi-versi Node.js di `.github/workflows/ci.yml`: otomatis terpicu pada push ke `main` dan pull request, menjalankan `actions/checkout@v4`, `actions/setup-node@v4` dengan caching npm, `npm ci`, `npm run typecheck`, `npm test` (784 unit tests), dan `npm run test:e2e`.
+  * Membuat workflow CodeQL static analysis di `.github/workflows/codeql.yml` (`queries: security-extended,security-and-quality`).
+  * Menambahkan konfigurasi Dependabot mingguan di `.github/dependabot.yml` untuk ekosistem `npm` dan `github-actions`.
+  * Menyediakan panduan keamanan dan konfigurasi repository di `.github/SECURITY.md` yang merinci pelaporan kerentanan privat, standar keamanan kredensial, dan rekomendasi aktivasi Secret Scanning, Push Protection, serta Branch Protection rules pada GitHub repository.
+- **Rangkaian Pengujian Mandiri**:
+  * Seluruh rangkaian tes bertambah menjadi **784 tests passing** (100% lulus, 0 fail).
+  * `npm run typecheck` dan `npm run test:e2e` lulus 100%.
+
+---
+
+### Keamanan Menengah, Robustness Parser & Provider Setup Wizard (23 September 2026) — Tugas 5, 6, 7, 12
+
+#### Ditambahkan & Diperbarui
+- **TUGAS 5: Setup Wizard Explicit Provider Selection (`src/core/wizard.ts`, `src/index.ts`, `src/agent/commands.ts`)**:
+  * Modifikasi setup wizard interaktif dan `/login` / `/config setup` agar menanyakan tipe provider secara eksplisit kepada pengguna (`openai-compatible`, `anthropic`, `gemini`) dengan opsi default cerdas berdasarkan URL/model.
+  * Meneruskan `r.provider` langsung ke `createProvider` saat probe pengujian koneksi, menghilangkan ketergantungan pada tebakan heuristik string nama model/URL yang rentan salah pada custom reverse proxy/gateway lokal.
+  * Mengintegrasikan opsi pembaruan provider pada alur retry probe (`coba key lain`).
+  * Unit test komprehensif di `src/tests/setup_provider.test.ts` (6 tests).
+
+- **TUGAS 6: Penanganan Tag `<tool>` Self-Closing & Malformed Tag Non-ASCII (`src/agent/tools.ts`)**:
+  * Memperluas parser generic XML di `src/agent/tools.ts` untuk mendukung tag self-closing dengan atribut XML (`<tool name="read_file" path="package.json" />` atau `<tool tool="bash" command="..." />`), mengekstrak atribut menjadi objek `ToolCall` yang valid.
+  * Memperbaiki penanganan `catch` saat `JSON.parse` gagal agar menggunakan fallback `body || rawTag`, menjamin array `malformedBlocks` tidak pernah memuat string kosong `""`.
+  * Memperbaiki pembersihan `stripToolBlocks` dengan regex yang menghapus tag self-closing `<tool ... />` dan unclosed `<tool ...>` tanpa residu teks ke terminal.
+  * Memverifikasi penangkapan tag dengan nama non-ASCII/CJK (misal `<認 name=... />`) sebagai malformed blocks dan pembersihannya dari layar pengguna.
+  * Unit test di `src/tests/tools.test.ts` (7 tests).
+
+- **TUGAS 7: Integritas Payload dan Sanitasi Pesan Role `tool` pada LLM Invariant (`src/agent/llm.ts`)**:
+  * Mengimplementasikan `sanitizeToolMessageContent()` untuk memvalidasi integritas payload pesan role `tool` sebelum dikirimkan ke endpoint LLM completions.
+  * Mengganti payload kosong atau whitespace dengan pesan fallback deskriptif `[Hasil tool "<name>" kosong]` untuk mencegah syntax error atau token bleed pada model completions.
+  * Menutup secara otomatis blok kode Markdown yang terpotong (` ``` ` ganjil) dengan closing fence dan penanda aman `[Catatan: Output blok kode terpotong / truncated code block]`.
+  * Menambahkan penanda peringatan aman pada payload JSON yang terpotong di tengah jalan.
+  * Menerapkan sanitasi ini secara menyeluruh di dalam `validateOpenAiMessages()`.
+  * Unit test di `src/tests/llm.test.ts` (4 tests).
+
+- **TUGAS 12: Penegakan Flag Eksplisit `--allow-unsafe` untuk Perintah Kategori Berbahaya Non-Interaktif (`src/index.ts`, `src/core/approval.ts`)**:
+  * Mengimplementasikan `isHighRiskDangerousCommand()` di `src/core/approval.ts` untuk mendeteksi perintah kategori `DANGEROUS` berisiko tinggi yang dapat menyebabkan data loss ireversibel (`git reset --hard`, `git clean -fd`, `chmod -R`, `rm`, `kill -9`, `find -delete`, `truncate`, `shred`, `wipefs`, pipe shell).
+  * Menambahkan flag CLI `--allow-unsafe` pada `parseCliArgs` di `src/index.ts` dan panduan bantuan CLI.
+  * Menolak eksekusi perintah berbahaya tinggi dalam mode non-interaktif (`!process.stdin.isTTY`) bila dijalankan dengan `--yes` tanpa menyertakan flag eksplisit `--allow-unsafe` (atau env `RUKO_ALLOW_UNSAFE=1`), disertai pesan penolakan yang informatif.
+  * Menjamin invarian keamanan utama: perintah kategori `BLOCKED` (seperti `rm -rf /etc`) tetap diblokir mutlak bahkan jika `--allow-unsafe` dan `--yes` disertakan.
+  * Unit test di `src/tests/allow_unsafe.test.ts` (8 tests).
+
+- **Rangkaian Pengujian Mandiri**:
+  * Menambahkan test suite baru: `setup_provider.test.ts`, `tools.test.ts`, `allow_unsafe.test.ts`, serta suite pengujian di `llm.test.ts`.
+  * Total unit test meningkat menjadi **780 tests passing** (100% lulus, 0 fail).
+  * `npm run build` dan `npm run typecheck` 100% bersih tanpa galat.
+
+---
+
 ### Audit Keamanan, Supply Chain Hardening & Approval Gate Restructuring (23 September 2026) — Tugas 1, 2, 3, 4, 10
 
 #### Ditambahkan & Diperbarui

@@ -3,7 +3,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { Agent } from './agent/agent.js';
 import { createProvider } from './agent/llm.js';
-import { Confirmer, guardedExecute } from './core/approval.js';
+import { Confirmer, guardedExecute, isHighRiskDangerousCommand } from './core/approval.js';
 import { defaultConfigPath, loadResolvedConfig, saveConfig } from './core/config.js';
 import { Context } from './core/context.js';
 import { SystemLoop } from './core/loop.js';
@@ -57,10 +57,12 @@ function buildUsage(): string {
     ['ruko --model "<name>"', 'Override nama model aktif'],
     ['ruko --provider "<name>"', 'Override provider (openai-compatible | anthropic | gemini)'],
     ['ruko --base-url "<url>"', 'Override base URL provider'],
-    ['ruko --api-key "<key>"', 'Override API key'],
+    ['ruko --api-key "<@file|-|key>"', 'Override API key (@file, - stdin, atau literal)'],
+    ['ruko --insecure-api-key', 'Izinkan literal API key langsung di argv (tidak disarankan)'],
     ['ruko --env-file "<path>"', 'Muat file env khusus (default .env) [alias: --dotenv]'],
     ['ruko --trust-folder', 'Bypass prompt kepercayaan workspace'],
     ['ruko --yes', 'Bypass approval & trust (YOLO untuk one-shot)'],
+    ['ruko --allow-unsafe', 'Bypass approval non-interaktif untuk perintah berisiko tinggi'],
     ['ruko --help', 'Bantuan ini'],
     ['ruko --version', 'Versi'],
   ];
@@ -176,6 +178,8 @@ interface ParsedArgs {
   envFile?: string;
   yes: boolean;
   trustFolder: boolean;
+  allowUnsafe: boolean;
+  insecureApiKey: boolean;
   errors: string[];
   unknownFlags: string[];
 }
@@ -191,7 +195,7 @@ const KNOWN_FLAGS_WITH_VALUE = new Set([
   '--dotenv', // alias for --env-file to avoid Node.js conflict
 ]);
 
-const KNOWN_BOOLEAN_FLAGS = new Set(['--yes', '--trust-folder', '--help', '--version', '-h', '-v']);
+const KNOWN_BOOLEAN_FLAGS = new Set(['--yes', '--trust-folder', '--allow-unsafe', '--insecure-api-key', '--help', '--version', '-h', '-v']);
 
 const ALL_KNOWN_FLAGS = new Set([...KNOWN_FLAGS_WITH_VALUE, ...KNOWN_BOOLEAN_FLAGS]);
 
@@ -201,6 +205,8 @@ function parseCliArgs(rawArgs: string[]): ParsedArgs {
     version: false,
     yes: false,
     trustFolder: false,
+    allowUnsafe: false,
+    insecureApiKey: false,
     errors: [],
     unknownFlags: [],
   };
@@ -224,6 +230,14 @@ function parseCliArgs(rawArgs: string[]): ParsedArgs {
     }
     if (arg === '--trust-folder') {
       result.trustFolder = true;
+      continue;
+    }
+    if (arg === '--allow-unsafe') {
+      result.allowUnsafe = true;
+      continue;
+    }
+    if (arg === '--insecure-api-key') {
+      result.insecureApiKey = true;
       continue;
     }
 
@@ -350,6 +364,23 @@ async function main(): Promise<void> {
     printErrorsAndExit(parsed.errors, parsed.unknownFlags);
   }
 
+  // Security gate: Block raw literal API keys passed via CLI argv to prevent leak in ps aux / /proc
+  if (parsed.apiKey && !parsed.apiKey.startsWith('@') && parsed.apiKey !== '-') {
+    if (!parsed.insecureApiKey && process.env.RUKO_INSECURE_API_KEY !== '1') {
+      console.error(red(
+        '\n⛔ KEAMANAN: Memberikan kunci API mentah langsung via argumen CLI diblokir untuk mencegah\n' +
+        '  kebocoran kredensial di process table (ps aux), /proc, dan riwayat bash/zsh history.\n'
+      ));
+      console.error(yellow('Pilihan yang aman:'));
+      console.error('  1. Gunakan Environment Variable: RUKO_API_KEY="sk-..." ruko ...');
+      console.error('  2. Baca dari file terproteksi:    ruko --api-key @/path/to/secret.key');
+      console.error('  3. Baca dari stdin:              echo "$KEY" | ruko --api-key -');
+      console.error('  4. Wizard interaktif:            ruko (konfigurasi disimpan aman izin 0600)');
+      console.error(dim('\nJika Anda benar-benar memerlukan flag literal ini, sertakan: --insecure-api-key\n'));
+      process.exit(1);
+    }
+  }
+
   // Help / Version
   if (parsed.help) {
     console.log(buildUsage());
@@ -392,11 +423,28 @@ async function main(): Promise<void> {
   if (parsed.provider) config.provider = parsed.provider;
   if (parsed.baseUrl) config.baseUrl = parsed.baseUrl;
   if (parsed.apiKey) {
-    config.apiKey = parsed.apiKey;
-    console.warn(yellow(
-      '⚠ PERINGATAN KEAMANAN: Flag --api-key mengekspos kunci API di process table (ps aux) dan shell history.\n' +
-      '  Gunakan environment variable atau konfigurasi interaktif (ruko setup wizard) sebagai alternatif lebih aman.'
-    ));
+    if (parsed.apiKey.startsWith('@')) {
+      const keyFile = parsed.apiKey.slice(1);
+      try {
+        config.apiKey = readFileSync(keyFile, 'utf8').trim();
+      } catch (e) {
+        console.error(red(`Error membaca file API key "${keyFile}": ${(e as Error).message}`));
+        process.exit(1);
+      }
+    } else if (parsed.apiKey === '-') {
+      try {
+        config.apiKey = readFileSync(0, 'utf8').trim();
+      } catch (e) {
+        console.error(red(`Error membaca API key dari stdin: ${(e as Error).message}`));
+        process.exit(1);
+      }
+    } else {
+      config.apiKey = parsed.apiKey;
+      console.warn(yellow(
+        '⚠ PERINGATAN KEAMANAN (--insecure-api-key): Kunci API diekspos di argv/process table (ps aux) dan shell history.\n' +
+        '  Disarankan menggunakan env var RUKO_API_KEY atau flag aman: --api-key @/path/to/key.txt atau --api-key -'
+      ));
+    }
   }
 
   // Workspace / Folder trust verification
@@ -428,8 +476,20 @@ async function main(): Promise<void> {
       console.log('│  ⚠ UNSAFE MODE: Persetujuan otomatis aktif  │');
       console.log('│  Semua command akan dieksekusi tanpa konfirmasi. │');
       console.log('└─────────────────────────────────────────────┘');
-      // Note: BLOCKED patterns are still enforced. Future work: add --allow-unsafe flag.
     }
+
+    // High-risk safety enforcement in non-interactive mode (Tugas 12)
+    if (!process.stdin.isTTY) {
+      const highRisk = isHighRiskDangerousCommand(command);
+      const allowUnsafe = parsed.allowUnsafe || process.env.RUKO_ALLOW_UNSAFE === '1' || process.env.RUKO_ALLOW_UNSAFE === 'true';
+      if (highRisk.isHighRisk && !allowUnsafe) {
+        console.error(red(`\n⛔ EKSEKUSI DITOLAK: Perintah berisiko tinggi terdeteksi dalam mode non-interaktif (${highRisk.reason}).`));
+        console.error(yellow('  Untuk mengeksekusi perintah ini secara otomatis tanpa prompt interaktif, sertakan flag eksplisit: --allow-unsafe'));
+        console.error(dim(`  Contoh: ruko --exec "${command}" --yes --allow-unsafe\n`));
+        process.exit(1);
+      }
+    }
+
     const confirm: Confirmer | null = isYolo
       ? async () => true
       : process.stdin.isTTY
@@ -492,15 +552,17 @@ async function main(): Promise<void> {
   // Interactive mode
   if (process.stdin.isTTY && needsSetup(config)) {
     const setup = await runSetupWizard(async (r) => {
-      let pType: string | undefined;
-      const rb = r.baseUrl.toLowerCase();
-      const ml = r.model.toLowerCase();
-      if (rb.includes('anthropic.com') || ml.startsWith('claude-')) {
-        pType = 'anthropic';
-      } else if (rb.includes('googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
-        pType = 'gemini';
-      } else {
-        pType = 'openai-compatible';
+      let pType: string | undefined = r.provider;
+      if (!pType) {
+        const rb = r.baseUrl.toLowerCase();
+        const ml = r.model.toLowerCase();
+        if (rb.includes('anthropic.com') || ml.startsWith('claude-')) {
+          pType = 'anthropic';
+        } else if (rb.includes('googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
+          pType = 'gemini';
+        } else {
+          pType = 'openai-compatible';
+        }
       }
       const testProvider = createProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model, provider: pType });
       if (testProvider.testConnection) {
