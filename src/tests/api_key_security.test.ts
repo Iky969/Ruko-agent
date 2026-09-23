@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { redactApiKey, saveConfig } from '../core/config.js';
-import { statSync, rmSync, writeFileSync, unlinkSync, mkdtempSync } from 'node:fs';
+import { statSync, rmSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';

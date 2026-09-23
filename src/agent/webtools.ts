@@ -87,18 +87,27 @@ export function sanitizeHtml(html: string): string {
     text = text.replace(tagRegex, '');
   }
 
-  // 4. Decode HTML entities
+  // 4. Decode HTML entities in a single pass to prevent double unescaping vulnerabilities
+  const HTML_ENTITIES: Record<string, string> = {
+    '&nbsp;': ' ',
+    '&lt;': '<',
+    '&gt;': '>',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&apos;': "'",
+    '&copy;': '©',
+    '&amp;': '&',
+  };
   return text
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/&copy;/gi, '©')
-    .replace(/&#(\d+);/g, (_, code) => {
-      const n = Number(code);
-      return Number.isFinite(n) ? String.fromCharCode(n) : '';
+    .replace(/&(?:[a-z]+|#\d+|#x[0-9a-f]+);/gi, (entity) => {
+      const lower = entity.toLowerCase();
+      if (HTML_ENTITIES[lower]) return HTML_ENTITIES[lower];
+      const numMatch = lower.match(/^&#(\d+);$/);
+      if (numMatch) {
+        const n = Number(numMatch[1]);
+        return Number.isFinite(n) ? String.fromCharCode(n) : entity;
+      }
+      return entity;
     })
     // 5. Normalize consecutive spaces and newlines
     .replace(/[ \t]+/g, ' ')

@@ -428,7 +428,7 @@ async function main(): Promise<void> {
       try {
         config.apiKey = readFileSync(keyFile, 'utf8').trim();
       } catch (e) {
-        console.error(red(`Error membaca file API key "${keyFile}": ${redactApiKey((e as Error).message)}`));
+        console.error(red(`Error membaca file API key: ${redactApiKey((e as Error).message)}`));
         process.exit(1);
       }
     } else if (parsed.apiKey === '-') {

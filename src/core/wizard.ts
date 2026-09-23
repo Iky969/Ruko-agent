@@ -141,7 +141,7 @@ export async function promptSetup(
       const defaultProvider = (
         isHostnameOrSubdomain(baseUrl, 'anthropic.com') || model.toLowerCase().startsWith('claude-')
           ? 'anthropic'
-          : isHostnameOrSubdomain(baseUrl, 'googleapis.com') || (!baseUrl && model.toLowerCase().startsWith('gemini-'))
+          : isHostnameOrSubdomain(baseUrl, 'googleapis.com') || model.toLowerCase().startsWith('gemini-')
             ? 'gemini'
             : 'openai-compatible'
       );

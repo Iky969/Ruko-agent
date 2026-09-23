@@ -8,10 +8,10 @@ import { Agent } from '../agent/agent.js';
 import { Context } from '../core/context.js';
 import { createProvider } from '../agent/llm.js';
 import { handleCommand } from '../agent/commands.js';
-import { mkdirSync, writeFileSync, existsSync, unlinkSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
-import { setWorkspaceRoot, getWorkspaceRoot } from '../agent/tools.js';
-import os from 'node:os';
+import { tmpdir } from 'node:os';
+import { takeSnapshot } from '../core/undo.js';
 
 const approvalConfig = {
   ...DEFAULT_CONFIG,
@@ -183,8 +183,7 @@ test('Item 3: containsSensitiveFilePattern rejects safe paths', () => {
 
 test('Item 4: code_search with regex alternation returns results without explicit isRegex', async () => {
   // Create a temporary test file
-  const tmpDir = join(os.tmpdir(), `ruko-test-search-${Date.now()}`);
-  mkdirSync(tmpDir, { recursive: true });
+  const tmpDir = mkdtempSync(join(tmpdir(), 'ruko-test-search-'));
   const testFile = join(tmpDir, 'test_search.txt');
   writeFileSync(testFile, 'This has a limitation\nThis is a known issue\nThis is a todo item\nNormal line\n');
 
@@ -202,8 +201,7 @@ test('Item 4: code_search with regex alternation returns results without explici
 });
 
 test('Item 4: code_search with explicit isRegex:true still works', async () => {
-  const tmpDir = join(os.tmpdir(), `ruko-test-search2-${Date.now()}`);
-  mkdirSync(tmpDir, { recursive: true });
+  const tmpDir = mkdtempSync(join(tmpdir(), 'ruko-test-search-'));
   const testFile = join(tmpDir, 'test_search.txt');
   writeFileSync(testFile, 'error: something\nwarning: another\ninfo: normal\n');
 
@@ -217,8 +215,7 @@ test('Item 4: code_search with explicit isRegex:true still works', async () => {
 });
 
 test('Item 4: code_search plain text without regex metacharacters still works as literal', async () => {
-  const tmpDir = join(os.tmpdir(), `ruko-test-search3-${Date.now()}`);
-  mkdirSync(tmpDir, { recursive: true });
+  const tmpDir = mkdtempSync(join(tmpdir(), 'ruko-test-search-'));
   writeFileSync(join(tmpDir, 'test.txt'), 'hello world\ngoodbye world\n');
 
   try {
@@ -231,8 +228,7 @@ test('Item 4: code_search plain text without regex metacharacters still works as
 });
 
 test('Item 4: code_search with invalid auto-detected regex falls back to literal', async () => {
-  const tmpDir = join(os.tmpdir(), `ruko-test-search4-${Date.now()}`);
-  mkdirSync(tmpDir, { recursive: true });
+  const tmpDir = mkdtempSync(join(tmpdir(), 'ruko-test-search-'));
   writeFileSync(join(tmpDir, 'test.txt'), 'text with (bad|regex[\n');
 
   try {
@@ -252,6 +248,9 @@ test('Item 5: subagent timeout message includes file modification report', async
   const config = {
     ...DEFAULT_CONFIG,
   };
+  const tempUndoDir = mkdtempSync(join(tmpdir(), 'ruko-test-undo-'));
+  const origUndoDir = process.env.RUKO_UNDO_DIR;
+  process.env.RUKO_UNDO_DIR = tempUndoDir;
 
   // Mock provider with isConfigured as a property (not a getter)
   const mockProvider = {
@@ -273,21 +272,33 @@ test('Item 5: subagent timeout message includes file modification report', async
     setCredentials: () => {},
   } as any;
 
-  const result = await runSubagent(
-    'do something slow',
-    { config, llmProvider: mockProvider },
-    { timeoutMs: 100 },
-  );
+  try {
+    const result = await runSubagent(
+      'do something slow',
+      { config, llmProvider: mockProvider },
+      { timeoutMs: 100 },
+    );
 
-  assert.ok(result.includes('timed out'), `Result should mention timeout: ${result}`);
-  assert.ok(
-    result.includes('Tidak ada file yang termodifikasi') || result.includes('file termodifikasi'),
-    `Result should report file modification status: ${result}`,
-  );
+    assert.ok(result.includes('timed out'), `Result should mention timeout: ${result}`);
+    assert.ok(
+      result.includes('Tidak ada file yang termodifikasi'),
+      `Result should report no file modification: ${result}`,
+    );
+  } finally {
+    if (origUndoDir !== undefined) {
+      process.env.RUKO_UNDO_DIR = origUndoDir;
+    } else {
+      delete process.env.RUKO_UNDO_DIR;
+    }
+    rmSync(tempUndoDir, { recursive: true, force: true });
+  }
 });
 
 test('Item 5: subagent timeout message includes rollback instructions when files are modified', async () => {
   const config = { ...DEFAULT_CONFIG };
+  const tempUndoDir = mkdtempSync(join(tmpdir(), 'ruko-test-undo-'));
+  const origUndoDir = process.env.RUKO_UNDO_DIR;
+  process.env.RUKO_UNDO_DIR = tempUndoDir;
 
   const mockProvider = {
     name: 'mock',
@@ -295,6 +306,11 @@ test('Item 5: subagent timeout message includes rollback instructions when files
     isConfigured: true,
     lastFinishReason: 'stop',
     chat: async (_msgs: unknown, opts: any) => {
+      // Simulate file modified before timeout
+      const dummyFile = join(tempUndoDir, 'modified_sample.txt');
+      writeFileSync(dummyFile, 'subagent changed this');
+      takeSnapshot(dummyFile, tempUndoDir);
+
       return new Promise<string>((_, reject) => {
         if (opts?.signal?.aborted) {
           reject(new Error('aborted'));
@@ -307,14 +323,25 @@ test('Item 5: subagent timeout message includes rollback instructions when files
     setCredentials: () => {},
   } as any;
 
-  const result = await runSubagent(
-    'test task',
-    { config, llmProvider: mockProvider },
-    { timeoutMs: 50 },
-  );
+  try {
+    const result = await runSubagent(
+      'test task',
+      { config, llmProvider: mockProvider },
+      { timeoutMs: 50 },
+    );
 
-  assert.ok(result.includes('timed out after 50ms'), 'Should include timeout duration');
-  assert.ok(result.includes('Tidak ada file yang termodifikasi'), 'Should report no files modified');
+    assert.ok(result.includes('timed out after 50ms'), 'Should include timeout duration');
+    assert.ok(result.includes('file termodifikasi'), 'Should report modified files');
+    assert.ok(result.includes('Opsi rollback'), 'Should include rollback options');
+    assert.ok(result.includes('/undo'), 'Should suggest /undo command');
+  } finally {
+    if (origUndoDir !== undefined) {
+      process.env.RUKO_UNDO_DIR = origUndoDir;
+    } else {
+      delete process.env.RUKO_UNDO_DIR;
+    }
+    rmSync(tempUndoDir, { recursive: true, force: true });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

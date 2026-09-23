@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { Confirmer, guardedExecute } from '../core/approval.js';
 import { join, relative as relativeFromCwd, resolve as resolvePath } from 'node:path';
 import { Context } from '../core/context.js';
-import { isHostnameOrSubdomain, isPrivateOrLocalHost, redactApiKey, saveConfig } from '../core/config.js';
+import { isHostnameOrSubdomain, isPrivateOrLocalHost, saveConfig } from '../core/config.js';
 import { execute } from '../core/executor.js';
 import { promptSetup, SetupResult } from '../core/wizard.js';
 import { bold, cyan, dim, formatDuration, formatK, green, renderBox, red, terminalWidth, visibleLength, yellow } from '../core/ui.js';

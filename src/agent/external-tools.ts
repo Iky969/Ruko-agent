@@ -184,9 +184,10 @@ export async function executeExternalTool(
       resolve({ stdout, stderr, exitCode: code, timedOut });
     });
 
-    child.on('error', (err) => {
+    child.on('error', (err: any) => {
       clearTimeout(timer);
-      resolve({ stdout, stderr: stderr + '\n' + String(err), exitCode: 1, timedOut: false });
+      const isTimeout = err?.code === 'ETIMEDOUT' || timedOut;
+      resolve({ stdout, stderr: stderr + '\n' + String(err), exitCode: 1, timedOut: isTimeout });
     });
 
     // Prevent unhandled EPIPE if child process exits before/without reading stdin
