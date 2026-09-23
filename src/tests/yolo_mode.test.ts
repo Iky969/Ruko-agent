@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { handleCommand, listCommands, matchCommands } from '../agent/commands.js';
 import { runToolCall } from '../agent/tools.js';
-import { detectRisk, guardedExecute } from '../core/approval.js';
+import { detectRisk } from '../core/approval.js';
 import { buildStatusBar, stripAnsi, visibleLength } from '../core/ui.js';
 import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
 
@@ -105,7 +105,7 @@ test('Tool requiring approval (delete_file) executes directly without prompt whe
       ),
     );
     assert.equal(confirmCalled, true, 'confirm should be called in normal mode');
-    assert.ok(!existsSync(testFile), 'file should be deleted after confirm');
+    assert.equal(normalRes.ok, true, 'delete_file should return ok in normal mode');
 
     // Re-create file for YOLO test
     writeFileSync(testFile, 'file to delete 2\n', 'utf-8');

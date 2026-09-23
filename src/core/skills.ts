@@ -53,18 +53,20 @@ export function globalSkillsDir(): string {
 /** Inisialisasi berkas guardrail default (anti-slop & anti-hallucination) jika belum ada. */
 export function initDefaultSkills(workspaceRoot: string = process.cwd()): void {
   const dir = defaultSkillsDir(workspaceRoot);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
+  mkdirSync(dir, { recursive: true });
 
   const antiSlopPath = join(dir, 'anti-slop.md');
-  if (!existsSync(antiSlopPath)) {
-    writeFileSync(antiSlopPath, DEFAULT_ANTI_SLOP_CONTENT, { encoding: 'utf8', mode: 0o644 });
+  try {
+    writeFileSync(antiSlopPath, DEFAULT_ANTI_SLOP_CONTENT, { encoding: 'utf8', mode: 0o644, flag: 'wx' });
+  } catch (e: any) {
+    if (e?.code !== 'EEXIST') throw e;
   }
 
   const antiHallucinationPath = join(dir, 'anti-hallucination.md');
-  if (!existsSync(antiHallucinationPath)) {
-    writeFileSync(antiHallucinationPath, DEFAULT_ANTI_HALLUCINATION_CONTENT, { encoding: 'utf8', mode: 0o644 });
+  try {
+    writeFileSync(antiHallucinationPath, DEFAULT_ANTI_HALLUCINATION_CONTENT, { encoding: 'utf8', mode: 0o644, flag: 'wx' });
+  } catch (e: any) {
+    if (e?.code !== 'EEXIST') throw e;
   }
 }
 

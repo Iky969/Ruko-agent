@@ -9,7 +9,6 @@ import {
   extractFallbackToolCalls,
   normalizeToolName,
   parseToolCalls,
-  runToolCall,
   setWorkspaceRoot,
   stripToolBlocks,
 } from '../agent/tools.js';

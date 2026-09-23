@@ -113,7 +113,6 @@ test('already-aborted signal stops the turn before any request (v0.7)', async ()
 // --- §5 mechanical guard: consecutive identical tool call deduplication -----
 
 test('two consecutive identical destructive tool calls across steps: second call is skipped with clear warning (§5)', async () => {
-  let execCount = 0;
   // Provider returns identical exec call in step 1 and step 2, then final text in step 3
   const provider = new FakeProvider([
     '```tool\n{"tool": "exec", "command": "echo destructive-action"}\n```',

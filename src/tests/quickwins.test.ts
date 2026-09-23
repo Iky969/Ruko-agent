@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer, Server } from 'node:http';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -9,12 +9,10 @@ import { runToolCall, setWorkspaceRoot } from '../agent/tools.js';
 import {
   checkSsrfSafety,
   isAllowedContentType,
-  isPrivateOrLocalIp,
   sanitizeHtml,
   webFetchTool,
 } from '../agent/webtools.js';
 import { saveSkill } from '../core/skills.js';
-import { DEFAULT_CONFIG } from '../types.js';
 
 function inTempWorkspace<T>(fn: (ws: string) => Promise<T> | T): Promise<T> {
   const ws = mkdtempSync(join(tmpdir(), 'ruko-quickwins-'));

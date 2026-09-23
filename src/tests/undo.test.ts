@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { listSnapshots, takeSnapshot, undoLast, defaultUndoDir } from '../core/undo.js';
+import { listSnapshots, takeSnapshot, undoLast } from '../core/undo.js';
 
 /** Undo journal goes under <cwd>/.ruko/undo — isolate cwd per test. */
 function inTempCwd<T>(fn: () => T): T {

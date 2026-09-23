@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   SECURITY_CORE_FILES,
-  assertNotSecurityCore,
   assertNotSensitivePath,
   detectSensitiveFileAccessInExec,
   isSecurityCoreFile,
@@ -25,8 +24,6 @@ import {
 } from '../agent/webtools.js';
 import { runSubagent } from '../agent/subagent.js';
 import { loadConfig } from '../core/config.js';
-import { Agent } from '../agent/agent.js';
-import { Context } from '../core/context.js';
 import { LLMProvider, ChatOptions } from '../agent/llm.js';
 import { AgentConfig, ContextMessage, DEFAULT_CONFIG } from '../types.js';
 

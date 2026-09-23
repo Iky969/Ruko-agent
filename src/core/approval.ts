@@ -43,9 +43,6 @@ export interface RiskVerdict {
   reason: string | null;
 }
 
-/** Numeric ordering for risk comparison. */
-const RISK_RANK: Record<RiskLevel, number> = { none: 0, dangerous: 1, blocked: 2 };
-
 // ─────────────────────────────────────────────────────────────────────────────
 // BLOCKED_PATTERNS — always refused, no override possible
 //
@@ -66,7 +63,7 @@ const RISK_RANK: Record<RiskLevel, number> = { none: 0, dangerous: 1, blocked: 2
  * then a critical path.
  */
 const RM_CRITICAL_RE =
-  /\brm\s+(?:-[a-z]*r[a-z]*f[a-z]*|-[a-z]*f[a-z]*r[a-z]*|-[rR]\s+-[fF]|-[fF]\s+-[rR]|--recursive(?:\s+--force)?|--force\s+--recursive)(?:\s+--?\S+)*\s+(?:\/[*]?(?:\s|$)|\/(?:etc|bin|usr|lib(?:64)?|boot|sys|proc|var|dev|home|root|run|opt|srv)(?:[\/\s*]|$)|~(?:\/|\s|$)|\$(?:HOME|USER)(?:\/|\s|$))/i;
+  /\brm\s+(?:-[a-z]*r[a-z]*f[a-z]*|-[a-z]*f[a-z]*r[a-z]*|-[rR]\s+-[fF]|-[fF]\s+-[rR]|--recursive(?:\s+--force)?|--force\s+--recursive)(?:\s+-[a-zA-Z0-9_\-=]+)*\s+(?:\/[*]?(?:\s|$)|\/(?:etc|bin|usr|lib(?:64)?|boot|sys|proc|var|dev|home|root|run|opt|srv)(?:[\/\s*]|$)|~(?:\/|\s|$)|\$(?:HOME|USER)(?:\/|\s|$))/i;
 
 /** Always-refused patterns (hardline). */
 const BLOCKED_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
@@ -74,7 +71,7 @@ const BLOCKED_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [RM_CRITICAL_RE, 'rm destruktif ke path sistem/home kritis'],
   // rm/rmdir ANY form targeting critical system paths (even without -rf flags)
   // Catches: rm /etc, rm -r /usr, rmdir /boot, sudo rm /bin, etc.
-  [/\b(?:rm|rmdir)\b(?:\s+--?\S+)*\s+(?:\/[*]?(?:\s|$)|\/(?:etc|bin|usr|lib(?:64)?|boot|sys|proc|var|dev|home|root|run|opt|srv)(?:[\/\s*]|$)|~(?:\/|\s|$)|\$(?:HOME|USER)(?:\/|\s|$))/i, 'rm/rmdir ke path sistem kritis (selalu diblokir)'],
+  [/\b(?:rm|rmdir)\b(?:\s+-[a-zA-Z0-9_\-=]+)*\s+(?:\/[*]?(?:\s|$)|\/(?:etc|bin|usr|lib(?:64)?|boot|sys|proc|var|dev|home|root|run|opt|srv)(?:[\/\s*]|$)|~(?:\/|\s|$)|\$(?:HOME|USER)(?:\/|\s|$))/i, 'rm/rmdir ke path sistem kritis (selalu diblokir)'],
   // rm dengan --no-preserve-root (melewati perlindungan root secara eksplisit)
   [/\brm\b[^|;&\n]*--no-preserve-root/i, 'rm --no-preserve-root (melewati proteksi root)'],
   // Format filesystem

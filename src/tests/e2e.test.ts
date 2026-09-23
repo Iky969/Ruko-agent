@@ -14,7 +14,6 @@ function startFakeServer(): Promise<{ server: Server; url: string }> {
   return new Promise((resolve) => {
     let callCount = 0;
     const server = createServer((req, res) => {
-      const auth = req.headers.authorization ?? '';
       if (req.url?.endsWith('/models')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ data: [{ id: 'fake-e2e-model' }] }));

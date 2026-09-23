@@ -13,7 +13,6 @@ import {
   renderDivider,
   terminalWidth,
   truncateVisible,
-  RevealFilter,
   stripAnsi,
   visibleLength,
 } from '../core/ui.js';

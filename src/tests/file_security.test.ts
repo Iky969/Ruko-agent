@@ -5,12 +5,11 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   detectWorkspaceMutationInExec,
-  isPathInsideWorkspace,
   runToolCall,
   setWorkspaceRoot,
 } from '../agent/tools.js';
 import { undoLast } from '../core/undo.js';
-import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
+import { DEFAULT_CONFIG } from '../types.js';
 
 function inTempWorkspace<T>(fn: (ws: string) => Promise<T> | T): Promise<T> {
   const ws = mkdtempSync(join(tmpdir(), 'ruko-filesec-'));

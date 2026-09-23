@@ -1,5 +1,4 @@
 import { ChildProcess, spawn } from 'node:child_process';
-import path from 'node:path';
 
 export type ProcessState = 'running' | 'exited' | 'stale';
 
@@ -405,7 +404,6 @@ export class ProcessManager {
       while (Date.now() < killDeadline) {
         await new Promise((r) => setTimeout(r, 50));
         if ((proc.status as ProcessState) === 'exited' || isProcessDead(proc.pid)) {
-          exited = true;
           break;
         }
       }

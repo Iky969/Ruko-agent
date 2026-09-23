@@ -13,7 +13,7 @@ import {
 import { handleCommand, listCommands, buildHelpText } from '../agent/commands.js';
 import { Context } from '../core/context.js';
 import { DEFAULT_CONFIG } from '../types.js';
-import { getWorkspaceRoot, setWorkspaceRoot } from '../agent/tools.js';
+import { getWorkspaceRoot } from '../agent/tools.js';
 
 // ============================================================================
 // TUGAS 8: terminalWidth priority (process.env.COLUMNS > stdout.columns)

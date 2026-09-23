@@ -7,7 +7,6 @@ import os from 'node:os';
 import {
   assertInsideWorkspace,
   assertNotSensitivePath,
-  isPathInsideWorkspace,
   isSensitivePath,
   runToolCall,
 } from '../agent/tools.js';

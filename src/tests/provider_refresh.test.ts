@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { Agent } from '../agent/agent.js';
 import { handleCommand } from '../agent/commands.js';
 import { Context } from '../core/context.js';
-import { createProvider, LLMProvider } from '../agent/llm.js';
+import { createProvider } from '../agent/llm.js';
 import { DEFAULT_CONFIG } from '../types.js';
 
 test('Item 1: /login command refreshes provider instance in active session without process restart', async () => {

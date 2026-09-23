@@ -5,7 +5,7 @@
  */
 import { describe, it } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { detectRisk, containsShellOperators, allSegmentsAllowlisted } from '../core/approval.js';
+import { detectRisk, containsShellOperators } from '../core/approval.js';
 import type { AgentConfig } from '../types.js';
 import { DEFAULT_CONFIG } from '../types.js';
 

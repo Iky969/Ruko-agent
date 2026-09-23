@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ThinkingTicker, createSpinner, buildStatusPanel, stripAnsi, visibleLength } from '../core/ui.js';
 import { listCommands, buildHelpText } from '../agent/commands.js';
-import { createProvider, backoffDelay, parseRetryAfterMs } from '../agent/llm.js';
+import { createProvider, backoffDelay } from '../agent/llm.js';
 import { Agent } from '../agent/agent.js';
 import { Context } from '../core/context.js';
 import { DEFAULT_CONFIG, ContextMessage } from '../types.js';

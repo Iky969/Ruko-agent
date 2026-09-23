@@ -4,7 +4,7 @@ import { Agent } from './agent.js';
 import { AgentConfig } from '../types.js';
 import { LLMProvider } from './llm.js';
 import { Confirmer, decodePathSafely } from '../core/approval.js';
-import { listSnapshots, undoLast } from '../core/undo.js';
+import { listSnapshots } from '../core/undo.js';
 
 /**
  * Subagent delegation runner (Roadmap #3).
