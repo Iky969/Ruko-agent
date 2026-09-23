@@ -1,4 +1,5 @@
 import { AgentConfig, ContextMessage } from '../types.js';
+import { isHostnameOrSubdomain } from '../core/config.js';
 import { parseToolCalls } from './tools.js';
 
 /**
@@ -1166,10 +1167,10 @@ export function createProvider(
   const provider = (config.provider || '').toLowerCase();
   const rawBase = (config.baseUrl || '').toLowerCase().replace(/^["'`]+|["'`]+$/g, '').trim();
   const model = (config.model || '').toLowerCase();
-  if (provider === 'anthropic' || rawBase.includes('anthropic.com') || model.startsWith('claude-')) {
+  if (provider === 'anthropic' || isHostnameOrSubdomain(rawBase, 'anthropic.com') || model.startsWith('claude-')) {
     return new AnthropicProvider(config, retry);
   }
-  if (provider === 'gemini' || rawBase.includes('googleapis.com') || (!rawBase && model.startsWith('gemini-'))) {
+  if (provider === 'gemini' || isHostnameOrSubdomain(rawBase, 'googleapis.com') || (!rawBase && model.startsWith('gemini-'))) {
     return new GeminiProvider(config, retry);
   }
   return new OpenAiCompatibleProvider(config, retry);

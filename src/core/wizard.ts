@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline/promises';
 import { dim, whiteBright, bgBlue, green, red, yellow, bold } from './ui.js';
 import { missingConfigFields } from '../agent/llm.js';
+import { isHostnameOrSubdomain } from './config.js';
 import { createLineEditor } from './tui.js';
 
 /**
@@ -138,9 +139,9 @@ export async function promptSetup(
     let provider: string | undefined;
     if (options.askProvider) {
       const defaultProvider = (
-        baseUrl.toLowerCase().includes('anthropic.com') || model.toLowerCase().startsWith('claude-')
+        isHostnameOrSubdomain(baseUrl, 'anthropic.com') || model.toLowerCase().startsWith('claude-')
           ? 'anthropic'
-          : baseUrl.toLowerCase().includes('googleapis.com') || (!baseUrl && model.toLowerCase().startsWith('gemini-'))
+          : isHostnameOrSubdomain(baseUrl, 'googleapis.com') || (!baseUrl && model.toLowerCase().startsWith('gemini-'))
             ? 'gemini'
             : 'openai-compatible'
       );

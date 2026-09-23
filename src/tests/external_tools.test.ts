@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -86,8 +87,7 @@ test('manifestToToolDefinition produces correct OpenAI format', () => {
 });
 
 test('loadManifest and scanManifests with a valid temporary file', async () => {
-  const tempDir = join(tmpdir(), 'external-tools-test-' + Date.now());
-  await mkdir(tempDir, { recursive: true });
+  const tempDir = mkdtempSync(join(tmpdir(), 'ruko-test-'));
 
   const manifestPath = join(tempDir, 'test.tool.json');
   const manifestData = {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parseEnv, loadDotenv } from '../core/dotenv.js';
-import { writeFileSync, unlinkSync } from 'node:fs';
+import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -34,7 +34,8 @@ second line"
 });
 
 test('loadDotenv loads file into process.env without overriding existing by default', () => {
-  const tmpFile = join(tmpdir(), `test-ruko-dotenv-${Date.now()}.env`);
+  const tmpDir = mkdtempSync(join(tmpdir(), 'ruko-test-'));
+  const tmpFile = join(tmpDir, 'test.env');
   writeFileSync(tmpFile, 'TEST_RUKO_DOTENV_KEY=some_value\nTEST_EXISTING_KEY=new_val', 'utf8');
 
   process.env.TEST_EXISTING_KEY = 'orig_val';
@@ -49,6 +50,6 @@ test('loadDotenv loads file into process.env without overriding existing by defa
   } finally {
     delete process.env.TEST_RUKO_DOTENV_KEY;
     delete process.env.TEST_EXISTING_KEY;
-    try { unlinkSync(tmpFile); } catch {}
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   }
 });

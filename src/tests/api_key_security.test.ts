@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { redactApiKey, saveConfig } from '../core/config.js';
-import { statSync, rmSync, writeFileSync, unlinkSync } from 'node:fs';
+import { statSync, rmSync, writeFileSync, unlinkSync, mkdtempSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 test('redactApiKey masks sk- correctly', () => {
   assert.strictEqual(redactApiKey('sk-abc123def456xyz789'), 'sk-***z789');
@@ -26,7 +27,8 @@ test('redactApiKey handles empty/null-like inputs', () => {
 });
 
 test('saveConfig enforces 0o600 permissions', () => {
-  const tmpPath = join(tmpdir(), `ruko-test-config-${Date.now()}.json`);
+  const tmpDir = mkdtempSync(join(tmpdir(), 'ruko-test-'));
+  const tmpPath = join(tmpDir, 'config.json');
   try {
     saveConfig({} as any, tmpPath);
     const stat = statSync(tmpPath);
@@ -35,11 +37,11 @@ test('saveConfig enforces 0o600 permissions', () => {
       assert.strictEqual(stat.mode & 0o777, 0o600);
     }
   } finally {
-    try { rmSync(tmpPath); } catch {}
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   }
 });
 
-const PROJECT_ROOT = join(import.meta.dirname, '..', '..');
+const PROJECT_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const CLI_PATH = join(PROJECT_ROOT, 'dist', 'index.js');
 
 test('CLI blocks raw literal --api-key without --insecure-api-key', () => {
@@ -65,7 +67,8 @@ test('CLI accepts literal --api-key when --insecure-api-key is supplied', () => 
 });
 
 test('CLI securely loads --api-key from @file', () => {
-  const tmpKeyFile = join(tmpdir(), `ruko-test-key-${Date.now()}.txt`);
+  const tmpDir = mkdtempSync(join(tmpdir(), 'ruko-test-'));
+  const tmpKeyFile = join(tmpDir, 'key.txt');
   try {
     writeFileSync(tmpKeyFile, 'sk-from-file-secret\n');
     const out = execFileSync('node', [CLI_PATH, '--api-key', `@${tmpKeyFile}`, '--version'], {
@@ -74,7 +77,7 @@ test('CLI securely loads --api-key from @file', () => {
     });
     assert.ok(out.includes('1.7.7') || out.length > 0);
   } finally {
-    try { unlinkSync(tmpKeyFile); } catch {}
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   }
 });
 

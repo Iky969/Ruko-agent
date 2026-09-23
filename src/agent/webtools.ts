@@ -63,19 +63,32 @@ export interface WebFetchResult {
 
 /** Sanitizes HTML tags and entities into clean readable text. */
 export function sanitizeHtml(html: string): string {
-  return html
-    // Remove scripts, styles, noscripts, svg, iframe
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
-    .replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi, '')
-    .replace(/<svg\b[^<]*(?:(?!<\/svg>)<[^<]*)*<\/svg>/gi, '')
-    .replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, '')
-    // Convert structural block tags to newline
+  let text = html;
+
+  // 1. Remove scripts, styles, noscripts, svg, iframe along with their inner contents
+  // Using an iterative loop prevents nested/interleaved tag injection bypasses
+  const dangerousBlockRegex = /<(script|style|noscript|svg|iframe)\b[^>]*>[\s\S]*?<\/\1>/gi;
+  let prev = '';
+  while (text !== prev) {
+    prev = text;
+    text = text.replace(dangerousBlockRegex, '');
+  }
+
+  // 2. Convert structural block tags to newline
+  text = text
     .replace(/<\/(div|p|h[1-6]|li|tr|section|article|header|footer|nav|blockquote)>/gi, '\n')
-    .replace(/<(br|hr)\s*\/?>/gi, '\n')
-    // Remove all remaining HTML tags
-    .replace(/<[^>]+>/g, '')
-    // Decode HTML entities
+    .replace(/<(br|hr)\s*\/?>/gi, '\n');
+
+  // 3. Iteratively remove all remaining HTML tags to prevent nested tag remnants
+  const tagRegex = /<[^>]+>/g;
+  prev = '';
+  while (text !== prev) {
+    prev = text;
+    text = text.replace(tagRegex, '');
+  }
+
+  // 4. Decode HTML entities
+  return text
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
     .replace(/&lt;/gi, '<')
@@ -87,7 +100,7 @@ export function sanitizeHtml(html: string): string {
       const n = Number(code);
       return Number.isFinite(n) ? String.fromCharCode(n) : '';
     })
-    // Normalize consecutive spaces and newlines
+    // 5. Normalize consecutive spaces and newlines
     .replace(/[ \t]+/g, ' ')
     .replace(/\n\s*\n\s*\n+/g, '\n\n')
     .trim();
