@@ -3,7 +3,7 @@ set -e
 
 REPO="https://github.com/Iky969/Ruko-agent.git"
 INSTALL_DIR="$HOME/.ruko-agent"
-PINNED_COMMIT_SHA="b23bbc9876560fc5458b22e0362d87f15d08328e" # v1.7.7 release candidate
+PINNED_COMMIT_SHA="3c1f5689244f49d1f75151358a119f8745976fc5" # v1.7.7 release
 TAG="${RUKO_VERSION:-v1.7.7}"
 TARGET_SHA="${RUKO_COMMIT_SHA:-$PINNED_COMMIT_SHA}"
 
