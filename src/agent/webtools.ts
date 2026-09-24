@@ -159,11 +159,17 @@ export function sanitizeHtml(html: string): string {
       return entity;
     });
 
-  // 5. Second-pass tag removal: entity decoding above can re-introduce angle
-  //    brackets (e.g. `&lt;script&gt;` → `<script>`).  Strip any tags that
-  //    re-emerged, then also strip dangerous blocks to cover nested cases.
-  text = stripDangerousBlocks(text);
-  text = text.replace(/<[^>]+>/g, '');
+  // 5. Second-pass: entity decoding above can re-introduce angle brackets
+  //    (e.g. `&lt;script&gt;alert()&lt;/script&gt;` → `<script>alert()</script>`).
+  //    We strip only *complete* dangerous blocks (matching open + close tags)
+  //    to prevent XSS, while preserving standalone decoded entities like
+  //    `&lt;script&gt;` → `<script>` as literal text content.
+  //    Using a targeted regex instead of stripDangerousBlocks avoids the issue
+  //    where an unclosed tag consumes all remaining text.
+  text = text.replace(
+    /<(script|style|noscript|svg|iframe)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
+    '',
+  );
 
   // 6. Normalize consecutive spaces and newlines
   return text
