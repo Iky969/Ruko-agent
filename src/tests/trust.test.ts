@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { isWorkspaceTrusted, markWorkspaceTrusted, promptWorkspaceTrust, TRUST_MARKER_FILE } from '../core/trust.js';
+import {
+  isWorkspaceTrusted,
+  markWorkspaceTrusted,
+  promptWorkspaceTrust,
+  TRUST_MARKER_FILE,
+  globalTrustStorePath,
+  hashWorkspacePath,
+} from '../core/trust.js';
 import { loadConfig, saveConfig } from '../core/config.js';
 import { DEFAULT_CONFIG } from '../types.js';
 
@@ -113,4 +120,67 @@ test('L1: RUKO_TRUST_FOLDER mem-bypass trust check DENGAN warning eksplisit', ()
     console.warn = originalWarn;
     rmSync(ws, { recursive: true, force: true });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK-03: Global trust store — trust records live in
+// ~/.ruko/trusted-workspaces.json instead of inside the repo.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('TASK-03: hashWorkspacePath produces a stable hex hash', () => {
+  const ws = '/tmp/test-workspace';
+  const h1 = hashWorkspacePath(ws);
+  const h2 = hashWorkspacePath(ws);
+  assert.equal(h1, h2, 'same path should produce same hash');
+  assert.match(h1, /^[0-9a-f]{64}$/, 'hash should be 64-char hex');
+
+  // Different paths produce different hashes
+  const h3 = hashWorkspacePath('/tmp/other-workspace');
+  assert.notEqual(h1, h3, 'different paths should produce different hashes');
+});
+
+test('TASK-03: markWorkspaceTrusted writes to global trust store', async () => {
+  await inTempWorkspace(async (ws) => {
+    const configPath = join(ws, '.ruko', 'config.json');
+    const cfg = { ...DEFAULT_CONFIG };
+    saveConfig(cfg, configPath);
+
+    // Suppress migration warnings from console.warn
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      markWorkspaceTrusted(ws, configPath);
+
+      // Verify global store was written
+      const storePath = globalTrustStorePath();
+      assert.ok(existsSync(storePath), 'global trust store should exist');
+
+      const store = JSON.parse(readFileSync(storePath, 'utf8'));
+      const hash = hashWorkspacePath(ws);
+      assert.ok(store[hash], 'workspace hash should be in global store');
+      assert.equal(store[hash].path, resolve(ws), 'stored path should be canonical');
+      assert.ok(store[hash].trustedAt, 'trustedAt should be set');
+
+      // Also verify isWorkspaceTrusted reads from global store
+      assert.equal(isWorkspaceTrusted(ws, configPath), true);
+    } finally {
+      console.warn = originalWarn;
+      // Clean up global store entry
+      try {
+        const storePath = globalTrustStorePath();
+        const store = JSON.parse(readFileSync(storePath, 'utf8'));
+        const hash = hashWorkspacePath(ws);
+        delete store[hash];
+        writeFileSync(storePath, JSON.stringify(store, null, 2) + '\n', 'utf8');
+      } catch {
+        // best effort cleanup
+      }
+    }
+  });
+});
+
+test('TASK-03: globalTrustStorePath points to ~/.ruko/', () => {
+  const storePath = globalTrustStorePath();
+  assert.ok(storePath.includes('.ruko'), 'store path should be under .ruko');
+  assert.ok(storePath.endsWith('trusted-workspaces.json'), 'store should be named trusted-workspaces.json');
 });

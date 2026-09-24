@@ -132,6 +132,23 @@ export const DEFAULT_CONFIG: AgentConfig = {
 };
 
 /**
+ * TASK-02 defense-in-depth: env var names allowed in profile `apiKeyEnv`.
+ * Mirrors ALLOWED_API_KEY_ENV_VARS in config.ts — kept as a local Set so
+ * types.ts stays dependency-free (no circular import).
+ */
+const ALLOWED_PROFILE_API_KEY_ENVS = new Set([
+  'RUKO_API_KEY',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GEMINI_API_KEY',
+  'DEEPSEEK_API_KEY',
+  'GROQ_API_KEY',
+  'MISTRAL_API_KEY',
+  'XAI_API_KEY',
+  'OPENROUTER_API_KEY',
+]);
+
+/**
  * Resolve the active provider profile over a base config (§2).
  *
  * Priority: `activeProfile` → `defaultProfile` → no profile (fields untouched).
@@ -151,7 +168,13 @@ export function resolveProfileCredentials(
   if (profile.baseUrl) out.baseUrl = profile.baseUrl;
   if (profile.model) out.model = profile.model;
   if (profile.provider) out.provider = profile.provider;
-  const envKey = profile.apiKeyEnv ? env[profile.apiKeyEnv] : undefined;
+  // TASK-02 defense-in-depth: only resolve apiKeyEnv if it names a recognised
+  // LLM-provider env var.  This guards against exfiltration even if a profile
+  // somehow bypassed sanitizeConfigFile (e.g. programmatic callers).
+  const envVarName = profile.apiKeyEnv?.trim();
+  const envKey = envVarName && ALLOWED_PROFILE_API_KEY_ENVS.has(envVarName)
+    ? env[envVarName]
+    : undefined;
   // If apiKeyEnv is set and available in env, it takes priority over the literal apiKey.
   const key = (envKey || profile.apiKey || '').trim();
   if (key) out.apiKey = key;

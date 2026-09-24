@@ -8,6 +8,7 @@ import {
   globTool,
   globToRegex,
   IGNORED_DIRS,
+  MAX_REGEX_QUERY_LENGTH,
 } from '../agent/filetools.js';
 import { parseToolCalls, runToolCall, setWorkspaceRoot } from '../agent/tools.js';
 
@@ -343,4 +344,22 @@ test('glob and code_search reject paths outside workspace (H1 sandbox)', async (
   const searchRes = await codeSearchTool('root', { path: '/etc' });
   assert.equal(searchRes.ok, false);
   assert.match(searchRes.text, /di luar working directory/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK-06: batas panjang query code_search (anti-ReDoS)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('TASK-06: codeSearchTool rejects overly long query', async () => {
+  const longQuery = 'a'.repeat(MAX_REGEX_QUERY_LENGTH + 1);
+  const result = await codeSearchTool(longQuery, {}, tmpDir);
+  assert.equal(result.ok, false);
+  assert.ok(result.text.includes('terlalu panjang'));
+  assert.equal(result.totalMatches, 0);
+  assert.equal(result.totalFiles, 0);
+
+  // Query tepat pada batas maksimum tetap diproses (bukan ditolak karena panjang).
+  const atLimit = 'helper ' + 'a'.repeat(MAX_REGEX_QUERY_LENGTH - 'helper '.length);
+  const okResult = await codeSearchTool(atLimit, {}, tmpDir);
+  assert.equal(okResult.ok, true);
 });

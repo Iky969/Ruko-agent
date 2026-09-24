@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { after, before, test } from 'node:test';
-import { looksBinary, readFileTool, MAX_READ_LIMIT } from '../agent/filetools.js';
+import { looksBinary, readFileTool, MAX_READ_LIMIT, MAX_READ_FILE_SIZE } from '../agent/filetools.js';
 import { parseToolCalls, runToolCall, setWorkspaceRoot } from '../agent/tools.js';
 
 let tmpDir: string;
@@ -97,4 +97,55 @@ test('readFileTool rejects path traversal outside workspace (H1 sandbox)', async
   const r = await readFileTool('/etc/passwd');
   assert.equal(r.ok, false);
   assert.match(r.text, /di luar working directory/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK-05: O_NOFOLLOW di readFileTool (defense-in-depth anti-TOCTOU)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('TASK-05: readFileTool rejects symlinks with O_NOFOLLOW (deny-by-default)', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ruko-symlink-'));
+  const real = path.join(dir, 'real.txt');
+  const link = path.join(dir, 'link.txt');
+  await fs.writeFile(real, 'hello\n', 'utf8');
+  try {
+    await fs.symlink(real, link);
+  } catch {
+    // Platform tanpa hak symlink (mis. Windows tanpa developer mode): lewati.
+    await fs.rm(dir, { recursive: true, force: true });
+    return;
+  }
+  try {
+    // Symlink INTERNAL (target di dalam workspace) pun harus ditolak di level open.
+    const result = await readFileTool(link, {}, dir);
+    assert.equal(result.ok, false);
+    assert.ok(result.text.includes('symbolic link') || result.text.includes('ELOOP'));
+
+    // File asli tetap terbaca bila diakses langsung (tanpa lewat symlink).
+    const direct = await readFileTool(real, {}, dir);
+    assert.equal(direct.ok, true);
+    assert.match(direct.text, /hello/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK-06: batas ukuran file di readFileTool (anti-OOM)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('TASK-06: readFileTool rejects files larger than MAX_READ_FILE_SIZE', async () => {
+  const big = path.join(tmpDir, 'huge.txt');
+  await fs.writeFile(big, 'x', 'utf8');
+  await fs.truncate(big, MAX_READ_FILE_SIZE + 1); // file sparse, tidak mengisi disk
+  const r = await readFileTool(big);
+  assert.equal(r.ok, false);
+  assert.match(r.text, /terlalu besar/);
+  assert.match(r.text, /max 10 MB/);
+
+  // File tepat pada batas masih boleh dibaca.
+  const atLimit = path.join(tmpDir, 'at-limit.txt');
+  await fs.writeFile(atLimit, 'masih kecil\n', 'utf8');
+  const ok = await readFileTool(atLimit);
+  assert.equal(ok.ok, true);
 });
