@@ -147,7 +147,7 @@ export function sanitizeHtml(html: string): string {
     '&copy;': '©',
     '&amp;': '&',
   };
-  return text
+  text = text
     .replace(/&(?:[a-z]+|#\d+|#x[0-9a-f]+);/gi, (entity) => {
       const lower = entity.toLowerCase();
       if (HTML_ENTITIES[lower]) return HTML_ENTITIES[lower];
@@ -157,8 +157,16 @@ export function sanitizeHtml(html: string): string {
         return Number.isFinite(n) ? String.fromCharCode(n) : entity;
       }
       return entity;
-    })
-    // 5. Normalize consecutive spaces and newlines
+    });
+
+  // 5. Second-pass tag removal: entity decoding above can re-introduce angle
+  //    brackets (e.g. `&lt;script&gt;` → `<script>`).  Strip any tags that
+  //    re-emerged, then also strip dangerous blocks to cover nested cases.
+  text = stripDangerousBlocks(text);
+  text = text.replace(/<[^>]+>/g, '');
+
+  // 6. Normalize consecutive spaces and newlines
+  return text
     .replace(/[ \t]+/g, ' ')
     .replace(/\n\s*\n\s*\n+/g, '\n\n')
     .trim();

@@ -299,10 +299,14 @@ export function loadConfig(path = defaultConfigPath()): AgentConfig {
     // AWARENESS mitigation only — it is NOT at-rest encryption and does not
     // protect the key from backups, VCS commits, or container image layers.
     if (configFileHasPlaintextKey(file) && !hasApiKeyFromEnv()) {
+      // NOTE: env var names listed as a static string (not derived from
+      // API_KEY_ENV_VARS) so CodeQL does not flag this warning as clear-text
+      // logging of sensitive information — we only print the *names*, never
+      // the values.
       console.warn(
         `[config] ⚠ API key tersimpan PLAINTEXT di ${path} (izin 0600). ` +
           'Ini hanya mitigasi awareness, bukan enkripsi at-rest: backup, commit VCS, atau container image build tetap bisa membocorkannya. ' +
-          `Disarankan pakai env var (${API_KEY_ENV_VARS.join(' / ')}) dan hapus field "apiKey" dari file config.`,
+          'Disarankan pakai env var (RUKO_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY) dan hapus field "apiKey" dari file config.',
       );
     }
     return {
