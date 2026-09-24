@@ -6,83 +6,54 @@
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
 [![Tests](https://img.shields.io/badge/tests-817%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Security](https://img.shields.io/badge/security-CodeQL%20%7C%20Secret%20Scanning%20%7C%20Dependabot-success.svg)](.github/SECURITY.md)
 
-**Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
+**Ruko** adalah AI Coding Agent CLI yang cepat, minimalis, dan *security-hardened*. Dibangun murni di atas **Node.js (ESM) + TypeScript tanpa runtime dependencies**, Ruko menghadirkan pair-programming yang andal langsung dari terminal.
 
-### Cara Cepat (One-liner Installer)
+### Install Cepat
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh | bash
-```
-### Troubleshooting (Termux / Android)
-
-Jika muncul pesan `bash: .../usr/bin/ruko: Permission denied` saat menjalankan perintah `ruko`, berikan izin eksekusi secara manual:
-
-```bash
-chmod +x $PREFIX/bin/ruko
-```
-
-### 🔧 Troubleshooting & Pemulihan Terminal Raw Mode (Post-Crash / SIGKILL)
-
-Ruko menggunakan terminal *raw mode* untuk mendukung *in-place live update*, multiline editing, dan visualisasi aktivitas responsif. Jika proses Ruko dihentikan secara paksa di level kernel melalui sinyal **SIGKILL** (`kill -9`) atau mengalami crash abnormal tanpa sempat mengeksekusi *emergency cleanup handler*, terminal pengguna berpotensi tertinggal dalam kondisi tidak responsif (karakter yang diketik tidak muncul di layar atau *echo* mati).
-
-Untuk memulihkan kondisi terminal ke keadaan normal secara instan:
-```bash
-# Opsi 1: Reset konfigurasi terminal sepenuhnya (paling disarankan)
-reset
-
-# Opsi 2: Kembalikan parameter terminal ke mode standar (sane mode)
-stty sane
-
-# Opsi 3: Bila kursor terminal menghilang
-tput cnorm
+cd /proyek-anda
+ruko
 ```
 
 ---
 
 ## 📑 Daftar Isi
 
-- [Sorotan Utama](#-sorotan-utama)
-- [Instalasi & Memulai Cepat](#-instalasi--memulai-cepat)
-- [Troubleshooting & Pemulihan Terminal](#-troubleshooting--pemulihan-terminal-raw-mode-post-crash--sigkill)
-- [Arsitektur Keamanan (Dual-Layer Gate & Sandbox)](#-arsitektur-keamanan)
-- [Fitur Unggulan](#-fitur-unggulan)
-- [Daftar Tool Terintegrasi](#-daftar-tool-terintegrasi)
-- [Daftar Perintah Slash (Slash Commands)](#-daftar-perintah-slash)
-- [Konfigurasi & Profil](#-konfigurasi--profil)
-- [Pengujian & Verifikasi](#-pengujian--verifikasi)
-- [Batasan Keamanan & Limitasi Sistem](#-security-boundaries--known-limitations)
-- [Struktur Modul](#-struktur-modul)
+- [Sorotan](#-sorotan-utama)
+- [Instalasi](#-instalasi--memulai-cepat)
+- [Keamanan](#-arsitektur-keamanan)
+- [Fitur](#-fitur-unggulan)
+- [Tools](#-daftar-tool-terintegrasi)
+- [Slash Commands](#-daftar-perintah-slash)
+- [Konfigurasi](#-konfigurasi--profil)
+- [Pengujian](#-pengujian--verifikasi)
+- [Troubleshooting](#-troubleshooting)
+- [Struktur](#-struktur-modul)
 - [Lisensi](#-lisensi)
 
 ---
 
 ## 🌟 Sorotan Utama
 
-- 🛡️ **Dual-Layer Approval Gate & Workspace Sandboxing**:
-  Perlindungan komprehensif dua lapis untuk eksekusi perintah shell. *Layer 1* (deteksi regex instan) dan *Layer 2* (**Guardian LLM** untuk analisis semantik cerdas). Seluruh tool filesystem dikunci oleh sandbox anti-*path traversal*.
-- 🤝 **Workspace / Folder Trust**:
-  Konfirmasi keamanan saat pertama kali Ruko dijalankan di suatu folder proyek (`Apakah kamu mempercayai folder ini? y/n`), menjamin Ruko tidak membaca atau mengeksekusi berkas pada repositori yang tidak dipercayai.
-- ⚡ **Zero Runtime Dependencies**:
-  100% menggunakan API standar Node.js (`node:fs`, `node:child_process`, `node:readline`, dll.). Sangat ringan, waktu startup instan, dan bebas kerentanan rantai pasok (*supply chain attack*).
-- 🔍 **Eksplorasi & Manipulasi Kode Cerdas**:
-  Dilengkapi tool `glob`, `code_search`, `read_file` (berpaginasi dan sadar biner), `write_file`, `edit_file` (dengan visual diff LCS ala `git diff`), serta `patch_file` hemat token.
-- ⏪ **Snapshot Undo Otomatis**:
-  Setiap modifikasi berkas dicadangkan ke `.ruko/undo/` sebelum ditulis. Anda dapat membatalkan perubahan kapan saja lewat perintah `/undo` tanpa bergantung pada Git.
-- 🎮 **Modern Terminal UX & Ambient Input**:
-  REPL interaktif dengan **status & input box responsif** (lebar border dihitung dinamis mengikuti terminal — aman di layar sempit Termux), **action log beraksen cabang `├── `** yang dicetak sekali saat tool selesai, **live bottom activity tray** yang diperbarui *in-place* (tanpa menumpuk di scrollback, `Ctrl+O` untuk memperluas), menu navigasi `/`, animasi Pac-Man *Thinking...* rata kiri, serta mode *ambient input* yang memungkinkan pengguna mengetik, mengantre, atau membatalkan instruksi saat AI sedang bekerja.
-- 🔑 **Multi-Provider & Privasi Utama**:
-  Wizard interaktif untuk konfigurasi mudah (dengan tes koneksi langsung dan konfirmasi eksplisit untuk protokol HTTP unencrypted). Mendukung model cloud (OpenAI, OpenRouter, DeepSeek, Groq, Together) maupun server lokal (Ollama, LM Studio, vLLM). Kredensial disimpan dengan izin berkas ketat `0600`.
+- 🛡️ **Dual-Layer Approval Gate**: Regex instant (Layer 1) + Guardian LLM semantic (Layer 2) + audit log `.ruko/guardian-audit.log`
+- 🤝 **Workspace Trust**: Konfirmasi `Apakah kamu mempercayai folder ini? y/n` saat pertama kali, disimpan di `.ruko/trusted`
+- ⚡ **Zero Runtime Deps**: Hanya `node:fs`, `node:child_process`, `node:readline` — ringan, startup instan, bebas supply-chain attack
+- 🔍 **Smart Code Tools**: `glob`, `code_search`, `read_file` paginated, `edit_file` dengan diff LCS, `patch_file` hemat token
+- ⏪ **Snapshot Undo**: Backup otomatis ke `.ruko/undo/` (mode 0600), rollback via `/undo`
+- 🎮 **Modern TUI**: Status box responsif (aman di Termux 40 cols), action log `├── `, live bottom tray, ambient input, Pac-Man thinking ticker
+- 🔑 **Multi-Provider**: OpenAI, OpenRouter, DeepSeek, Groq, Together, Ollama, LM Studio, vLLM — kredensial mode 0600
+- 🔒 **Security Bots Aktif**: Secret Scanning, Push Protection, Dependabot, CodeQL Analysis — lihat [.github/SECURITY.md](.github/SECURITY.md)
 
 ---
 
 ## 🚀 Instalasi & Memulai Cepat
 
-### Kebutuhan Sistem
-- Node.js versi 18.0.0 atau lebih baru.
-- Sistem operasi Linux (termasuk Android Termux), macOS, atau Windows WSL.
+**Kebutuhan**: Node.js >=18, Linux/macOS/WSL (termasuk Termux Android)
 
-### 1. Kloning & Kompilasi Lokal
+### 1. Kloning & Build Lokal
 
 ```bash
 git clone https://github.com/Iky969/Ruko-agent.git
@@ -91,336 +62,303 @@ npm install
 npm run build
 ```
 
-### 2. Instalasi Global (Perintah `ruko` di Mana Saja)
-
-Agar perintah `ruko` dapat diakses langsung dari direktori proyek mana pun di komputer Anda:
+### 2. Global Install
 
 ```bash
 npm install -g .
-# atau gunakan npm link saat pengembangan lokal:
-# npm link
+# atau untuk dev:
+npm link
 ```
 
-Setelah itu, cukup masuk ke folder proyek Anda dan ketik:
+Lalu di proyek mana pun:
 
 ```bash
 cd /jalur/proyek-anda
 ruko
 ```
 
-Semua data (konfigurasi, riwayat percakapan, jurnal undo) akan otomatis terisolasi di folder `./.ruko/` di dalam direktori kerja aktif.
+Data terisolasi di `./.ruko/` (config, sessions, undo, memory).
 
-### 3. Keamanan Folder (Workspace Trust)
+### 3. Workspace Trust
 
-Saat pertama kali dijalankan di suatu folder proyek, Ruko akan meminta konfirmasi:
-```text
-  [Keamanan Workspace Ruko]
-  Folder aktif: /path/to/project
-  Ruko dapat membaca berkas dan menjalankan perintah shell di folder ini.
+Saat pertama kali di folder baru:
 
-  Apakah kamu mempercayai folder ini? (y/n):
 ```
-Status kepercayaan disimpan di `.ruko/trusted` dan konfigurasi lokal sehingga Anda tidak akan ditanya berulang kali di folder yang sama. Gunakan flag `--trust-folder` atau environment variable `RUKO_TRUST_FOLDER=1` untuk otomatisasi/CI.
+[Keamanan Workspace Ruko]
+Folder aktif: /path/to/project
+Apakah kamu mempercayai folder ini? (y/n):
+```
 
-### 4. Wizard Konfigurasi Awal (First-Run Setup)
+Gunakan `--trust-folder` atau `RUKO_TRUST_FOLDER=1` untuk CI.
 
-Saat pertama kali dijalankan tanpa kredensial, Ruko akan memandu Anda melalui **Interactive Setup Wizard**:
-1. Masukkan **API Key** (input disamarkan `*` demi privasi).
-2. Masukkan **Base URL** (contoh: `https://api.openai.com/v1`, `https://openrouter.ai/api/v1`, atau `http://localhost:11434/v1`).
-   - *Khusus HTTP*: Ruko akan meminta konfirmasi eksplisit (`Apakah kamu mempercayai protokol/URL ini? y/n`) sebelum melanjutkan demi mencegah kebocoran data cleartext.
-3. Masukkan **Model Name** (contoh: `gpt-4o`, `deepseek-chat`, `qwen2.5-coder`, dll.).
-4. Ruko melakukan pengujian koneksi langsung (*live probe*). Jika berhasil, konfigurasi disimpan ke `.ruko/config.json` dengan izin berkas **600** (*owner read/write only*).
+### 4. Wizard Konfigurasi
+
+Jika tanpa kredensial, Ruko memandu:
+
+1. **API Key** (input disamarkan `*`)
+2. **Base URL** (`https://api.openai.com/v1`, `http://localhost:11434/v1`, dll.)
+   - HTTP butuh konfirmasi eksplisit `y/n` untuk cegah cleartext leak
+3. **Model Name** (`gpt-4o`, `deepseek-chat`, `qwen2.5-coder`, dll.)
+4. Tes koneksi langsung — simpan ke `.ruko/config.json` mode 600
 
 ---
 
 ## 🛡️ Arsitektur Keamanan
 
-Ruko dirancang dengan pertahanan mendalam (*defense-in-depth*) untuk memastikan agen otonom tidak membahayakan sistem operasi atau data proyek Anda:
+Ruko menerapkan defense-in-depth:
 
 ```
-                      [ Perintah Shell / Tool Exec ]
-                                     │
-                                     ▼
-                   ┌───────────────────────────────────┐
-                   │  Layer 1: Regex Risk Detector     │
-                   └───────────────────────────────────┘
-                                     │
-         ┌───────────────────────────┼───────────────────────────┐
-         ▼                           ▼                           ▼
-      [ NONE ]                 [ BLOCKED ]                 [ DANGEROUS ]
-  Eksekusi Langsung          Ditolak Mutlak                      │
-                     (rm -rf /, forkbomb, mkfs, dll.)            │
-                                                                 ▼
-                                               ┌───────────────────────────────────┐
-                                               │   Layer 2: Guardian LLM           │
-                                               │   (Analisis Semantik Terisolasi)  │
-                                               └───────────────────────────────────┘
-                                                                 │
-                                     ┌───────────────────────────┼───────────────────────────┐
-                                     ▼                           ▼                           ▼
-                                 [ SAFE ]                   [ BLOCKED ]                 [ DANGEROUS ]
-                         Tampilkan Indikator Hijau        Tolak Otomatis              Minta Konfirmasi
-                       ✓ Guardian: aman — <alasan>     (tanpa tanya user)                 Manual y/N
-                                     │                                                       │
-                                     └───────────────────────────┬───────────────────────────┘
-                                                                 │
-                                                                 ▼
-                                                  ┌─────────────────────────────┐
-                                                  │  Catat Audit Log            │
-                                                  │  .ruko/guardian-audit.log   │
-                                                  └─────────────────────────────┘
+[ Shell / Tool Exec ]
+        ↓
+[ Layer 1: Regex Risk Detector ]
+  NONE → langsung | BLOCKED → tolak mutlak | DANGEROUS → Layer 2
+        ↓
+[ Layer 2: Guardian LLM (isolated, temp 0) ]
+  SAFE → ✓ Guardian: aman | BLOCKED → tolak | DANGEROUS → konfirmasi y/N
+        ↓
+[ Audit Log .ruko/guardian-audit.log (0600) ]
 ```
 
-1. **Workspace Sandbox (Anti-Path-Traversal)**:
-   Seluruh tool pembacaan dan modifikasi berkas (`read_file`, `write_file`, `edit_file`, `patch_file`, `delete_file`, `move_file`, `glob`, `code_search`) divalidasi ketat oleh fungsi `assertInsideWorkspace()`. Percobaan akses ke luar root direktori kerja (seperti `../../etc/passwd` atau `~/.ssh`) diblokir seketika.
-2. **Deterministic Regex Gate (Layer 1)**:
-   Mendeteksi ratusan pola perintah destruktif, rekursif, chain injection (`&&`, `;`, `||`), dan utilitas berbahaya (`find -delete`, `truncate`, `shred`, `wipefs`), termasuk seluruh bentuk `rm` (dengan atau tanpa flag). Perintah mutasi berkas dasar pada `exec` (`rm`, `mv`, `truncate`, redirect `>`) yang menargetkan berkas workspace ditolak dan dialihkan ke tool resmi ber-undo. Perintah berbahaya kategori `BLOCKED` ditolak mutlak bahkan jika mode persetujuan dinonaktifkan.
-3. **Guardian LLM Semantic Assessment (Layer 2)**:
-   Perintah berlabel `DANGEROUS` dianalisis semantiknya oleh Guardian LLM terisolasi (suhu 0, token terbatas). Jika perintah terbukti aman (misal kalkulasi inline `python3 -c "print(1+1)"`), sistem memberikan auto-allow dengan menampilkan indikator visual `✓ Guardian: aman — <alasan>`.
-4. **Dedicated Audit Trail**:
-   Setiap evaluasi Guardian LLM dicatat secara persisten ke berkas `.ruko/guardian-audit.log` dengan izin `0600` untuk keperluan audit keamanan.
-5. **Perlindungan Kredensial & Berkas/Environment Sensitif**:
-   - **Isolasi Berkas Sensitif**: Fungsi `assertNotSensitivePath()` memblokir akses ke berkas sensitif (`.ruko/config.json`, `.ruko/undo/**`, `.env`, `.env.*`, `id_rsa`, `id_ed25519`, `*.pem`, `*.key`) pada seluruh tool baca (`read_file`), pencarian (`glob`, `code_search`), manipulasi berkas, maupun `exec` (mencakup pencocokan literal maupun ekspansi wildcard/glob shell seperti `cat .ruko/conf*` atau `cat .ruko/*`).
-   - **Pencegahan Dump Environment**: Fungsi `isSensitiveEnvCommand()` mendeteksi dan menolak upaya pembocoran kredensial via environment (`printenv`, `env`, `export -p`, `declare -p`, `set`, maupun eksekusi runtime inline seperti `node -e`, `python3 -c`, `ruby -e`, `perl -e`, dll. yang mengakses `process.env`, `os.environ`, `ENV`, atau `%ENV`), serta ekspansi `$<NAMA>` atau `${<NAMA>}` yang cocok dengan pola token/secret/password/key.
-   - **Sanitasi Environment Shell**: Setiap perintah `exec` dijalankan dengan environment yang sudah dibersihkan dari export fungsi shell (`BASH_FUNC_*`) dan hook startup shell yang dapat membajak perintah sebelum dieksekusi (`BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `CDPATH`, `BASH_RCFILE`).
-   - *Known Limitation (Catatan Batasan)*: Skrip runtime eksternal independen yang dimuat dari file atau payload ter-obfuscate tingkat tinggi di luar jangkauan pencocokan statis dievaluasi secara semantik oleh Guardian LLM (Layer 2) sebelum dieksekusi.
-   - **Cakupan Universal Subagent**: Seluruh proteksi ditegakkan di level protokol eksekusi tool (`runToolCall`), menjamin subagent (`delegate`) tunduk pada kebijakan keamanan yang sama persis dengan agen utama tanpa celah isolasi.
-   - Penolakan URL HTTP *cleartext* untuk server remote pada konfigurasi maupun perintah `/config set baseUrl` (mencegah eksfiltrasi token via MITM; host privat/LAN — termasuk IPv6 ULA `fc00::/7` dan IPv4-mapped IPv6 — serta local LLM didukung dengan konfirmasi eksplisit `(y/n)`), penyamaran ketat API key pada perintah `/config` (key < 40 karakter ditampilkan sebagai `[REDACTED]` tanpa karakter apa pun; key ≥ 40 karakter hanya menampilkan 4 karakter terakhir), peringatan eksplisit saat `loadConfig()` menemukan API key plaintext di berkas config (mitigasi awareness, lihat batasan #8 di bawah), dan penegakan izin berkas `0o600` pada seluruh berkas konfigurasi dan sesi.
-   - **Workspace / Folder Trust**: Konfirmasi interaktif kepercayaan direktori kerja (`Apakah kamu mempercayai folder ini? y/n`) saat pertama kali Ruko dijalankan di proyek baru, mencegah eksekusi kode otomatis pada repositori asing tak tepercaya.
-6. **Batasan Keamanan yang Diketahui (Known Security Limitations)**:
-   - **Filesystem TOCTOU (Time-of-Check to Time-of-Use)**: Meskipun mutasi berkas menolak penulisan menembus symbolic link via `lstatSync().isSymbolicLink()` dan `assertInsideWorkspace()`, secara POSIX standar tetap terdapat *micro-window* teoretis jika ada proses konkuren eksternal di tingkat OS yang melakukan pertukaran berkas (*symlink swap*) persis di antara verifikasi boundary dan pemanggilan I/O kernel (`fs.writeFile`/`fs.readFile`).
-   - **Eliminasi Celah DNS Rebinding**: Seluruh potensi eksploitasi DNS Rebinding TOCTOU telah ditutup tuntas dengan mengimplementasikan transport `node:http` & `node:https` berbasis **Native IP-Pinning** yang mengunci socket TCP ke IP yang telah divalidasi aman pada setiap hop redirect.
+**Proteksi Inti**:
+
+1. **Workspace Sandbox**: `assertInsideWorkspace()` blokir `../../etc/passwd`, `~/.ssh`, symlink traversal
+2. **Regex Gate**: Ratusan pola destruktif (`rm -rf /`, `mkfs`, `dd`, `find -delete`, `truncate`, `shred`, chain `&& ; ||`)
+3. **Guardian LLM**: Analisis semantik untuk `DANGEROUS`, auto-allow jika aman (contoh `python3 -c "print(1+1)"`)
+4. **Kredensial**: Blokir akses `.ruko/config.json`, `.env`, `id_rsa`, `*.pem`, `*.key` di semua tools + `exec` wildcard `cat .ruko/*`
+5. **Env Dump Prevention**: Blokir `printenv`, `env`, `export -p`, `node -e process.env`, `$API_KEY` expansion
+6. **Shell Sanitization**: Bersihkan `BASH_FUNC_*`, `BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `CDPATH`
+7. **SSRF Protection**: Native IP-pinning transport, blokir private IP, IPv4-mapped IPv6, desimal/oktal/hex notation, redirect hop validation
+8. **Security Bots**: Secret Scanning enabled, Push Protection enabled, Dependabot enabled, CodeQL `security-extended` enabled, Branch Protection pada `main`
+
+> Detail batasan & kebijakan: lihat [SECURITY.md](.github/SECURITY.md) dan bagian Security Boundaries di bawah.
 
 ---
 
 ## 💡 Fitur Unggulan
 
-### 1. Eksplorasi Kode Cepat & Efisien
-- **`glob`**: Menemukan berkas berbasis pola pencocokan multi-pattern dan ekspansi kurung kurawal `{a,b}`. Secara otomatis mengabaikan direktori besar (`node_modules`, `.git`, `dist`, `.ruko`, `coverage`) dan berkas biner.
-- **`code_search`**: Mencari teks atau ekspresi reguler (regex) di seluruh berkas proyek, menampilkan baris yang cocok beserta baris konteks di sekitarnya.
-- **`web_fetch`**: Mengambil referensi dokumentasi web publik berbasis teks/HTML/JSON dengan timeout otomatis 10 detik, pembersihan tag HTML, dan pembatasan panjang konten (maks. 5.000 karakter).
+### Eksplorasi Kode
+- `glob`: multi-pattern + brace `{a,b}`, ignore `node_modules/.git/dist/.ruko`
+- `code_search`: keyword/regex + konteks baris, support filter extension array
+- `web_fetch`: fetch publik 10s timeout, sanitasi HTML, max 5k chars, IP-pinning
 
-### 2. Modifikasi Berkas dengan Diff Visual & Safety Net
-- **`edit_file` / `write_file`**: Perubahan berkas ditampilkan dengan diff berwarna ala `git diff` (`+` hijau, `-` merah).
-- **`patch_file`**: Operasi *search-and-replace* berbasis teks unik untuk menghemat konsumsi token LLM.
-- **`delete_file` / `move_file`**: Penghapusan dan pemindahan berkas aman dengan konfirmasi persetujuan `[Y/N]` dan pencadangan otomatis ke `.ruko/undo/`.
-- **Undo Journal**: Pembatalan perubahan instan lewat `/undo` tanpa perlu `git stash` atau `git checkout`.
+### Modifikasi Aman
+- `edit_file`/`write_file`: diff visual `+` hijau `-` merah
+- `patch_file`: search-replace hemat token
+- `delete_file`/`move_file`: konfirmasi `[Y/N]` + snapshot undo
+- `/undo [path]`: rollback file spesifik atau global
 
-### 3. Log Summarizer Pintar
-Output terminal yang melebihi batas (default: 1.000 karakter) otomatis dipotong secara proporsional (kepala ~40% dan ekor ~60%) dengan highlight baris galat (*error/warning/exit code*), menjaga konteks percakapan tetap bersih.
-
-### 4. Context Compression Adaptif
-Ketika panjang percakapan mendekati batas memori, Ruko secara cerdas merangkum percakapan lama menjadi satu ringkasan padat tanpa menghilangkan instruksi penting dan giliran (*turns*) percakapan terakhir. Batas memori dapat disesuaikan secara dinamis via `/setctx <jumlah|50k>`, `/settoken <token|16k>`, atau `/context set <jumlah>`.
-
-### 5. Multi-Profil Provider
-Simpan beberapa konfigurasi AI di `.ruko/config.json` dan beralih profil dengan cepat:
-```bash
-/profile hemat    # Menggunakan model ringan untuk tugas sederhana
-/profile kuat     # Menggunakan model penalaran tinggi untuk arsitektur kompleks
-/profile lokal    # Beralih ke Ollama lokal tanpa biaya API
-```
+### Efisiensi
+- **Log Summarizer**: output >1000 char dipotong proporsional 40% head + 60% tail, highlight error
+- **Context Compression**: rangkum percakapan lama saat mendekati limit, adjustable via `/setctx`, `/settoken`, `/context set`
+- **Multi-Profil**: `.ruko/config.json` dengan alias `hemat`, `kuat`, `lokal` — ganti via `/profile`
 
 ---
 
 ## 🛠️ Daftar Tool Terintegrasi
 
-Agen menggunakan protokol tool call terstruktur dalam blok kode:
+<details>
+<summary>Klik untuk melihat 24 tools lengkap</summary>
 
-| Tool | Kategori | Deskripsi & Kegunaan |
+| Tool | Kategori | Deskripsi |
 | :--- | :---: | :--- |
-| `exec` | Eksekusi | Menjalankan perintah shell melalui filter *approval gate* dua lapis dan *log summarizer* (default 120s, mendukung `timeoutMs`). |
-| `glob` | Inspeksi | Menemukan daftar berkas berdasarkan pola glob multi-pattern (mengabaikan folder build & biner). |
-| `list_dir` | Inspeksi | Menampilkan isi langsung direktori (subfolder dan berkas beserta ukuran byte) tanpa glob traversal. |
-| `code_search` | Inspeksi | Pencarian keyword atau regex di seluruh berkas teks dengan baris konteks (mendukung filter extension array / comma-separated). |
-| `read_file` | Pembacaan | Membaca isi berkas teks berpaginasi (offset/limit) dan bernomor baris. |
-| `write_file` | Penulisan | Membuat berkas baru di dalam batas workspace. |
-| `edit_file` | Penulisan | Menimpa isi berkas yang sudah ada dengan menampilkan *diff* visual perubahan. |
-| `patch_file` | Penulisan | Mengganti potongan teks unik secara presisi (*search-and-replace* hemat token). |
-| `delete_file` | Manipulasi | Menghapus berkas tunggal secara aman (wajib konfirmasi `[Y/N]` dan snapshot undo otomatis). |
-| `move_file` | Manipulasi | Memindahkan / mengganti nama berkas (wajib konfirmasi `[Y/N]` dan snapshot undo otomatis). |
-| `revert_file` | Manipulasi | Mengembalikan berkas ke kondisi sebelumnya (snapshot `.ruko/undo/` atau fallback `git checkout`). |
-| `web_fetch` | Jaringan | Mengambil konten web publik (HTML/JSON/Text) dengan timeout 10 detik dan sanitasi HTML. |
-| `remember` | Memori | Menyimpan fakta proyek/preferensi ke `.ruko/memory.md` lintas sesi (dengan proteksi sanitasi prompt injection). |
-| `search_sessions` | Pencarian | Pencarian percakapan lintas sesi tersimpan secara inkremental (default limit 5, cuplikan maks. 150 karakter). |
-| `load_skill` | Skill | Memuat instruksi operasional skill proyek dari `.ruko/skills/`. |
-| `save_skill` | Skill | Menyimpan alur kerja sukses sebagai skill baru yang reusable (hanya jika diminta / instruksi berulang). |
-| `delete_skill` | Skill | Menghapus skill yang sudah usang dari `.ruko/skills/` (wajib konfirmasi `[Y/N]` dan menampilkan preview isi). |
-| `list_skills` | Skill | Membaca dan menampilkan daftar seluruh nama dan deskripsi skill yang tersimpan. |
-| `delegate` | Delegasi | Menjalankan subagent mandiri dengan context terisolasi. **Catatan penting**: delegate mengeksekusi satu tool call per giliran secara **sekuensial** (bukan concurrent/paralel), meskipun setiap delegate berjalan di konteks terisolasi sendiri. Default timeout: 60 detik. Jika subagent timeout, sistem otomatis melaporkan file yang sempat termodifikasi dan menawarkan opsi rollback via `/undo`. |
-| `start_process` | Proses | Menjalankan perintah non-blocking / background (wajib konfirmasi `[Y/N]`, batas maks. 3 proses aktif). |
-| `read_process_logs` | Proses | Membaca ring buffer log proses (maks. 100 baris) dengan redaksi kredensial otomatis. |
-| `get_status` | Proses | Memeriksa status deterministik proses latar belakang (`running`, `exited`, `stale`). |
-| `stop_process` | Proses | Menghentikan proses latar belakang secara bertahap (`SIGTERM` lalu `SIGKILL`) tanpa approval gate. |
+| `exec` | Eksekusi | Shell via approval gate 2 lapis, default 120s, support `timeoutMs` |
+| `glob` | Inspeksi | Cari berkas multi-pattern, ignore build & biner |
+| `list_dir` | Inspeksi | List isi direktori 1-level + ukuran B/KB/MB |
+| `code_search` | Inspeksi | Cari keyword/regex + konteks |
+| `read_file` | Baca | Paginated offset/limit + line numbers, binary-aware |
+| `write_file` | Tulis | Buat file baru dalam workspace |
+| `edit_file` | Tulis | Timpa file + diff visual |
+| `patch_file` | Tulis | Search-replace presisi |
+| `delete_file` | Manipulasi | Hapus aman + konfirmasi + undo |
+| `move_file` | Manipulasi | Pindah/rename + konfirmasi + undo |
+| `revert_file` | Manipulasi | Rollback snapshot `.ruko/undo/` atau `git checkout` |
+| `web_fetch` | Jaringan | Fetch publik + SSRF IP-pinning |
+| `remember` | Memori | Simpan fakta ke `.ruko/memory.md` lintas sesi |
+| `search_sessions` | Pencarian | Cari lintas sesi (limit 5, snippet 150 char) |
+| `load_skill` | Skill | Muat skill dari `.ruko/skills/` |
+| `save_skill` | Skill | Simpan workflow sukses sebagai skill reusable |
+| `delete_skill` | Skill | Hapus skill usang + preview + konfirmasi |
+| `list_skills` | Skill | List nama & deskripsi skill |
+| `delegate` | Delegasi | Subagent isolated, sekuensial 1 tool/turn (bukan concurrent/paralel), timeout 60s |
+| `start_process` | Proses | Non-blocking background (max 3 aktif) |
+| `read_process_logs` | Proses | Ring buffer 100 baris + redaksi kredensial |
+| `get_status` | Proses | Status deterministik `running/exited/stale` |
+| `stop_process` | Proses | Stop bertahap SIGTERM→SIGKILL |
+
+</details>
 
 ---
 
 ## ⌨️ Daftar Perintah Slash
 
-Ketik `/` di terminal untuk memunculkan menu interaktif, atau gunakan perintah berikut:
+<details>
+<summary>Klik untuk melihat 24+ slash commands</summary>
 
 | Perintah | Fungsi |
 | :--- | :--- |
-| `/help` (atau `/?`) | Menampilkan panduan bantuan perintah slash. |
-| `/exit` | Keluar dari aplikasi (sesi otomatis tersimpan). |
-| `/login` | Membuka wizard konfigurasi provider dan tes koneksi langsung. |
-| `/new` | Menyimpan sesi saat ini lalu memulai sesi percakapan baru. |
-| `/sessions` | Menampilkan daftar seluruh sesi yang tersimpan. |
-| `/search <kata kunci>` | Mencari kata kunci percakapan lintas sesi tersimpan (beserta opsi `/resume`). |
-| `/resume <id>` | Melanjutkan sesi percakapan sebelumnya. |
-| `/export [json\|markdown]` | Ekspor log giliran percakapan dan jejak tool sesi aktif. |
-| `/clear` | Membersihkan memori percakapan pada sesi saat ini. |
-| `/compact` | Memaksa kompresi riwayat percakapan saat ini. |
-| `/plan on \| off` | Mode rencana: mengunci tool penulisan dan eksekusi di level kode. |
-| `/undo [path]` | Membatalkan perubahan berkas terakhir atau berkas spesifik dari jurnal `.ruko/undo/`. |
-| `/settings` | Dashboard konfigurasi terpadu: context window, max tokens, role, mode, approval, anim. |
-| `/role [nama]` | Mengganti peran sistem AI (`default`, `reviewer`, `teacher`, `minimal`). |
-| `/mode beginner \| pro` | Mode pengguna: panduan mendalam (`beginner`) atau ringkas (`pro`). |
-| `/profile [alias]` | Beralih profil penyedia LLM (`hemat`, `kuat`, `lokal`). |
-| `/exec <perintah>` | Menjalankan perintah shell langsung dari baris perintah Ruko. |
-| `/history [n]` | Menampilkan *n* pesan riwayat percakapan terakhir. |
-| `/context [set <n>]` | Menampilkan kapasitas memori aktif atau menyetel batas budget karakter baru. |
-| `/ctx` | Memeriksa limit context window aktif, token budget, dan persentase penggunaan. |
-| `/memory [clear]` | Menampilkan isi memori persisten atau mereset (`.ruko/memory.md`). |
-| `/usage` | Menampilkan statistik pemakaian token (prompt, cache, output) dan waktu kerja aktif agen. |
-| `/config [set <k> <v> \| setup]` | Menampilkan atau memperbarui konfigurasi sistem. |
-| `/model [nama]` | Melihat daftar model yang tersedia atau beralih model aktif. |
+| `/help` / `/?` | Panduan bantuan chip/badge highlight |
+| `/exit` | Keluar (sesi auto-simpan) |
+| `/login` | Wizard provider + tes koneksi |
+| `/new` | Sesi baru (sesi lama tersimpan) |
+| `/sessions` | List sesi tersimpan |
+| `/search <kw>` | Cari lintas sesi + `/resume` |
+| `/resume <id>` | Lanjut sesi |
+| `/export [json\|md]` | Ekspor trajectory |
+| `/clear` | Bersihkan memori percakapan |
+| `/compact` | Paksa kompresi history |
+| `/plan on\|off` | Mode rencana (blokir write/exec) |
+| `/yolo on\|off` | Mode auto-approve |
+| `/undo [path]` | Batalkan perubahan file |
+| `/settings` | Dashboard terpadu (context, tokens, role, mode, approval) |
+| `/role [nama]` | Ganti role AI |
+| `/mode beginner\|pro` | Mode pengguna |
+| `/profile [alias]` | Ganti profil LLM |
+| `/exec <cmd>` | Shell langsung |
+| `/history [n]` | n pesan terakhir |
+| `/context [set <n>]` | Kapasitas memori / set limit |
+| `/ctx` | Dashboard context budget |
+| `/memory [clear]` | Lihat/reset persistent memory |
+| `/usage` | Statistik token & waktu kerja agen |
+| `/config [set <k> <v>\|setup]` | Lihat/update konfigurasi |
+| `/model [nama]` | List/ganti model aktif |
+
+</details>
 
 ---
 
 ## ⚙️ Konfigurasi & Profil
 
-Berkas konfigurasi disimpan di `./.ruko/config.json` dengan hak akses `0o600`:
+Config di `./.ruko/config.json` mode `0o600`:
 
 ```json
 {
   "mode": "beginner",
   "defaultProfile": "utama",
   "profiles": {
-    "utama": {
-      "baseUrl": "https://api.openai.com/v1",
-      "model": "gpt-4o",
-      "apiKeyEnv": "OPENAI_API_KEY"
-    },
-    "lokal": {
-      "baseUrl": "http://localhost:11434/v1",
-      "model": "qwen2.5-coder"
-    }
+    "utama": { "baseUrl": "https://api.openai.com/v1", "model": "gpt-4o", "apiKeyEnv": "OPENAI_API_KEY" },
+    "lokal": { "baseUrl": "http://localhost:11434/v1", "model": "qwen2.5-coder" }
   },
   "guardianEnabled": true,
-  "guardianTimeoutMs": 5000,
-  "funAnimations": true
+  "guardianTimeoutMs": 5000
 }
 ```
 
-### Variabel Lingkungan (Environment Variables)
+**Env Vars**:
 
 | Variabel | Deskripsi |
 | :--- | :--- |
-| `OPENAI_API_KEY` | API Key default jika tidak didefinisikan di config file. |
-| `OPENAI_BASE_URL` | Base URL endpoint OpenAI-compatible. |
-| `AGENT_MODEL` / `OPENAI_MODEL` | Nama model AI yang digunakan. |
-| `RUKO_CONFIG` | Lokasi berkas konfigurasi kustom (default: `./.ruko/config.json`). |
-| `RUKO_UNDO_DIR` | Lokasi penyimpanan snapshot undo (default: `./.ruko/undo`). |
-| `RUKO_YOLO_MODE=1` | Melewati konfirmasi *dangerous* (peringatan level *blocked* tetap aktif). |
-| `NO_COLOR=1` | Menonaktifkan seluruh warna ANSI di terminal. |
+| `OPENAI_API_KEY` | API key default |
+| `OPENAI_BASE_URL` | Endpoint OpenAI-compatible |
+| `AGENT_MODEL` | Nama model |
+| `RUKO_CONFIG` | Path config kustom |
+| `RUKO_UNDO_DIR` | Path snapshot undo |
+| `RUKO_YOLO_MODE=1` | Skip konfirmasi dangerous (blocked tetap aktif) |
+| `RUKO_TRUST_FOLDER=1` | Auto-trust workspace |
+| `NO_COLOR=1` | Nonaktifkan ANSI |
 
 ---
 
 ## 🧪 Pengujian & Verifikasi
 
-Ruko diuji secara intensif menggunakan test runner bawaan Node.js (`node:test`) dan typechecker ketat TypeScript:
-
 ```bash
-# Verifikasi tipe data statis
-npm run typecheck
-
-# Menjalankan 817 unit test anti-regresi
-npm test
-
-# Menjalankan end-to-end (E2E) integration test
-npm run test:e2e
+npm run typecheck   # static type check
+npm test            # 817 unit tests
+npm run test:e2e    # 1 E2E test
 ```
 
-Test suite mencakup pengujian unit untuk:
-- Deteksi risiko approval regex & skenario adversarial Guardian LLM (termasuk path obfuscation dot `/./` dan `/../`, subshell non-chained, dan rantai variabel dalam).
-- Parser tool-call multi-format (markdown fence, DeepSeek DSML, XML `<invoke>`/`<parameter>` telanjang) — termasuk batch multi-invoke dan pembersihan tag sisa.
-- Proteksi mutlak Immutable Security Core dan pencegahan modifikasi/penghapusan.
-- Sandboxing direktori dan pencegahan traversal path di seluruh tool.
-- Hardening SSRF, notasi IP alternatif (desimal, oktal, hex, IPv4-mapped IPv6), dan IP-pinning redirect hop.
-- Parser streaming SSE LLM multi-provider (OpenAI, Anthropic, Gemini) dan penanganan kode status HTTP.
-- Mekanisme TUI, status bar rewinding, input buffer wrapping, dan pembersihan baris prompt approval.
-- Kompresi konteks adaptif dan snapshot undo journal.
-- Persistent memory, skill system, subagent delegation, dan trajectory export.
+Test mencakup: approval regex & Guardian adversarial, multi-format tool parser (markdown fence, DSML, XML), Immutable Security Core, sandbox traversal, SSRF + IP-pinning, SSE multi-provider, TUI rewinding, context compression, undo journal, memory/skills/delegation.
 
 ---
 
 ## 🛡️ Security Boundaries & Known Limitations
 
-Bagian ini mendokumentasikan batasan keamanan inheren dan asumsi lingkungan operasional Ruko secara lugas, transparan, dan faktual (tanpa eufemisme atau klaim defensif):
-
-1. **Ketergantungan Approval Gate pada Keputusan Pengguna**:
-   Seluruh mekanisme gerbang konfirmasi (`Approval Gate` dan verifikasi semantik Guardian LLM) sepenuhnya bergantung pada ketelitian pengguna manusia. Jika pengguna memberikan persetujuan (`Y`) tanpa meneliti visual diff atau pesan peringatan risiko, atau jika pengguna mengaktifkan mode otomatis (`--yolo` / `RUKO_YOLO_MODE=1`), proteksi interaktif ini menjadi tidak efektif dan eksekusi berbahaya akan tetap dijalankan di sistem pengguna.
-
-2. **Sifat Filter Redaksi Kredensial Berbasis Best-Effort Regex**:
-   Penyaringan token dan kunci rahasia pada output proses (`read_process_logs`, status bar, dan jejak terminal) mengandalkan pola pencocokan ekspresi reguler heuristik. Ini merupakan lapisan mitigasi sekunder (*best-effort*) dan bukan jaminan 100% mutlak anti-kebocoran terhadap token, kunci privat arbitrer, atau rahasia dengan format acak tanpa penanda kata kunci standar.
-
-3. **Celah Teoretis TOCTOU (Time-of-Check to Time-of-Use) Race Condition pada Filesystem**:
-   Pada sistem operasi multi-proses, terdapat jeda waktu mikrodetik antara saat Ruko memeriksa keabsahan path/symlink (via `lstat` / `realpath`) dan saat operasi penulisan atau eksekusi berkas sesungguhnya dilakukan. Jika ada proses pihak ketiga di tingkat OS yang secara adversarial menukar symlink (*symlink swap*) tepat di celah waktu tersebut, race condition secara teoretis dapat terjadi.
-
-4. **Model Ancaman Single-User / Trusted Environment**:
-   Arsitektur keamanan Ruko saat ini didesain secara spesifik untuk lingkungan pengguna tunggal tepercaya (*single-user trusted local environment*). Jika Ruko dijalankan pada server multi-user, daemon publik tanpa otentikasi, atau diakses bersama pihak lain, terdapat risiko penyalahgunaan hak akses Ruko sebagai perantara (*confused deputy*) untuk melancarkan serangan terhadap sistem atau jaringan lokal pengguna yang belum sepenuhnya dicakup oleh hardening ini.
-
-5. **Manipulasi Output via Prompt Injection pada Konten yang Dibaca (Read-Only Manipulation)**:
-   Proteksi pembatasan berkas dan workspace sandboxing hanya mencegah *modifikasi* atau *pembacaan berkas kredensial sensitif*. Jika agen membaca file kode pihak ketiga, dependensi repositori eksternal, atau halaman web tak tepercaya via `web_fetch` yang mengandung instruksi terselubung (*indirect prompt injection*), model AI tetap rentan terpengaruh atau dimanipulasi untuk menghasilkan analisis yang keliru atau mengusulkan aksi yang merugikan, meskipun berkas yang dibaca berstatus read-only.
-
-6. **Status `.ruko/memory.md` dan `.ruko/skills/` yang Writable by Design**:
-   Berkas persistent memory (`.ruko/memory.md`) dan direktori skills (`.ruko/skills/`) dirancang dapat ditulis oleh agen (*writable by design*) agar agen dapat mempelajari preferensi proyek. Meskipun Ruko telah menyertakan filter penolakan instruksi imperatif pada saat penyimpanan `remember`, entri yang tersimpan tetap disuntikkan ke prompt konteks pada giliran berikutnya, sehingga manipulasi tidak langsung terhadap konten memori tetap menjadi batasan yang perlu diawasi pengguna secara berkala melalui `/memory`.
-
-7. **Rekomendasi Lingkungan Terisolasi (Container / Sandbox)**:
-   Untuk mengevaluasi repositori kode pihak ketiga yang belum diverifikasi, menjalankan tugas otomatis dalam pipeline CI/CD, atau beroperasi di lingkungan publik, pengguna SANGAT DIREKOMENDASIKAN menjalankan Ruko di dalam container terisolasi (seperti **Docker**, **Dev Containers**, atau **VM sementara**) dengan hak akses non-root dan pembatasan akses jaringan keluar (*outbound egress network filtering*).
-
-8. **API Key pada Berkas Konfigurasi Disimpan Plaintext (Mitigasi Awareness, BUKAN Enkripsi At-Rest)**:
-   `apiKey` di `.ruko/config.json` (maupun `apiKey` literal di dalam `profiles`) tetap tersimpan sebagai **plaintext** dan hanya dilindungi izin berkas `0o600`. Sejak v1.7.7, `loadConfig()` menampilkan peringatan eksplisit ke stderr saat mendeteksi kredensial plaintext di berkas config dan tidak ada env var API key yang aktif (`RUKO_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). Peringatan ini **hanya mitigasi awareness** — ia tidak mengenkripsi apa pun dan tidak melindungi key dari backup otomatis, commit VCS yang tidak disengaja, snapshot container, atau pembacaan oleh proses lain yang berjalan sebagai user yang sama. Jalur yang direkomendasikan: simpan key di env var (atau `--api-key @file` / stdin) dan kosongkan field `apiKey` dari berkas config. Enkripsi at-rest penuh sengaja **tidak** diimplementasikan karena memerlukan manajemen kunci terpisah (key derivation, penyimpanan passphrase, dan strategi rotasi) yang berada di luar lingkup rilis ini.
+1. **Approval Gate bergantung user**: Jika user `Y` tanpa cek diff atau aktifkan `--yolo`, proteksi tidak efektif
+2. **Redaksi kredensial best-effort**: Regex heuristik, bukan jaminan 100% anti-leak token arbitrer
+3. **TOCTOU filesystem**: Micro-window antara `lstat`/`realpath` dan I/O kernel jika proses eksternal swap symlink
+4. **Single-user trusted env**: Untuk multi-user/server publik, jalankan di Docker/VM non-root + egress filtering
+5. **Prompt injection via read-only**: `web_fetch` atau file pihak ketiga bisa berisi instruksi terselubung — model tetap rentan terpengaruh analisis
+6. **Memory & skills writable by design**: `.ruko/memory.md` & `.ruko/skills/` bisa ditulis agen — monitor via `/memory`
+7. **Rekomendasi isolasi**: Untuk repo tak tepercaya/CI, gunakan container terisolasi
+8. **API key plaintext awareness**: `apiKey` di config plaintext + 0600, warning jika env var tidak aktif. Rekomendasi: simpan di env var (`RUKO_API_KEY`) dan kosongkan field `apiKey`. Enkripsi at-rest tidak diimplementasikan (butuh key management terpisah)
 
 ---
 
 ## 📂 Struktur Modul
 
-```text
-src/
-├── index.ts              # CLI Entry point & routing argument
-├── types.ts              # Definisi interface & skema konfigurasi
-├── agent/
-│   ├── agent.ts          # Orkestrator eksekusi & tool loop
-│   ├── commands.ts       # Registry terpusat seluruh slash command
-│   ├── filetools.ts      # Tool glob, code_search, dan read_file (sandboxed)
-│   ├── llm.ts            # Client multi-provider (OpenAI, Anthropic, Gemini) & streaming parser
-│   ├── roles.ts          # Manajemen system prompt berlapis & peran AI
-│   ├── subagent.ts       # Orkestrasi subagent delegasi terisolasi
-│   ├── tools.ts          # Handler tool call protocol & pembatas output
-│   └── webtools.ts       # Tool web_fetch dengan SSRF Native IP Pinning
-└── core/
-    ├── approval.ts       # Dual-Layer Approval Gate & Guardian LLM
-    ├── compressor.ts     # Algoritma kompresi percakapan adaptif
-    ├── config.ts         # Loader berkas konfigurasi & sanitasi skema
-    ├── context.ts        # Pengelolaan memori jendela percakapan
-    ├── diff.ts           # Visualizer git-style line diff
-    ├── dotenv.ts         # Zero-dependency .env file parser & loader
-    ├── executor.ts       # Eksekusi subproses shell aman
-    ├── history.ts        # Persistensi input history terminal (.ruko/history)
-    ├── loop.ts           # System loop interaktif & TUI controller
-    ├── memory.ts         # Persistent memory sederhana (.ruko/memory.md)
-    ├── session.ts        # Penyimpanan sesi percakapan (.ruko/sessions/)
-    ├── skills.ts         # Sistem skill modular (.ruko/skills/)
-    ├── splash.ts         # Tampilan pembuka & banner status
-    ├── summarizer.ts     # Peringkas log terminal panjang (>1000 char)
-    ├── tui.ts            # Terminal raw-mode engine & live overlay
-    ├── ui.ts             # Formatting ANSI, box rendering, & animasi Pac-Man
-    └── undo.ts           # Snapshot jurnal berkas sebelum modifikasi
 ```
+src/
+├── index.ts              # CLI entry & arg routing
+├── types.ts              # Interface & config schema
+├── agent/
+│   ├── agent.ts          # Orchestrator & tool loop + anti-loop tri-layer
+│   ├── commands.ts       # Slash command registry
+│   ├── filetools.ts      # glob, code_search, read_file, list_dir (sandboxed)
+│   ├── llm.ts            # Multi-provider client & streaming parser
+│   ├── roles.ts          # System prompt & roles
+│   ├── subagent.ts       # Delegation isolated
+│   ├── tools.ts          # Tool call protocol & security guards
+│   └── webtools.ts       # web_fetch + SSRF IP-pinning
+└── core/
+    ├── approval.ts       # Dual-layer gate & Guardian LLM
+    ├── compressor.ts     # Adaptive conversation compression
+    ├── config.ts         # Config loader & sanitization
+    ├── context.ts        # Context window management
+    ├── diff.ts           # Git-style diff visualizer
+    ├── dotenv.ts         # Zero-dep .env parser
+    ├── executor.ts       # Safe shell execution
+    ├── history.ts        # REPL history .ruko/history
+    ├── loop.ts           # Interactive loop & TUI controller
+    ├── memory.ts         # Persistent memory .ruko/memory.md
+    ├── session.ts        # Session storage .ruko/sessions/
+    ├── skills.ts         # Modular skills .ruko/skills/
+    ├── splash.ts         # Banner & status
+    ├── summarizer.ts     # Long log summarizer
+    ├── tui.ts            # Raw-mode engine & live overlay
+    ├── ui.ts             # ANSI formatting, box, Pac-Man animation
+    └── undo.ts           # File snapshot journal
+```
+
+---
+
+## 🔧 Troubleshooting
+
+### Termux / Android — Permission Denied
+
+```bash
+chmod +x $PREFIX/bin/ruko
+```
+
+### Terminal Raw Mode Pasca-Crash / SIGKILL
+
+Jika proses di-`kill -9` dan terminal tidak responsif (echo mati, karakter tak muncul):
+
+```bash
+reset          # opsi 1: reset penuh (disarankan)
+stty sane      # opsi 2: kembalikan sane mode
+tput cnorm     # opsi 3: jika kursor hilang
+```
+
+Ruko sudah punya `emergencyCleanup()` untuk kembalikan raw mode, tapi SIGKILL di level kernel tidak bisa di-trap — gunakan command di atas.
+
+### Layar Sempit (Termux 40 cols)
+
+- Status bar otomatis prioritas `ctx %` + badge penting, nama model dipotong proporsional
+- Set `COLUMNS=40` untuk simulasi testing
+- Gunakan `/ctx` untuk cek context budget jika terpotong
 
 ---
 
 ## 📄 Lisensi
 
-Proyek ini didistribusikan di bawah lisensi **MIT License**. Lihat berkas [LICENSE](LICENSE) untuk informasi lebih lanjut.
+MIT License — lihat [LICENSE](LICENSE)
+
+---
+
+## 🤝 Kontribusi & Keamanan
+
+- **Security Policy**: [.github/SECURITY.md](.github/SECURITY.md) — Secret Scanning enabled, Push Protection enabled, Dependabot enabled, CodeQL enabled
+- **Contributors**: [CONTRIBUTORS.md](CONTRIBUTORS.md)
+- **Changelog**: [CHANGELOG.md](CHANGELOG.md) (ringkasan harian di [PROGRESS.md](PROGRESS.md))
+- **Audit Report**: [AUDIT_REPORT.md](AUDIT_REPORT.md)
+
+Laporkan kerentanan via GitHub Advisory (jangan buka Issue publik).

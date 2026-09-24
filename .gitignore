@@ -10,7 +10,7 @@ opencode.json
 # Harness PTY (python)
 __pycache__/
 
-# Catatan & instruksi lokal
+# Catatan & instruksi lokal (jangan push file personal)
 feedback.txt
 halo.txt
 ask.md
@@ -18,5 +18,7 @@ Fee.py
 py.py
 bot.log
 bot_log.txt
-LAPORAN_AUDIT*
-AUDIT_REPORT.md
+# Audit reports yang di-generate lokal tapi tidak untuk repo utama
+# (AUDIT_REPORT.md & CHANGELOG.md sekarang di-track untuk transparansi)
+# LAPORAN_AUDIT* — diizinkan jika untuk dokumentasi resmi
+# AUDIT_REPORT.md — diizinkan untuk audit resmi
