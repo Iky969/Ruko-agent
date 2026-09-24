@@ -406,10 +406,19 @@ test('TASK-02: sanitizeConfigFile rejects non-whitelisted apiKeyEnv values', () 
         `non-whitelisted env var ${envName} must be stripped from profile`,
       );
     }
-    // A warning should have been emitted
+    // A warning should have been emitted — TANPA membocorkan nilai env var.
+    // CATATAN (perubahan kontrak, CodeQL alert PR #19): assertion lama
+    // `w.includes(envName)` justru MEWAJIBKAN nilai apiKeyEnv yang ditolak
+    // ditulis ke log — persis yang ditandai CodeQL js/clear-text-logging
+    // (high). Assertion baru lebih ketat: warning tetap ada (menyebut alias
+    // profil), tapi nilai yang ditolak DILARANG muncul.
     assert.ok(
-      result.warnings.some((w: string) => w.includes(envName)),
-      `warning must mention rejected env var ${envName}`,
+      result.warnings.some((w: string) => w.includes('apiKeyEnv') && w.includes('bad')),
+      'warning must be emitted for rejected apiKeyEnv (mentioning the profile alias)',
+    );
+    assert.ok(
+      !result.warnings.some((w: string) => w.includes(envName)),
+      `warning must NOT echo the rejected env var name ${envName} (CodeQL clear-text-logging)`,
     );
   }
 });

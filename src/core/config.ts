@@ -285,7 +285,10 @@ export function sanitizeConfigFile(raw: unknown): Partial<RukoConfigFile> {
         if (ALLOWED_API_KEY_ENV_VARS.has(envName)) {
           sp.apiKeyEnv = envName;
         } else {
-          console.warn(`[config] Mengabaikan apiKeyEnv profil "${alias}" ("${envName}"): hanya env var LLM resmi yang diizinkan (${[...ALLOWED_API_KEY_ENV_VARS].join(', ')}).`);
+          // JANGAN echo nilai apiKeyEnv yang ditolak ke log: CodeQL
+          // js/clear-text-logging menganggap nama env var (dan isi daftar
+          // allowlist) sebagai data sensitif. Cukup sebut alias profilnya.
+          console.warn(`[config] Mengabaikan apiKeyEnv profil "${alias}": hanya env var LLM resmi yang diizinkan.`);
         }
       }
 
