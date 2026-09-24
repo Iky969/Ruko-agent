@@ -17,6 +17,13 @@ export function isWorkspaceTrusted(
   configPath: string = defaultConfigPath(),
 ): boolean {
   if (process.env.RUKO_TRUST_FOLDER === '1' || process.env.RUKO_TRUST_FOLDER === 'true') {
+    // L1: this env var silently bypasses the folder-trust gate. Keep the
+    // bypass (it is the documented CI escape hatch) but make it visible so a
+    // leaked/misconfigured environment is noticed instead of assumed trusted.
+    console.warn(
+      '[trust] ⚠ RUKO_TRUST_FOLDER aktif — pemeriksaan kepercayaan folder DILEWATI. ' +
+        'Hanya gunakan env var ini di lingkungan yang benar-benar tepercaya (mis. container CI sementara).',
+    );
     return true;
   }
   const markerPath = join(cwd, '.ruko', TRUST_MARKER_FILE);

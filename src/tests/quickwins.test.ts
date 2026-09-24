@@ -93,6 +93,33 @@ test('sanitizeHtml removes script, style, structural tags and decodes entities',
   assert.ok(text.includes('Item 2 <script>'));
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// M6 (audit v1.7.7, batch 2): sanitizeHtml sebelumnya memakai loop iteratif
+// `while (text !== prev)` dengan regex lazy — O(n²) pada HTML bertingkat/tak
+// tertutup (DoS via halaman yang di-fetch). Sekarang satu pass linear.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('M6: sanitizeHtml tetap linear pada input patologis (unclosed tag bertingkat)', () => {
+  const n = 40_000;
+  const html = '<script>'.repeat(n) + 'payload' + '</script>';
+  const started = Date.now();
+  const text = sanitizeHtml(html);
+  const elapsed = Date.now() - started;
+
+  assert.ok(!text.includes('payload'), 'isi script harus dibuang');
+  assert.ok(elapsed < 2000, `sanitizeHtml harus tetap cepat (butuh ${elapsed}ms)`);
+});
+
+test('M6: sanitizeHtml membuang blok berbahaya walau ada doctype/stray tag di depannya', () => {
+  assert.equal(sanitizeHtml('<!DOCTYPE html><script>alert(1)</script>Hi <b>bold</b>'), 'Hi bold');
+  assert.equal(sanitizeHtml('<noscript><p>enable js</p></noscript>Visible'), 'Visible');
+  assert.equal(sanitizeHtml('<div>outer<script>inner()</script>tail</div>'), 'outertail');
+  assert.equal(sanitizeHtml('<SCRIPT>UPPER</SCRIPT>after'), 'after');
+  assert.equal(sanitizeHtml('a < b and <script>x</script>c'), 'a < b and c');
+  // Entity-encoded script tetap tampil sebagai teks biasa
+  assert.equal(sanitizeHtml('Item 2 &lt;script&gt;'), 'Item 2 <script>');
+});
+
 test('isAllowedContentType validates allowed and rejected content types', () => {
   // Allowed
   assert.equal(isAllowedContentType('text/html; charset=utf-8').allowed, true);

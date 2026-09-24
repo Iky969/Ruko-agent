@@ -4,7 +4,7 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-773%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-817%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Ruko** adalah AI Coding Agent berbasis CLI untuk lingkungan terminal yang cepat, minimalis, dan dirancang dengan standar keamanan tinggi (*security-hardened*). Dibangun murni di atas **Node.js (ESM) dan TypeScript tanpa *runtime dependencies* pihak ketiga**, Ruko menyediakan pengalaman pemrograman berpasangan (*pair-programming*) yang andal langsung dari direktori proyek Anda.
@@ -182,9 +182,10 @@ Ruko dirancang dengan pertahanan mendalam (*defense-in-depth*) untuk memastikan 
 5. **Perlindungan Kredensial & Berkas/Environment Sensitif**:
    - **Isolasi Berkas Sensitif**: Fungsi `assertNotSensitivePath()` memblokir akses ke berkas sensitif (`.ruko/config.json`, `.ruko/undo/**`, `.env`, `.env.*`, `id_rsa`, `id_ed25519`, `*.pem`, `*.key`) pada seluruh tool baca (`read_file`), pencarian (`glob`, `code_search`), manipulasi berkas, maupun `exec` (mencakup pencocokan literal maupun ekspansi wildcard/glob shell seperti `cat .ruko/conf*` atau `cat .ruko/*`).
    - **Pencegahan Dump Environment**: Fungsi `isSensitiveEnvCommand()` mendeteksi dan menolak upaya pembocoran kredensial via environment (`printenv`, `env`, `export -p`, `declare -p`, `set`, maupun eksekusi runtime inline seperti `node -e`, `python3 -c`, `ruby -e`, `perl -e`, dll. yang mengakses `process.env`, `os.environ`, `ENV`, atau `%ENV`), serta ekspansi `$<NAMA>` atau `${<NAMA>}` yang cocok dengan pola token/secret/password/key.
+   - **Sanitasi Environment Shell**: Setiap perintah `exec` dijalankan dengan environment yang sudah dibersihkan dari export fungsi shell (`BASH_FUNC_*`) dan hook startup shell yang dapat membajak perintah sebelum dieksekusi (`BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `CDPATH`, `BASH_RCFILE`).
    - *Known Limitation (Catatan Batasan)*: Skrip runtime eksternal independen yang dimuat dari file atau payload ter-obfuscate tingkat tinggi di luar jangkauan pencocokan statis dievaluasi secara semantik oleh Guardian LLM (Layer 2) sebelum dieksekusi.
    - **Cakupan Universal Subagent**: Seluruh proteksi ditegakkan di level protokol eksekusi tool (`runToolCall`), menjamin subagent (`delegate`) tunduk pada kebijakan keamanan yang sama persis dengan agen utama tanpa celah isolasi.
-   - Penolakan URL HTTP *cleartext* untuk server remote pada konfigurasi maupun perintah `/config set baseUrl` (mencegah eksfiltrasi token via MITM; host privat/LAN dan local LLM didukung dengan konfirmasi eksplisit `(y/n)`), penyamaran cerdas API key pada perintah `/config`, dan penegakan izin berkas `0o600` pada seluruh berkas konfigurasi dan sesi.
+   - Penolakan URL HTTP *cleartext* untuk server remote pada konfigurasi maupun perintah `/config set baseUrl` (mencegah eksfiltrasi token via MITM; host privat/LAN — termasuk IPv6 ULA `fc00::/7` dan IPv4-mapped IPv6 — serta local LLM didukung dengan konfirmasi eksplisit `(y/n)`), penyamaran ketat API key pada perintah `/config` (key < 40 karakter ditampilkan sebagai `[REDACTED]` tanpa karakter apa pun; key ≥ 40 karakter hanya menampilkan 4 karakter terakhir), peringatan eksplisit saat `loadConfig()` menemukan API key plaintext di berkas config (mitigasi awareness, lihat batasan #8 di bawah), dan penegakan izin berkas `0o600` pada seluruh berkas konfigurasi dan sesi.
    - **Workspace / Folder Trust**: Konfirmasi interaktif kepercayaan direktori kerja (`Apakah kamu mempercayai folder ini? y/n`) saat pertama kali Ruko dijalankan di proyek baru, mencegah eksekusi kode otomatis pada repositori asing tak tepercaya.
 6. **Batasan Keamanan yang Diketahui (Known Security Limitations)**:
    - **Filesystem TOCTOU (Time-of-Check to Time-of-Use)**: Meskipun mutasi berkas menolak penulisan menembus symbolic link via `lstatSync().isSymbolicLink()` dan `assertInsideWorkspace()`, secara POSIX standar tetap terdapat *micro-window* teoretis jika ada proses konkuren eksternal di tingkat OS yang melakukan pertukaran berkas (*symlink swap*) persis di antara verifikasi boundary dan pemanggilan I/O kernel (`fs.writeFile`/`fs.readFile`).
@@ -333,7 +334,7 @@ Ruko diuji secara intensif menggunakan test runner bawaan Node.js (`node:test`) 
 # Verifikasi tipe data statis
 npm run typecheck
 
-# Menjalankan 773 unit test anti-regresi
+# Menjalankan 817 unit test anti-regresi
 npm test
 
 # Menjalankan end-to-end (E2E) integration test
@@ -341,12 +342,13 @@ npm run test:e2e
 ```
 
 Test suite mencakup pengujian unit untuk:
-- Deteksi risiko approval regex & skenario adversarial Guardian LLM.
+- Deteksi risiko approval regex & skenario adversarial Guardian LLM (termasuk path obfuscation dot `/./` dan `/../`, subshell non-chained, dan rantai variabel dalam).
+- Parser tool-call multi-format (markdown fence, DeepSeek DSML, XML `<invoke>`/`<parameter>` telanjang) — termasuk batch multi-invoke dan pembersihan tag sisa.
 - Proteksi mutlak Immutable Security Core dan pencegahan modifikasi/penghapusan.
 - Sandboxing direktori dan pencegahan traversal path di seluruh tool.
 - Hardening SSRF, notasi IP alternatif (desimal, oktal, hex, IPv4-mapped IPv6), dan IP-pinning redirect hop.
 - Parser streaming SSE LLM multi-provider (OpenAI, Anthropic, Gemini) dan penanganan kode status HTTP.
-- Mekanisme TUI, status bar rewinding, dan input buffer wrapping.
+- Mekanisme TUI, status bar rewinding, input buffer wrapping, dan pembersihan baris prompt approval.
 - Kompresi konteks adaptif dan snapshot undo journal.
 - Persistent memory, skill system, subagent delegation, dan trajectory export.
 
@@ -376,6 +378,9 @@ Bagian ini mendokumentasikan batasan keamanan inheren dan asumsi lingkungan oper
 
 7. **Rekomendasi Lingkungan Terisolasi (Container / Sandbox)**:
    Untuk mengevaluasi repositori kode pihak ketiga yang belum diverifikasi, menjalankan tugas otomatis dalam pipeline CI/CD, atau beroperasi di lingkungan publik, pengguna SANGAT DIREKOMENDASIKAN menjalankan Ruko di dalam container terisolasi (seperti **Docker**, **Dev Containers**, atau **VM sementara**) dengan hak akses non-root dan pembatasan akses jaringan keluar (*outbound egress network filtering*).
+
+8. **API Key pada Berkas Konfigurasi Disimpan Plaintext (Mitigasi Awareness, BUKAN Enkripsi At-Rest)**:
+   `apiKey` di `.ruko/config.json` (maupun `apiKey` literal di dalam `profiles`) tetap tersimpan sebagai **plaintext** dan hanya dilindungi izin berkas `0o600`. Sejak v1.7.7, `loadConfig()` menampilkan peringatan eksplisit ke stderr saat mendeteksi kredensial plaintext di berkas config dan tidak ada env var API key yang aktif (`RUKO_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). Peringatan ini **hanya mitigasi awareness** — ia tidak mengenkripsi apa pun dan tidak melindungi key dari backup otomatis, commit VCS yang tidak disengaja, snapshot container, atau pembacaan oleh proses lain yang berjalan sebagai user yang sama. Jalur yang direkomendasikan: simpan key di env var (atau `--api-key @file` / stdin) dan kosongkan field `apiKey` dari berkas config. Enkripsi at-rest penuh sengaja **tidak** diimplementasikan karena memerlukan manajemen kunci terpisah (key derivation, penyimpanan passphrase, dan strategi rotasi) yang berada di luar lingkup rilis ini.
 
 ---
 

@@ -9,14 +9,17 @@ import { Context } from './context.js';
 import { saveSession } from './session.js';
 import { createLineEditor, LineEditor, MenuItem } from './tui.js';
 import {
+  APPROVAL_LABELS,
   bold,
   buildStatusBar,
   dim,
+  ERASE_PREVIOUS_LINE,
   formatTerminalMarkdown,
   green,
   promptGlyph,
   red,
   renderApprovalBox,
+  renderApprovalDecision,
   renderDivider,
   renderStatusPanel,
   STATUS_PANEL_HINT,
@@ -300,16 +303,29 @@ export class SystemLoop {
   private makeConfirmer(): Confirmer {
     return async (command, reason) => {
       const box = renderApprovalBox(command, reason);
-      const promptStr = `  Jalankan? [${bold(green('Y'))}/${bold(red('N'))}] `;
+      const promptStr = `${APPROVAL_LABELS.prompt}[${bold(green('Y'))}/${bold(red('N'))}] `;
       if (this.editor) {
         process.stdout.write(`${box}\n`);
-        const answer = await this.editor.readLine({ prompt: promptStr });
-        return answer !== null && /^(y|yes|ya)$/i.test(answer.trim());
+        // feedback.txt item 2: read the y/N answer with echo suppressed — the
+        // editor erases its prompt row instead of committing it to scrollback,
+        // and the one-line decision below takes its place.
+        const answer = await this.editor.readLine({ prompt: promptStr, hideEcho: true });
+        const approved = answer !== null && /^(y|yes|ya)$/i.test(answer.trim());
+        process.stdout.write(`${renderApprovalDecision(approved)}\n`);
+        return approved;
       }
       if (!process.stdin.isTTY || !this.rl) return false;
       return new Promise((resolve) => {
         this.rl?.question(`${box}\n${promptStr}`, (answer) => {
-          resolve(/^(y|yes|ya)$/i.test(answer.trim()));
+          const approved = /^(y|yes|ya)$/i.test(answer.trim());
+          // readline echoes the typed answer on that same row: climb back over
+          // it and overwrite the prompt with the decision line (feedback item 2)
+          // so no `y/n` artifact is left in the terminal history.
+          if (process.stdout.isTTY) {
+            process.stdout.write(ERASE_PREVIOUS_LINE);
+          }
+          process.stdout.write(`${renderApprovalDecision(approved)}\n`);
+          resolve(approved);
         });
       });
     };

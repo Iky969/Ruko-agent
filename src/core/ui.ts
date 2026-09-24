@@ -8,15 +8,25 @@
 
 import path from 'node:path';
 
-const ANSI_RE = /\u001b\[[0-9;]*[a-zA-Z]/g;
+/**
+ * Matches ANSI escape sequences: CSI with any parameter bytes (`?`, `<`, `=`,
+ * `>`, `:`, digits, `;`), optional intermediate bytes and a final byte.
+ * The old pattern only covered SGR (`ESC [ 0-9; m`), so private-mode CSI such
+ * as `ESC[?25l` (hide cursor) or `ESC[?1049h` (alt screen) survived both
+ * `stripAnsi` and `sanitizeTerminalOutput` (M8).
+ */
+const ANSI_RE = /\u001b\[[0-9;:?<=>]*[ -/]*[@-~]/g;
 
 /**
  * Matches dangerous terminal escape sequences:
- * - OSC sequences: \u001b] ... (\u0007 | \u001b\) (e.g. title changes, hyperlinks)
- * - DCS / APC / PM: \u001b[P_^] ... \u001b\
+ * - OSC sequences: \u001b] ... (\u0007 | \u001b\\) (e.g. title changes, hyperlinks)
+ * - DCS / APC / PM: \u001b[P_^] ... \u001b\\
+ * - CSI with PRIVATE parameters (M8): \u001b[?25l, \u001b[?1049h, \u001b[>…  —
+ *   terminal state manipulation, never legitimate page content
  * - Control characters: \u0007 (bell), \u000c (form feed)
  */
-const DANGEROUS_TERMINAL_RE = /\u001b(?:\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[P_^][^\u001b]*\u001b\\)|[\u0007\u000c]/g;
+const DANGEROUS_TERMINAL_RE =
+  /\u001b(?:\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[P_^][^\u001b]*\u001b\\|\[[?<=>][0-9;:]*[ -/]*[@-~]|\[[0-9;:]*[ -/][@-~])|[\u0007\u000c]/g;
 
 /**
  * Sanitizes terminal output by stripping dangerous OSC, DCS, and device control sequences
@@ -59,13 +69,55 @@ export function stripAnsi(text: string): string {
 }
 
 /**
+ * Zero-width code points (wcwidth subset, M5): combining marks, variation
+ * selectors, ZWJ/ZWNJ and other format characters occupy no cell of their own.
+ */
+function isZeroWidthCodePoint(cp: number): boolean {
+  return (
+    (cp >= 0x0300 && cp <= 0x036f) || // Combining Diacritical Marks
+    (cp >= 0x0483 && cp <= 0x0489) ||
+    (cp >= 0x0591 && cp <= 0x05bd) ||
+    (cp >= 0x0610 && cp <= 0x061a) ||
+    (cp >= 0x064b && cp <= 0x065f) ||
+    (cp >= 0x06d6 && cp <= 0x06dc) ||
+    (cp >= 0x06df && cp <= 0x06e4) ||
+    (cp >= 0x0730 && cp <= 0x074a) ||
+    (cp >= 0x07a6 && cp <= 0x07b0) ||
+    (cp >= 0x0900 && cp <= 0x0903) ||
+    (cp >= 0x093a && cp <= 0x094f) ||
+    (cp >= 0x0951 && cp <= 0x0957) ||
+    (cp >= 0x0e31 && cp <= 0x0e31) ||
+    (cp >= 0x0e34 && cp <= 0x0e3a) ||
+    (cp >= 0x0eb1 && cp <= 0x0eb1) ||
+    (cp >= 0x0eb4 && cp <= 0x0eb9) ||
+    (cp >= 0x1ab0 && cp <= 0x1aff) || // Combining Diacritical Marks Extended
+    (cp >= 0x1dc0 && cp <= 0x1dff) || // Combining Diacritical Marks Supplement
+    (cp >= 0x200b && cp <= 0x200f) || // ZWSP / ZWNJ / ZWJ / LRM / RLM
+    (cp >= 0x202a && cp <= 0x202e) || // bidi embedding controls
+    (cp >= 0x2060 && cp <= 0x206f) || // word joiner / invisible operators
+    (cp >= 0x20d0 && cp <= 0x20ff) || // Combining Diacritical Marks for Symbols
+    (cp >= 0xfe00 && cp <= 0xfe0f) || // Variation Selectors (emoji presentation)
+    (cp >= 0xfe20 && cp <= 0xfe2f) || // Combining Half Marks
+    cp === 0xfeff // BOM / zero width no-break space
+  );
+}
+
+/** Regional Indicator Symbol (the two halves of a flag emoji). */
+function isRegionalIndicator(cp: number): boolean {
+  return cp >= 0x1f1e6 && cp <= 0x1f1ff;
+}
+
+/**
  * Terminal cell width of one code point (wcwidth subset): 2 for East-Asian
- * Wide/Fullwidth and the emoji-presentation blocks, 1 otherwise. Terminals
- * (and pyte) render ⚡ ⏳ 🟢 and CJK as TWO columns — counting them as one is
- * what let the status bar overflow its clamp and wrap (feedback v0.7 audit;
- * closes Known Bugs #7's double-width caveat).
+ * Wide/Fullwidth and the emoji-presentation blocks, 0 for combining marks /
+ * ZWJ / variation selectors, 1 otherwise. Terminals (and pyte) render ⚡ ⏳ 🟢
+ * and CJK as TWO columns — counting them as one is what let the status bar
+ * overflow its clamp and wrap (feedback v0.7 audit; closes Known Bugs #7's
+ * double-width caveat). M5 closed the remaining gaps: the emoji range
+ * U+1F800–U+1FFFF and the zero-width classes above.
  */
 export function charWidth(cp: number): number {
+  if (isZeroWidthCodePoint(cp)) return 0;
   if (cp < 0x1100) return 1;
   if (
     (cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
@@ -98,7 +150,7 @@ export function charWidth(cp: number): number {
     (cp >= 0xff00 && cp <= 0xff60) ||
     (cp >= 0xffe0 && cp <= 0xffe6) ||
     (cp >= 0x1f300 && cp <= 0x1f7ff) || // emoji + colored circles 🟢🟡
-    (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+    (cp >= 0x1f800 && cp <= 0x1ffff) || // M5: supplemental symbols & pictographs
     (cp >= 0x20000 && cp <= 0x3fffd)
   ) {
     return 2;
@@ -106,16 +158,88 @@ export function charWidth(cp: number): number {
   return 1;
 }
 
+/**
+ * Splits a string into grapheme clusters (M5).
+ *
+ * Deliberately dependency-free and deterministic: `Intl.Segmenter` was tried
+ * first, but ICU builds vary — the small-icu runtime available here silently
+ * DROPS ZWJ code points, so `👨👩👧` came back as three separate glyphs.
+ * The rules implemented here are the ones that matter for terminal widths:
+ *   - two adjacent Regional Indicators  → one flag cluster (2 columns)
+ *   - combining marks / variation selectors / ZWJ → glued to the base
+ *   - a cluster containing ZWJ pulls in the following base character too
+ */
+function splitGraphemes(text: string): string[] {
+  const cps = Array.from(text); // code points
+  const clusters: string[] = [];
+  let i = 0;
+  while (i < cps.length) {
+    const cp = cps[i].codePointAt(0)!;
+    // Flag emoji: a pair of regional indicators renders as one 2-column glyph.
+    if (isRegionalIndicator(cp) && i + 1 < cps.length && isRegionalIndicator(cps[i + 1].codePointAt(0)!)) {
+      clusters.push(cps[i] + cps[i + 1]);
+      i += 2;
+      continue;
+    }
+    let cluster = cps[i];
+    i += 1;
+    let joinNext = false;
+    for (;;) {
+      if (i >= cps.length) break;
+      const nextCp = cps[i].codePointAt(0)!;
+      if (isZeroWidthCodePoint(nextCp)) {
+        if (nextCp === 0x200d) joinNext = true; // ZWJ glues the next base too
+        cluster += cps[i];
+        i += 1;
+        continue;
+      }
+      if (joinNext) {
+        cluster += cps[i];
+        i += 1;
+        joinNext = false;
+        continue;
+      }
+      break;
+    }
+    clusters.push(cluster);
+  }
+  return clusters;
+}
+
+/** Terminal cell width of ONE grapheme cluster (emoji ZWJ sequences = 2). */
+export function graphemeWidth(cluster: string): number {
+  const cps = [...cluster].map((c) => c.codePointAt(0)!);
+  if (cps.length === 0) return 0;
+  // Flag emoji: two regional indicators render as a single 2-column glyph.
+  if (cps.length === 2 && cps.every(isRegionalIndicator)) return 2;
+  // Emoji presentation selector: the cluster is rendered as a wide emoji.
+  if (cps.includes(0xfe0f)) return 2;
+  const visible = cps.filter((cp) => !isZeroWidthCodePoint(cp));
+  if (visible.length === 0) return 0;
+  // A cluster joined by ZWJ / variation selectors collapses into one glyph;
+  // if any of its code points is wide, the whole cluster is wide.
+  if (visible.length > 1 && visible.some((cp) => charWidth(cp) === 2)) return 2;
+  return charWidth(visible[0]);
+}
+
 /** Visible terminal columns of a string (ANSI codes do not count). */
 export function visibleLength(text: string): number {
   let width = 0;
-  for (const ch of stripAnsi(text)) width += charWidth(ch.codePointAt(0)!);
+  for (const cluster of splitGraphemes(stripAnsi(text))) width += graphemeWidth(cluster);
   return width;
 }
 
+/**
+ * Right-pads to `width` visible columns. M9: any SGR run still open at the end
+ * of the text is closed BEFORE the padding spaces, so the padding never
+ * inherits the previous color (the padding used to be painted with it).
+ */
 export function padVisible(text: string, width: number): string {
-  const gap = width - visibleLength(text);
-  return text + ' '.repeat(Math.max(0, gap));
+  const safe = sanitizeTerminalOutput(text);
+  const gap = width - visibleLength(safe);
+  if (gap <= 0) return safe;
+  const hasOpenSgr = /\u001b\[[0-9;]*m/.test(safe) && !safe.endsWith('\u001b[0m');
+  return `${safe}${hasOpenSgr ? '\u001b[0m' : ''}${' '.repeat(gap)}`;
 }
 
 /** Usable terminal width (fallback 80 when stdout is not a TTY). */
@@ -129,16 +253,21 @@ export function terminalWidth(): number {
  * Truncates a string to `width` VISIBLE characters. ANSI escape sequences are
  * copied through without counting toward the width, and a reset is appended
  * when the cut lands inside a colored run — so borders never drift.
+ *
+ * M9: the input is sanitized FIRST (dangerous OSC/DCS/private-mode CSI are
+ * dropped even when no truncation happens) — the old early return handed the
+ * raw string straight back.
  */
 export function truncateVisible(text: string, width: number): string {
-  if (visibleLength(text) <= width) return text;
+  const source = sanitizeTerminalOutput(text);
+  if (visibleLength(source) <= width) return source;
   let out = '';
   let count = 0;
   let i = 0;
   let colored = false;
-  while (i < text.length && count < width) {
-    if (text[i] === '\u001b') {
-      const m = /^\u001b\[[0-9;]*m/.exec(text.slice(i));
+  while (i < source.length && count < width) {
+    if (source[i] === '\u001b') {
+      const m = /^\u001b\[[0-9;]*m/.exec(source.slice(i));
       if (m) {
         out += m[0];
         colored = m[0] !== '\u001b[0m';
@@ -146,7 +275,7 @@ export function truncateVisible(text: string, width: number): string {
         continue;
       }
     }
-    const cp = text.codePointAt(i)!;
+    const cp = source.codePointAt(i)!;
     const ch = String.fromCodePoint(cp);
     const w = charWidth(cp);
     if (count + w > width) break; // don't split a double-width cell
@@ -203,15 +332,45 @@ export function renderDivider(char = '─', colorFn: (s: string) => string = dim
 }
 
 /**
+ * Label teks kotak approval (L3). Sebelumnya hardcoded di dalam
+ * `renderApprovalBox`; dikumpulkan di satu tempat supaya tampilan bisa
+ * di-lokalkan tanpa menyentuh logika render.
+ */
+export const APPROVAL_LABELS = {
+  header: '⚠ KONFIRMASI BERISIKO',
+  reason: 'Alasan  :',
+  command: 'Perintah:',
+  prompt: '  Jalankan? ',
+  approved: '  ✓ Disetujui',
+  denied: '  ✗ Ditolak',
+} as const;
+
+/**
+ * feedback.txt item 2: ANSI helpers for the approval prompt. The confirmation
+ * line used to be committed verbatim to scrollback (the `y/n` prompt stayed in
+ * the terminal history after Enter). These sequences let the caller erase that
+ * row and replace it with one clean decision line.
+ */
+/** Erase the row the cursor currently sits on, in place. */
+export const CLEAR_CURRENT_LINE = '\r\u001b[2K';
+/** Climb one row and erase it — removes a just-committed prompt line. */
+export const ERASE_PREVIOUS_LINE = '\u001b[1A\r\u001b[2K';
+
+/** One-line approval result (replaces the cleared `y/n` prompt row). */
+export function renderApprovalDecision(approved: boolean): string {
+  return approved ? green(APPROVAL_LABELS.approved) : red(APPROVAL_LABELS.denied);
+}
+
+/**
  * Renders a high-visibility ANSI red/yellow bordered box for approval gate confirmations.
  * Clamped responsively to terminal width (fallback process.stdout.columns ?? 80).
  */
 export function renderApprovalBox(command: string, reason: string): string {
   const cols = terminalWidth();
   const maxInner = Math.max(16, cols - 4);
-  const headerText = '⚠ KONFIRMASI BERISIKO';
-  const reasonText = `Alasan  : ${reason}`;
-  const cmdText = `Perintah: ${command}`;
+  const headerText = APPROVAL_LABELS.header;
+  const reasonText = `${APPROVAL_LABELS.reason} ${reason}`;
+  const cmdText = `${APPROVAL_LABELS.command} ${command}`;
   const needed = Math.max(visibleLength(headerText), visibleLength(reasonText), visibleLength(cmdText)) + 4;
   const inner = Math.min(Math.max(needed, 28), maxInner);
 
@@ -223,8 +382,8 @@ export function renderApprovalBox(command: string, reason: string): string {
   const top = border(`┌${'─'.repeat(inner)}┐`);
   const headerRow = `${border('│')} ${padVisible(fit(alertHeader), inner - 2)} ${border('│')}`;
   const sep = border(`├${'─'.repeat(inner)}┤`);
-  const reasonRow = `${border('│')} ${padVisible(fit(`${bold('Alasan  :')} ${yellow(reason)}`), inner - 2)} ${border('│')}`;
-  const cmdRow = `${border('│')} ${padVisible(fit(`${bold('Perintah:')} ${cyan(command)}`), inner - 2)} ${border('│')}`;
+  const reasonRow = `${border('│')} ${padVisible(fit(`${bold(APPROVAL_LABELS.reason)} ${yellow(reason)}`), inner - 2)} ${border('│')}`;
+  const cmdRow = `${border('│')} ${padVisible(fit(`${bold(APPROVAL_LABELS.command)} ${cyan(command)}`), inner - 2)} ${border('│')}`;
   const bottom = border(`└${'─'.repeat(inner)}┘`);
 
   return [top, headerRow, sep, reasonRow, cmdRow, bottom].join('\n');
@@ -1519,6 +1678,30 @@ function dsmlPrefixHold(text: string): number {
   return max;
 }
 
+/**
+ * feedback.txt item 1: hold partial bare-XML invoke tags back until the whole
+ * opening tag has arrived. Without this, `<invoke name=` was flushed to the
+ * terminal character by character BEFORE the filter could recognise the block
+ * (the exact leak: `.github/workflows</parameter></invoke>`).
+ */
+const INVOKE_TAG_MARKERS = [
+  '<invoke',
+  '</invoke',
+  '<parameter',
+  '</parameter',
+  '<function_calls',
+  '</function_calls',
+];
+
+function invokeTagPrefixHold(text: string): number {
+  let max = 0;
+  for (const m of INVOKE_TAG_MARKERS) {
+    const h = fencePrefixHold(text, m);
+    if (h > max) max = h;
+  }
+  return max;
+}
+
 function malformedPrefixHold(text: string): number {
   const lastLt = Math.max(text.lastIndexOf('<'), text.lastIndexOf('＜'));
   if (lastLt === -1) return 0;
@@ -1545,7 +1728,14 @@ function malformedPrefixHold(text: string): number {
  */
 export class RevealFilter {
   private buffer = '';
-  private hiddenType: 'tool_fence' | 'dsml_calls' | 'dsml_invoke' | 'tool_call' | 'tool_tag' | null = null;
+  private hiddenType:
+    | 'tool_fence'
+    | 'dsml_calls'
+    | 'dsml_invoke'
+    | 'xml_parameter'
+    | 'tool_call'
+    | 'tool_tag'
+    | null = null;
   private skipNextNewline = false;
 
   constructor(private readonly sink: (text: string) => void) {}
@@ -1620,7 +1810,30 @@ export class RevealFilter {
       }
 
       if (this.hiddenType === 'dsml_invoke') {
-        const closeMatch = /<\/\s*(?:\||｜)+DSML(?:\||｜)+\s*invoke[^>]*>/i.exec(this.buffer);
+        // feedback.txt item 1: the closing tag may drop the DSML prefix even
+        // when the opening tag carried it (`<|DSML|invoke ...></invoke>`), so
+        // the prefix is OPTIONAL here — otherwise the filter stayed in hide
+        // mode and swallowed every later chunk of the reply.
+        const closeMatch = /<\/\s*(?:(?:\||｜)+DSML(?:\||｜)+\s*)?invoke[^>]*>/i.exec(this.buffer);
+        if (!closeMatch) {
+          return;
+        }
+        let rest = this.buffer.slice(closeMatch.index + closeMatch[0].length);
+        if (rest.startsWith('\r\n')) {
+          rest = rest.slice(2);
+        } else if (rest.startsWith('\n')) {
+          rest = rest.slice(1);
+        } else if (rest.length === 0) {
+          this.skipNextNewline = true;
+        }
+        this.buffer = rest;
+        this.hiddenType = null;
+        continue;
+      }
+
+      if (this.hiddenType === 'xml_parameter') {
+        // Bare `<parameter name="...">value</parameter>` outside an invoke block.
+        const closeMatch = /<\/\s*(?:(?:\||｜)+DSML(?:\||｜)+\s*)?parameter[^>]*>/i.exec(this.buffer);
         if (!closeMatch) {
           return;
         }
@@ -1683,15 +1896,29 @@ export class RevealFilter {
       const toolCallIdx = this.buffer.indexOf('<tool_call');
       const toolTagMatch = /<tool\b/i.exec(this.buffer);
       const toolTagIdx = toolTagMatch ? toolTagMatch.index : -1;
+      // feedback.txt item 1: bare XML invoke/parameter tags (no DSML pipes) —
+      // <invoke name="write_file"><parameter name="path">…</parameter></invoke>
+      const invokeTagMatch = /<\/?\s*(?:invoke|parameter|function_calls)\b/i.exec(this.buffer);
+      const invokeTagIdx = invokeTagMatch ? invokeTagMatch.index : -1;
       const malformedMatch = /[<＜]\s*([^\s>]+)\s+[^>]*?\b(?:name|tool|query|path|command|action)\s*=/i.exec(this.buffer);
       const malformedIdx = malformedMatch ? malformedMatch.index : -1;
 
-      const candidates: Array<{ idx: number; type: 'fence' | 'dsml' | 'tool_call' | 'tool_tag' | 'malformed_tag' }> = [];
+      const candidates: Array<{
+        idx: number;
+        type: 'fence' | 'dsml' | 'tool_call' | 'tool_tag' | 'invoke_tag' | 'malformed_tag';
+      }> = [];
       if (fenceIdx !== -1) candidates.push({ idx: fenceIdx, type: 'fence' });
       if (dsmlIdx !== -1) candidates.push({ idx: dsmlIdx, type: 'dsml' });
       if (toolCallIdx !== -1) candidates.push({ idx: toolCallIdx, type: 'tool_call' });
       if (toolTagIdx !== -1 && toolTagIdx !== toolCallIdx) candidates.push({ idx: toolTagIdx, type: 'tool_tag' });
-      if (malformedIdx !== -1 && malformedIdx !== dsmlIdx && malformedIdx !== toolCallIdx && malformedIdx !== toolTagIdx) {
+      if (invokeTagIdx !== -1 && invokeTagIdx !== dsmlIdx) candidates.push({ idx: invokeTagIdx, type: 'invoke_tag' });
+      if (
+        malformedIdx !== -1 &&
+        malformedIdx !== dsmlIdx &&
+        malformedIdx !== toolCallIdx &&
+        malformedIdx !== toolTagIdx &&
+        malformedIdx !== invokeTagIdx
+      ) {
         candidates.push({ idx: malformedIdx, type: 'malformed_tag' });
       }
 
@@ -1700,8 +1927,9 @@ export class RevealFilter {
         const holdDsml = dsmlPrefixHold(this.buffer);
         const holdToolCall = fencePrefixHold(this.buffer, '<tool_call');
         const holdToolTag = fencePrefixHold(this.buffer, '<tool');
+        const holdInvokeTag = invokeTagPrefixHold(this.buffer);
         const holdMalformed = malformedPrefixHold(this.buffer);
-        const hold = Math.max(holdFence, holdDsml, holdToolCall, holdToolTag, holdMalformed);
+        const hold = Math.max(holdFence, holdDsml, holdToolCall, holdToolTag, holdInvokeTag, holdMalformed);
         const emit = this.buffer.slice(0, this.buffer.length - hold);
         this.buffer = hold ? this.buffer.slice(this.buffer.length - hold) : '';
         if (emit) this.sink(emit);
@@ -1776,6 +2004,11 @@ export class RevealFilter {
           this.hiddenType = 'dsml_invoke';
           continue;
         }
+        if (/<\s*(?:\||｜)+DSML(?:\||｜)+\s*parameter\b/i.test(tag)) {
+          // A DSML parameter tag without a wrapping invoke: hide its value too.
+          this.hiddenType = 'xml_parameter';
+          continue;
+        }
         // stray or closing tag
         continue;
       }
@@ -1787,6 +2020,30 @@ export class RevealFilter {
 
       if (earliest.type === 'tool_tag') {
         this.hiddenType = 'tool_tag';
+        continue;
+      }
+
+      if (earliest.type === 'invoke_tag') {
+        // Bare XML invoke/parameter block (feedback.txt item 1). The opening
+        // tag is consumed, then everything up to the matching closing tag is
+        // hidden — self-closing and stray closing tags are dropped outright.
+        const gtIdx = this.buffer.indexOf('>');
+        if (gtIdx === -1) {
+          return;
+        }
+        const tag = this.buffer.slice(0, gtIdx + 1);
+        this.buffer = this.buffer.slice(gtIdx + 1);
+        if (tag.endsWith('/>')) continue;
+        if (/^<\s*\/\s*invoke\b/i.test(tag)) continue;
+        if (/^<\s*invoke\b/i.test(tag)) {
+          this.hiddenType = 'dsml_invoke';
+          continue;
+        }
+        if (/^<\s*parameter\b/i.test(tag)) {
+          this.hiddenType = 'xml_parameter';
+          continue;
+        }
+        // <function_calls> / </function_calls> wrapper tags: hide the tag only.
         continue;
       }
 

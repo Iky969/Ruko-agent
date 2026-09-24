@@ -23,6 +23,20 @@ export const DEFAULT_TIMEOUT_MS = 120_000;
 export const DEFAULT_MAX_BUFFER = 10 * 1024 * 1024;
 
 /**
+ * Environment variables that a POSIX shell evaluates at STARTUP or before
+ * every prompt (M4). They are stripped together with the `BASH_FUNC_*`
+ * exports, because a caller-supplied value can hijack every command Ruko runs
+ * (`BASH_ENV=/tmp/evil.sh sh -c "true"` executes the payload first).
+ */
+const DANGEROUS_ENV_VARS = new Set([
+  'BASH_ENV', // sourced by bash for every non-interactive shell
+  'ENV', // sourced by sh/ksh at startup
+  'PROMPT_COMMAND', // executed by bash before each prompt
+  'CDPATH', // silently redirects `cd` to an attacker-controlled directory
+  'BASH_RCFILE', // alternative bash rc file
+]);
+
+/**
  * Runs a shell command and returns its output, exit code and duration.
  *
  * The captured output is passed through the Log Summarizer by default so a
@@ -33,11 +47,14 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const started = Date.now();
 
-    // Sanitize environment: discard shell function exports (BASH_FUNC_*) that can hijack utilities
+    // Sanitize environment: discard shell function exports (BASH_FUNC_*) and
+    // shell-startup hooks (BASH_ENV/ENV/PROMPT_COMMAND/CDPATH/BASH_RCFILE, M4)
+    // that can hijack the command before it even runs.
     const rawEnv = options.env ? { ...process.env, ...options.env } : { ...process.env };
     const cleanEnv: NodeJS.ProcessEnv = {};
     for (const [k, v] of Object.entries(rawEnv)) {
       if (k.startsWith('BASH_FUNC_')) continue;
+      if (DANGEROUS_ENV_VARS.has(k)) continue;
       cleanEnv[k] = v;
     }
 

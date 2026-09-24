@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -514,6 +514,207 @@ test('End-to-End: Agent intercepts Markdown JSON style, executes tool, and outpu
     const plainLogs = stripAnsi(out);
     assert.ok(plainLogs.includes('📖 Read README.md'));
   } finally {
+    rmSync(tmpWs, { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// feedback.txt item 1 (v1.7.7 batch 2): multi-invoke DSML/XML tool calls
+//
+// Sebelumnya: hanya panggilan PERTAMA yang dieksekusi, dan sisa tag penutup
+// (mis. `.github/workflows</parameter></invoke>`) bocor ke stream teks/thought.
+// Penyebab: regex invoke mewajibkan prefix DSML di tag PEMBUKA dan PENUTUP
+// sekaligus, dan tidak ada parser untuk bentuk XML telanjang `<invoke name=…>`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('Item 1: multi-invoke DSML dengan tag penutup telanjang → SEMUA call di-parse, tanpa bocor', () => {
+  const raw =
+    'Menulis workflow.\n' +
+    '<|DSML|invoke name="write_file"><|DSML|parameter name="path" string="true">.github/workflows/ci.yml</|DSML|parameter></|DSML|invoke>' +
+    '<|DSML|invoke name="write_file"><|DSML|parameter name="path" string="true">.github/workflows/release.yml</parameter></invoke>';
+  const { calls, malformedBlocks } = parseToolCalls(raw);
+  assert.equal(malformedBlocks.length, 0, 'tidak boleh ada blok malformed');
+  assert.equal(calls.length, 2, 'KEDUA blok invoke harus di-parse');
+  assert.equal(calls[0].tool, 'write_file');
+  assert.equal(calls[0].path, '.github/workflows/ci.yml');
+  assert.equal(calls[1].tool, 'write_file');
+  assert.equal(calls[1].path, '.github/workflows/release.yml');
+
+  // Kebocoran yang dilaporkan feedback.txt: `.github/workflows</parameter></invoke>`
+  const stripped = stripToolBlocks(raw);
+  assert.ok(!stripped.includes('</parameter>'), 'tag penutup </parameter> tidak boleh tersisa');
+  assert.ok(!stripped.includes('</invoke>'), 'tag penutup </invoke> tidak boleh tersisa');
+  assert.ok(!stripped.includes('.github/workflows'), 'payload tool tidak boleh bocor sebagai teks');
+  assert.ok(stripped.includes('Menulis workflow.'), 'teks biasa tetap dipertahankan');
+});
+
+test('Item 1: blok XML telanjang <invoke>/<parameter> (gaya Anthropic) di-parse, bukan malformed', () => {
+  const raw =
+    '<invoke name="write_file">\n' +
+    '<parameter name="path" string="true">.github/workflows/ci.yml</parameter>\n' +
+    '<parameter name="content" string="true">name: CI</parameter>\n' +
+    '</invoke>\n' +
+    '<invoke name="read_file">\n<parameter name="file_path" string="true">README.md</parameter>\n</invoke>';
+  const { calls, malformedBlocks } = parseToolCalls(raw);
+  assert.equal(malformedBlocks.length, 0, 'invoke telanjang adalah call valid, bukan malformed');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].tool, 'write_file');
+  assert.equal(calls[0].path, '.github/workflows/ci.yml');
+  assert.equal(calls[0].content, 'name: CI');
+  assert.equal(calls[1].tool, 'read_file');
+  assert.equal(calls[1].path, 'README.md', 'file_path harus dinormalisasi menjadi path');
+});
+
+test('Item 1: parameter non-string pada invoke telanjang tetap di-parse sebagai JSON', () => {
+  const raw = '<invoke name="read_file"><parameter name="offset">40</parameter><parameter name="limit">10</parameter></invoke>';
+  const { calls } = parseToolCalls(raw);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].offset, 40);
+  assert.equal(calls[0].limit, 10);
+});
+
+test('Item 1: RevealFilter menyembunyikan blok invoke telanjang saat streaming per karakter', () => {
+  let emitted = '';
+  const filter = new RevealFilter((chunk) => {
+    emitted += chunk;
+  });
+  const raw =
+    'Saya akan menulis workflow.\n' +
+    '<invoke name="write_file"><parameter name="path" string="true">.github/workflows/ci.yml</parameter></invoke>\n' +
+    'Selesai.';
+  for (const ch of raw) filter.feed(ch);
+  filter.end();
+
+  assert.ok(emitted.includes('Saya akan menulis workflow.'));
+  assert.ok(emitted.includes('Selesai.'));
+  assert.ok(!emitted.includes('<invoke'), '<invoke> tidak boleh bocor ke stream');
+  assert.ok(!emitted.includes('</parameter>'), '</parameter> tidak boleh bocor ke stream');
+  assert.ok(!emitted.includes('.github/workflows'), 'payload parameter tidak boleh bocor');
+});
+
+test('Item 1: RevealFilter tidak menelan sisa teks setelah blok DSML dengan penutup telanjang', () => {
+  let emitted = '';
+  const filter = new RevealFilter((chunk) => {
+    emitted += chunk;
+  });
+  const raw =
+    'Menulis.\n' +
+    '<|DSML|invoke name="write_file"><|DSML|parameter name="path" string="true">.github/workflows/ci.yml</parameter></invoke>\n' +
+    'Selesai.';
+  for (const ch of raw) filter.feed(ch);
+  filter.end();
+
+  assert.ok(emitted.includes('Selesai.'), 'teks setelah blok tidak boleh ikut tersembunyi');
+  assert.ok(!emitted.includes('</invoke>'), 'tag penutup tidak boleh bocor');
+  assert.ok(!emitted.includes('.github/workflows'), 'payload tidak boleh bocor');
+});
+
+test('Item 1: blok <function_calls> wrapper tidak bocor ke stream', () => {
+  let emitted = '';
+  const filter = new RevealFilter((chunk) => {
+    emitted += chunk;
+  });
+  const raw =
+    'Awal.\n<function_calls>\n<invoke name="read_file">\n<parameter name="path">a.txt</parameter>\n</invoke>\n</function_calls>\nAkhir.';
+  for (const ch of raw) filter.feed(ch);
+  filter.end();
+
+  assert.ok(emitted.includes('Awal.') && emitted.includes('Akhir.'));
+  assert.ok(!emitted.includes('function_calls'), 'wrapper tidak boleh bocor');
+  assert.ok(!emitted.includes('<invoke'), 'invoke tidak boleh bocor');
+  assert.ok(!emitted.includes('a.txt'), 'payload tidak boleh bocor');
+});
+
+test('End-to-End Item 1: Agent mengeksekusi DUA invoke campuran dalam satu giliran', async () => {
+  const tmpWs = mkdtempSync(join(tmpdir(), 'ruko-multi-invoke-'));
+  setWorkspaceRoot(tmpWs);
+
+  let callCount = 0;
+  const mockProvider = {
+    name: 'deepseek',
+    isConfigured: true,
+    model: 'deepseek-chat',
+    setModel() {},
+    async chat(messages: any[], options?: any) {
+      callCount++;
+      if (callCount === 1) {
+        const responseText =
+          'Menulis dua berkas workflow.\n' +
+          '<|DSML|invoke name="write_file"><|DSML|parameter name="path" string="true">a.txt</|DSML|parameter><|DSML|parameter name="content" string="true">AAA</|DSML|parameter></|DSML|invoke>' +
+          '<|DSML|invoke name="write_file"><|DSML|parameter name="path" string="true">b.txt</parameter><parameter name="content" string="true">BBB</parameter></invoke>';
+        for (const ch of responseText) options?.onToken?.(ch);
+        return responseText;
+      }
+      const toolMsgs = messages.filter((m: any) => m.role === 'tool');
+      assert.equal(toolMsgs.length, 2, 'kedua hasil tool harus dikirim balik ke model');
+      return 'Dua berkas selesai ditulis.';
+    },
+  };
+
+  try {
+    const config = { ...DEFAULT_CONFIG, mode: 'beginner' as const };
+    const ctx = new Context(config);
+    const agent = new Agent(ctx, mockProvider as any, config, async () => true, tmpWs);
+
+    const { result: finalAnswer, out } = await captureStdout(() => agent.handleInstruction('tulis dua berkas'));
+
+    assert.equal(callCount, 2);
+    assert.equal(finalAnswer, 'Dua berkas selesai ditulis.');
+    assert.ok(!finalAnswer.includes('<invoke'), 'jawaban akhir tidak boleh mengandung tag invoke');
+    assert.equal(readFileSync(join(tmpWs, 'a.txt'), 'utf8'), 'AAA');
+    assert.equal(readFileSync(join(tmpWs, 'b.txt'), 'utf8'), 'BBB');
+
+    const plainLogs = stripAnsi(out);
+    assert.ok(!plainLogs.includes('</parameter>'), 'tag penutup tidak boleh bocor ke log terminal');
+    assert.ok(!plainLogs.includes('</invoke>'), 'tag invoke tidak boleh bocor ke log terminal');
+  } finally {
+    rmSync(tmpWs, { recursive: true, force: true });
+  }
+});
+
+test('End-to-End Item 1b: tool call di dalam <thought> tidak bocor ke reasoning box', async () => {
+  const tmpWs = mkdtempSync(join(tmpdir(), 'ruko-thought-leak-'));
+  setWorkspaceRoot(tmpWs);
+  writeFileSync(join(tmpWs, 'note.txt'), 'ISI-NOTE\n', 'utf-8');
+
+  const previousReasoning = process.env.RUKO_SHOW_REASONING;
+  process.env.RUKO_SHOW_REASONING = '1';
+
+  let callCount = 0;
+  const mockProvider = {
+    name: 'deepseek',
+    isConfigured: true,
+    model: 'deepseek-reasoner',
+    setModel() {},
+    async chat(messages: any[], options?: any) {
+      callCount++;
+      if (callCount === 1) {
+        const responseText =
+          '<thought>Membaca note.txt.\n<|DSML|invoke name="read_file"><|DSML|parameter name="path" string="true">note.txt</|DSML|parameter></|DSML|invoke>\nAnalisis selesai</thought>\n' +
+          '<|DSML|invoke name="read_file"><|DSML|parameter name="path" string="true">note.txt</|DSML|parameter></|DSML|invoke>';
+        for (const ch of responseText) options?.onToken?.(ch);
+        return responseText;
+      }
+      return 'Isi note adalah ISI-NOTE.';
+    },
+  };
+
+  try {
+    const config = { ...DEFAULT_CONFIG, mode: 'beginner' as const };
+    const ctx = new Context(config);
+    const agent = new Agent(ctx, mockProvider as any, config, async () => true, tmpWs);
+
+    const { result: finalAnswer, out } = await captureStdout(() => agent.handleInstruction('baca note.txt'));
+    assert.equal(finalAnswer, 'Isi note adalah ISI-NOTE.');
+
+    const plainLogs = stripAnsi(out);
+    assert.ok(plainLogs.includes('Reasoning'), 'reasoning box harus dirender (RUKO_SHOW_REASONING=1)');
+    assert.ok(!plainLogs.includes('<|DSML|'), 'DSML tidak boleh bocor ke reasoning box');
+    assert.ok(!plainLogs.includes('<invoke'), 'tag invoke tidak boleh bocor ke reasoning box');
+    assert.ok(!plainLogs.includes('</parameter>'), 'tag penutup tidak boleh bocor ke reasoning box');
+  } finally {
+    if (previousReasoning === undefined) delete process.env.RUKO_SHOW_REASONING;
+    else process.env.RUKO_SHOW_REASONING = previousReasoning;
     rmSync(tmpWs, { recursive: true, force: true });
   }
 });

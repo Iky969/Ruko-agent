@@ -18,6 +18,7 @@ import { codeSearchTool, globTool, readFileTool } from '../agent/filetools.js';
 import {
   checkSsrfSafety,
   isPrivateOrLocalIp,
+  isPrivateOrLocalIPv4,
   isPrivateOrLocalIPv6,
   parseAlternativeIPv4,
   webFetchTool,
@@ -912,5 +913,70 @@ test('Point 2: isSensitiveEnvCommand memblokir subshell / command substitution e
   for (const cmd of safeSubshellCommands) {
     assert.equal(isSensitiveEnvCommand(cmd), false, `Subshell aman tidak boleh diblokir: ${cmd}`);
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H3 (audit v1.7.7): isPrivateOrLocalIPv4 tidak boleh mempercayai notasi
+// alternatif (oktal leading-zero / hex). Sebelumnya parseInt(p, 10) membuat
+// "0177.0.0.1" diparsing sebagai 177.0.0.1 (bukan 127.0.0.1) sehingga LOLOS
+// dari deteksi loopback. Sekarang notasi non-desimal = malformed = unsafe.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('H3: isPrivateOrLocalIPv4 menolak notasi oktal/hex sebagai malformed (unsafe)', () => {
+  // Payload dari audit — semuanya harus dianggap privat/lokal (unsafe)
+  assert.equal(isPrivateOrLocalIPv4('0177.0.0.1'), true, 'oktal loopback harus unsafe');
+  assert.equal(isPrivateOrLocalIPv4('0x7f.0.0.1'), true, 'hex loopback harus unsafe');
+  assert.equal(isPrivateOrLocalIPv4('0x7f000001'), true, 'hex penuh harus unsafe');
+  assert.equal(isPrivateOrLocalIPv4('010.0.0.1'), true, 'oktal leading-zero harus unsafe (fail closed)');
+  assert.equal(isPrivateOrLocalIPv4('0177.000.000.001'), true, 'oktal multi-segmen harus unsafe');
+  assert.equal(isPrivateOrLocalIPv4(' 8.8.8.8'), true, 'whitespace = malformed');
+  assert.equal(isPrivateOrLocalIPv4('+8.8.8.8'), true, 'tanda = malformed');
+  assert.equal(isPrivateOrLocalIPv4('8.8.8'), true, 'jumlah segmen salah = malformed');
+  assert.equal(isPrivateOrLocalIPv4('8.8.8.8.8'), true, 'terlalu banyak segmen = malformed');
+  assert.equal(isPrivateOrLocalIPv4('999.1.1.1'), true, 'out of range = malformed');
+  assert.equal(isPrivateOrLocalIPv4(''), true, 'string kosong = malformed');
+});
+
+test('H3: isPrivateOrLocalIPv4 tetap akurat untuk notasi desimal murni', () => {
+  assert.equal(isPrivateOrLocalIPv4('127.0.0.1'), true);
+  assert.equal(isPrivateOrLocalIPv4('10.0.0.1'), true);
+  assert.equal(isPrivateOrLocalIPv4('172.16.0.1'), true);
+  assert.equal(isPrivateOrLocalIPv4('192.168.1.1'), true);
+  assert.equal(isPrivateOrLocalIPv4('169.254.169.254'), true);
+  assert.equal(isPrivateOrLocalIPv4('0.0.0.0'), true);
+  assert.equal(isPrivateOrLocalIPv4('8.8.8.8'), false);
+  assert.equal(isPrivateOrLocalIPv4('1.1.1.1'), false);
+  assert.equal(isPrivateOrLocalIPv4('93.184.216.34'), false);
+});
+
+test('H3: isPrivateOrLocalIp tetap mendeteksi notasi oktal/hex lewat normalisasi', () => {
+  // parseAlternativeIPv4 menormalkan notasi alternatif lebih dulu, sehingga
+  // payload audit tetap terdeteksi sebagai privat/lokal.
+  for (const ip of ['0177.0.0.1', '0x7f.0.0.1', '0x7f000001', '2130706433', '127.1', '017700000001']) {
+    assert.equal(isPrivateOrLocalIp(ip), true, `harus privat/lokal: ${ip}`);
+  }
+  for (const ip of ['8.8.8.8', '1.1.1.1', '93.184.216.34', '010.0.0.1']) {
+    assert.equal(isPrivateOrLocalIp(ip), false, `harus publik: ${ip}`);
+  }
+});
+
+test('H3: checkSsrfSafety menolak URL dengan notasi IP alternatif (oktal/hex)', async () => {
+  for (const target of [
+    'http://0177.0.0.1/',
+    'http://0x7f.0.0.1/',
+    'http://0x7f000001/',
+    'http://2130706433/',
+  ]) {
+    const res = await checkSsrfSafety(new URL(target));
+    assert.equal(res.safe, false, `SSRF check harus menolak: ${target}`);
+  }
+  // Host publik tetap lolos (tanpa lookup DNS tambahan untuk literal IP)
+  const publicIp = await checkSsrfSafety(new URL('http://93.184.216.34/'));
+  assert.equal(publicIp.safe, true, 'IP publik harus lolos');
+  // Notasi mentah yang BELUM dinormalisasi oleh URL parser (mis. dipanggil
+  // dari caller internal) tetap harus ditolak oleh checkSsrfSafety.
+  const rawNotation = { protocol: 'http:', hostname: '0177.0.0.1' } as unknown as URL;
+  const rawRes = await checkSsrfSafety(rawNotation);
+  assert.equal(rawRes.safe, false, 'hostname notasi oktal mentah harus ditolak');
 });
 

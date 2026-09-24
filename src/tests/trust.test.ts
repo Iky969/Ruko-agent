@@ -87,3 +87,30 @@ test('promptWorkspaceTrust returns false and does not trust folder when user ans
     assert.equal(isWorkspaceTrusted(ws, configPath), false);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// L1 (audit v1.7.7, batch 2): RUKO_TRUST_FOLDER mem-bypass trust check tanpa
+// log/warning. Bypass tetap ada (escape hatch CI) tetapi harus terlihat.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('L1: RUKO_TRUST_FOLDER mem-bypass trust check DENGAN warning eksplisit', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'ruko-trust-warn-'));
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  const prev = process.env.RUKO_TRUST_FOLDER;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((a) => String(a)).join(' '));
+  };
+  try {
+    process.env.RUKO_TRUST_FOLDER = '1';
+    assert.equal(isWorkspaceTrusted(ws), true, 'bypass tetap berfungsi');
+    assert.equal(warnings.length, 1, 'harus ada tepat satu warning');
+    assert.match(warnings[0], /RUKO_TRUST_FOLDER/);
+    assert.match(warnings[0], /DILEWATI/);
+  } finally {
+    if (prev === undefined) delete process.env.RUKO_TRUST_FOLDER;
+    else process.env.RUKO_TRUST_FOLDER = prev;
+    console.warn = originalWarn;
+    rmSync(ws, { recursive: true, force: true });
+  }
+});

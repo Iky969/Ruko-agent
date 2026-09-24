@@ -61,31 +61,80 @@ export interface WebFetchResult {
   truncated?: boolean;
 }
 
+/** Block-level HTML elements whose CONTENT must never reach the model. */
+const DANGEROUS_BLOCK_TAGS = new Set(['script', 'style', 'noscript', 'svg', 'iframe']);
+
+/**
+ * Removes `<script|style|noscript|svg|iframe>…</tag>` blocks TOGETHER WITH
+ * their inner content in ONE linear pass (M6).
+ *
+ * The previous implementation looped
+ * `replace(/<(script|…)\b[^>]*>[\s\S]*?<\/\1>/gi)` until the text stopped
+ * changing. On crafted input (thousands of unclosed `<script>` tags followed
+ * by a single `</script>`) the lazy `[\s\S]*?` scan restarts at every opening
+ * tag — O(n²) work and a CPU-exhaustion DoS on fetched pages. A sticky tag
+ * scanner visits every tag exactly once and tracks nesting depth instead.
+ */
+export function stripDangerousBlocks(html: string): string {
+  // NOTE: no whitespace is allowed between `<` and the tag name, so prose like
+  // `a < b` is never mistaken for a tag (and can never swallow a real
+  // `<script>` that follows it).
+  const tagRe = /<(\/?)([a-zA-Z][a-zA-Z0-9:_-]*)\b[^>]*?>/gy;
+  let out = '';
+  let i = 0;
+  let depth = 0;
+  while (i < html.length) {
+    tagRe.lastIndex = i;
+    const m = tagRe.exec(html);
+    if (!m) {
+      // Not a tag here (comment, doctype, stray `<`).
+      const nextLt = html.indexOf('<', i);
+      if (nextLt === -1) {
+        if (depth === 0) out += html.slice(i);
+        break;
+      }
+      if (nextLt > i) {
+        // Flush the text before the next `<` and retry the tag match there.
+        if (depth === 0) out += html.slice(i, nextLt);
+        i = nextLt;
+        continue;
+      }
+      // Sitting on a `<` that starts no tag: keep it and step forward.
+      if (depth === 0) out += '<';
+      i += 1;
+      continue;
+    }
+    if (depth === 0) out += html.slice(i, m.index);
+    const isClose = m[1] === '/';
+    const name = m[2].toLowerCase();
+    if (DANGEROUS_BLOCK_TAGS.has(name)) {
+      if (isClose) {
+        if (depth > 0) depth -= 1;
+      } else if (!m[0].endsWith('/>')) {
+        depth += 1;
+      }
+    } else if (depth === 0) {
+      out += m[0];
+    }
+    i = tagRe.lastIndex;
+  }
+  return out;
+}
+
 /** Sanitizes HTML tags and entities into clean readable text. */
 export function sanitizeHtml(html: string): string {
-  let text = html;
-
-  // 1. Remove scripts, styles, noscripts, svg, iframe along with their inner contents
-  // Using an iterative loop prevents nested/interleaved tag injection bypasses
-  const dangerousBlockRegex = /<(script|style|noscript|svg|iframe)\b[^>]*>[\s\S]*?<\/\1>/gi;
-  let prev = '';
-  while (text !== prev) {
-    prev = text;
-    text = text.replace(dangerousBlockRegex, '');
-  }
+  // 1. Remove scripts, styles, noscripts, svg, iframe along with their inner
+  //    contents — single linear pass (M6, replaces the O(n²) iterative loop).
+  let text = stripDangerousBlocks(html);
 
   // 2. Convert structural block tags to newline
   text = text
     .replace(/<\/(div|p|h[1-6]|li|tr|section|article|header|footer|nav|blockquote)>/gi, '\n')
     .replace(/<(br|hr)\s*\/?>/gi, '\n');
 
-  // 3. Iteratively remove all remaining HTML tags to prevent nested tag remnants
-  const tagRegex = /<[^>]+>/g;
-  prev = '';
-  while (text !== prev) {
-    prev = text;
-    text = text.replace(tagRegex, '');
-  }
+  // 3. Remove all remaining HTML tags. One pass is exhaustive: a complete tag
+  //    always matches `<[^>]+>`, and an unterminated `<` cannot form a tag.
+  text = text.replace(/<[^>]+>/g, '');
 
   // 4. Decode HTML entities in a single pass to prevent double unescaping vulnerabilities
   const HTML_ENTITIES: Record<string, string> = {
@@ -170,11 +219,32 @@ const INTERNAL_HOSTNAMES = new Set([
 
 /**
  * Checks if an IPv4 address belongs to a private, loopback, link-local, or reserved range.
+ *
+ * H3 fix: only pure decimal dotted-quad notation is accepted. `parseInt(p, 10)`
+ * silently accepted octal-looking segments ("0177" → 177) and hex segments
+ * ("0x7f" → 0), so alternative notations were NOT resolved to their real value
+ * here (e.g. "0177.0.0.1" is 127.0.0.1 on the wire but parsed as 177.0.0.1).
+ * Any non-decimal / leading-zero / hex / out-of-range segment is treated as
+ * malformed, and malformed IPv4 is unsafe by default (fails closed).
  */
 export function isPrivateOrLocalIPv4(ip: string): boolean {
-  const parts = ip.split('.').map((p) => parseInt(p, 10));
-  if (parts.length !== 4 || parts.some((n) => isNaN(n) || n < 0 || n > 255)) {
+  const rawParts = ip.split('.');
+  if (rawParts.length !== 4) {
     return true; // Malformed IPv4 is treated as unsafe
+  }
+
+  const parts: number[] = [];
+  for (const p of rawParts) {
+    // Reject octal (leading zero), hex (0x..), signs, whitespace, empty parts
+    // and any other notation that is not plain decimal.
+    if (!/^\d+$/.test(p) || (p.length > 1 && p.startsWith('0'))) {
+      return true; // Malformed / alternative notation = unsafe
+    }
+    const n = Number(p);
+    if (!Number.isSafeInteger(n) || n > 255) {
+      return true; // Out of range = unsafe
+    }
+    parts.push(n);
   }
 
   const [a, b] = parts;

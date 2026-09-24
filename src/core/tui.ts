@@ -61,6 +61,14 @@ export interface ReadLineOptions {
    * into scrollback (feedback v0.6 #2 — help listings must never settle).
    */
   menuOnlyClose?: (buffer: string) => boolean;
+  /**
+   * feedback.txt item 2: when true, Enter resolves the line but commits
+   * NOTHING to scrollback — the live region (prompt + answer) is erased and
+   * the caller prints its own one-line result. Used by the approval `y/n`
+   * prompt so the confirmation line never leaves an artifact in the terminal
+   * history, and the answer is not pushed into command history either.
+   */
+  hideEcho?: boolean;
 }
 
 interface Pending {
@@ -689,7 +697,7 @@ export class LineEditor {
       ...rest: any[]
     ) => boolean;
     this.rawOutputWrite = raw;
-    const patched = (chunk: any, ...rest: any[]): boolean => {
+    const patchedBody = (chunk: any, ...rest: any[]): boolean => {
       if (this.pending || this.ambientSuspended || !this.ambient) {
         return raw(chunk, ...rest);
       }
@@ -746,6 +754,21 @@ export class LineEditor {
       }
       this.render();
       return true;
+    };
+    /**
+     * H7: the patched write must never stay installed after a handler error —
+     * an exception inside the interception (render, status provider, …) would
+     * otherwise leave process.stdout hijacked for the rest of the session and
+     * the terminal permanently broken. Any throw unpatches first, then
+     * re-raises so the caller still sees the failure.
+     */
+    const patched = (chunk: any, ...rest: any[]): boolean => {
+      try {
+        return patchedBody(chunk, ...rest);
+      } catch (err) {
+        this.unpatchStdout();
+        throw err;
+      }
     };
     this.patchedWrite = patched;
     (this.output as unknown as { write: typeof patched }).write = patched;
@@ -1040,6 +1063,17 @@ export class LineEditor {
     let out = '';
     const climb = this.drawnCursorRow + this.statusRows;
     if (climb > 0) out += `\u001b[${climb}A`;
+    if (pending.options.hideEcho) {
+      // feedback.txt item 2: erase the region and commit NOTHING. The caller
+      // (approval prompt) prints a clean decision line in its place, so the
+      // `y/n` prompt never stays behind in the terminal history.
+      out += '\r\u001b[0J';
+      this.output.write(out);
+      this.historyIndex = -1;
+      this.historySavedBuffer = '';
+      this.finish(value);
+      return;
+    }
     out += `\r\u001b[0J${finalLine}\n`;
     this.output.write(out);
     this.historyIndex = -1;

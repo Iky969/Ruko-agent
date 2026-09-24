@@ -332,9 +332,13 @@ export class Agent {
           process.stdout.write(mdFormatter.format(text));
         });
         const reveal = new RevealFilter((text) => gate.push(text));
+        // feedback.txt item 1b: reasoning chunks run through their OWN reveal
+        // filter, so a tool call emitted inside the thought stream can never
+        // spill into the reasoning ticker as ordinary text.
+        const thoughtReveal = new RevealFilter((text) => ticker.feed(text));
         const thoughtParser = new ThoughtStreamParser({
           onText: (text) => reveal.feed(text),
-          onThought: (thoughtChunk) => ticker.feed(thoughtChunk),
+          onThought: (thoughtChunk) => thoughtReveal.feed(thoughtChunk),
           onThoughtEnd: () => {
             finishThinking();
           },
@@ -343,7 +347,7 @@ export class Agent {
         try {
           raw = await this.llmProvider.chat(messages, {
             onToken: (token) => thoughtParser.feed(token),
-            onThought: (chunk) => ticker.feed(chunk),
+            onThought: (chunk) => thoughtReveal.feed(chunk),
             signal,
             maxTokens: this.config.maxOutputTokens ?? 4096,
           });
@@ -361,6 +365,7 @@ export class Agent {
           throw err;
         } finally {
           thoughtParser.end();
+          thoughtReveal.end();
           finishThinking();
           reveal.end();
         }

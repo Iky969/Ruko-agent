@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { loadConfig, saveConfig } from '../core/config.js';
+import { isHostnameOrSubdomain, isPrivateOrLocalHost, loadConfig, sanitizeConfigFile, saveConfig } from '../core/config.js';
 import { DEFAULT_CONFIG } from '../types.js';
 
 test('loadConfig returns defaults when the file is missing', () => {
@@ -87,4 +87,196 @@ test('sanitizeConfigFile rejects insecure remote HTTP baseUrl (H3 exfiltration d
     sanitizeConfigFile({ baseUrl: 'not a url' }).baseUrl,
     undefined,
   );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H6 (audit v1.7.7): isPrivateOrLocalHost tidak menangani IPv6 ULA (fc00::/7)
+// dan IPv4-mapped IPv6 (::ffff:10.0.0.1) — baseUrl http://[fd00::1]/ bisa
+// dipakai untuk SSRF ke service internal.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('H6: isPrivateOrLocalHost mendeteksi IPv4-mapped IPv6, ULA, dan link-local', () => {
+  const unsafe = [
+    '::ffff:127.0.0.1',
+    '::ffff:10.0.0.1',
+    '::ffff:192.168.1.5',
+    '::ffff:169.254.169.254',
+    '::ffff:a00:1',
+    '::ffff:7f00:1',
+    'fd00::1',
+    'fc00::',
+    'fdff::1',
+    'fe80::1',
+    'febf::1',
+    '::1',
+    '::',
+    '127.0.0.5',
+    '169.254.169.254',
+    '[fd00::1]',
+  ];
+  for (const h of unsafe) {
+    assert.equal(isPrivateOrLocalHost(h), true, `${h} harus terdeteksi privat/lokal`);
+  }
+
+  const remote = [
+    'api.openai.com',
+    'generativelanguage.googleapis.com',
+    'example.org',
+    'fcorp.com',
+    'fd.example.com',
+    '8.8.8.8',
+    '93.184.216.34',
+    '2001:4860:4860::8888',
+    '',
+  ];
+  for (const h of remote) {
+    assert.equal(isPrivateOrLocalHost(h), false, `${h} harus dianggap host remote`);
+  }
+});
+
+test('H6: sanitizeConfigFile menerima HTTP lokal (ULA / IPv4-mapped) dan menolak HTTP remote', () => {
+  // Host ULA & IPv4-mapped dianggap lokal → HTTP diizinkan (Ollama/LAN internal)
+  assert.equal(
+    sanitizeConfigFile({ baseUrl: 'http://[fd00::1]:8080/v1' }).baseUrl,
+    'http://[fd00::1]:8080/v1',
+  );
+  assert.equal(
+    sanitizeConfigFile({ baseUrl: 'http://[::ffff:127.0.0.1]:8080/v1' }).baseUrl,
+    'http://[::ffff:127.0.0.1]:8080/v1',
+  );
+  // Host remote tetap ditolak untuk skema HTTP cleartext
+  assert.equal(sanitizeConfigFile({ baseUrl: 'http://evil.example.com/v1' }).baseUrl, undefined);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H4 (audit v1.7.7): API key plaintext di .ruko/config.json.
+// Mitigasi awareness saja (warning eksplisit saat loadConfig) — BUKAN enkripsi
+// at-rest. Lihat README "Security Boundaries & Known Limitations".
+// ─────────────────────────────────────────────────────────────────────────────
+
+const API_KEY_ENV_NAMES = ['RUKO_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY'];
+
+/** Menjalankan fn dengan semua env var API key dinonaktifkan (deterministik). */
+function withCleanApiKeyEnv<T>(fn: () => T): T {
+  const saved = API_KEY_ENV_NAMES.map((name) => [name, process.env[name]] as const);
+  for (const name of API_KEY_ENV_NAMES) delete process.env[name];
+  try {
+    return fn();
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+/** Menangkap output console.warn selama fn dijalankan. */
+function captureWarnings<T>(fn: () => T): { result: T; warnings: string[] } {
+  const warnings: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((a) => String(a)).join(' '));
+  };
+  try {
+    return { result: fn(), warnings };
+  } finally {
+    console.warn = original;
+  }
+}
+
+test('H4: loadConfig memperingatkan API key plaintext di file config', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ruko-'));
+  const path = join(dir, 'config.json');
+  const key = `sk-${'a'.repeat(20)}`;
+  writeFileSync(path, JSON.stringify({ apiKey: key, model: 'custom-model' }), 'utf8');
+  try {
+    const { result, warnings } = withCleanApiKeyEnv(() => captureWarnings(() => loadConfig(path)));
+    // Key tetap dimuat (mitigasi awareness, bukan penghapusan/enkripsi)
+    assert.equal(result.apiKey, key);
+    assert.equal(result.model, 'custom-model');
+    // Warning eksplisit muncul dan menyebut plaintext + saran env var
+    assert.equal(warnings.length, 1, 'harus ada tepat satu warning');
+    assert.match(warnings[0], /PLAINTEXT/);
+    assert.match(warnings[0], /env var/i);
+    assert.match(warnings[0], /RUKO_API_KEY/);
+    assert.ok(!warnings[0].includes(key), 'warning tidak boleh membocorkan key');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('H4: tidak ada warning jika API key tersedia dari environment variable', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ruko-'));
+  const path = join(dir, 'config.json');
+  writeFileSync(path, JSON.stringify({ apiKey: `sk-${'b'.repeat(20)}` }), 'utf8');
+  const previous = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = `sk-${'c'.repeat(20)}`;
+  try {
+    const { warnings } = captureWarnings(() => loadConfig(path));
+    assert.equal(warnings.length, 0, 'env var harus menekan warning plaintext');
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('H4: tidak ada warning untuk config tanpa API key', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ruko-'));
+  const path = join(dir, 'config.json');
+  writeFileSync(path, JSON.stringify({ model: 'custom-model', maxLogChars: 500 }), 'utf8');
+  try {
+    const { warnings } = withCleanApiKeyEnv(() => captureWarnings(() => loadConfig(path)));
+    assert.equal(warnings.length, 0, 'config tanpa apiKey tidak boleh memicu warning');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('H4: profile dengan apiKey literal juga memicu warning plaintext', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ruko-'));
+  const path = join(dir, 'config.json');
+  writeFileSync(
+    path,
+    JSON.stringify({ profiles: { lokal: { baseUrl: 'https://x/v1', model: 'm', apiKey: `sk-${'d'.repeat(20)}` } } }),
+    'utf8',
+  );
+  try {
+    const { warnings } = withCleanApiKeyEnv(() => captureWarnings(() => loadConfig(path)));
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /PLAINTEXT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M2 + M3 (audit v1.7.7, batch 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('M2: sanitizeConfigFile men-trim apiKey dan menolak nilai kosong/whitespace', () => {
+  assert.equal(sanitizeConfigFile({ apiKey: '  sk-abc  ' }).apiKey, 'sk-abc');
+
+  const blank = captureWarnings(() => sanitizeConfigFile({ apiKey: '   ' }));
+  assert.equal(blank.result.apiKey, undefined, 'apiKey whitespace-only tidak boleh disimpan');
+  assert.equal(blank.warnings.length, 1, 'harus ada satu warning untuk apiKey kosong');
+  assert.match(blank.warnings[0], /apiKey kosong/i);
+
+  const valid = captureWarnings(() => sanitizeConfigFile({ apiKey: 'sk-valid-key-123' }));
+  assert.equal(valid.warnings.length, 0, 'apiKey valid tidak boleh memicu warning');
+  assert.equal(valid.result.apiKey, 'sk-valid-key-123');
+});
+
+test('M3: isHostnameOrSubdomain menolak URL dengan userinfo di authority', () => {
+  // Userinfo dapat membuat parser yang berbeda menyimpulkan host yang berbeda
+  assert.equal(isHostnameOrSubdomain('http://user@anthropic.com@evil.com', 'anthropic.com'), false);
+  assert.equal(isHostnameOrSubdomain('http://user@anthropic.com', 'anthropic.com'), false);
+  assert.equal(isHostnameOrSubdomain('https://user:pass@api.anthropic.com', 'anthropic.com'), false);
+  // Host sah tetap cocok
+  assert.equal(isHostnameOrSubdomain('https://api.anthropic.com', 'anthropic.com'), true);
+  assert.equal(isHostnameOrSubdomain('api.anthropic.com/v1', 'anthropic.com'), true);
+  assert.equal(isHostnameOrSubdomain('https://anthropic.com', 'anthropic.com'), true);
+  // Substring / domain mirip tetap ditolak
+  assert.equal(isHostnameOrSubdomain('https://evil.com/anthropic.com', 'anthropic.com'), false);
+  assert.equal(isHostnameOrSubdomain('https://notanthropic.com', 'anthropic.com'), false);
 });

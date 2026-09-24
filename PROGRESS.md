@@ -896,7 +896,7 @@ Status dan resolusi batasan arsitektural:
 
 1. **Verifikasi Baseline**:
    - Jalankan `npm run typecheck` (harus 0 error).
-   - Jalankan `npm test` (harus **511 passed**, 0 fail).
+   - Jalankan `npm test` (harus **817 passed**, 0 fail).
    - E2E test: `npm run test:e2e` (1 passed).
 2. **Struktur Direktori Proyek**:
    - `src/core/`: Infrastruktur murni Node.js (loop, approval, executor, summarizer, undo, context, session, config, wizard, ui, skills).
@@ -913,3 +913,75 @@ Status dan resolusi batasan arsitektural:
 ## Gemini 3.8 Flash (High)
 - Kontribusi: Perombakan menu bantuan /? dan /help dengan gaya Chip/Badge Highlight modern Freebuff CLI & pengelompokan kategori ANSI
 - Tanggal: 15 September 2026
+
+---
+
+## Audit v1.7.7 — Remediasi Batch 1 (H1, H2, H3, H4, H5, H6)
+- Kontribusi: Perbaikan 4 temuan audit (H1+H2, H3+H6, H4, H5) + 20 test baru anti-regresi
+- Tanggal: 23 September 2026
+
+**Item yang dieksekusi (hanya ini — temuan lain tidak disentuh):**
+
+1. **H1 + H2 — Path obfuscation bypass (`src/core/approval.ts`)**
+   - Pattern baru `RM_DOT_PATH_OBFUSCATION_RE` menangkap `rm`/`rmdir` dengan target path dot murni (`/./`, `/../`, `/./.`, `/../.`, `/./*`).
+   - Normalisasi komponen path baru `normalizeDotPathComponents()` (dipakai di `testCandidates()`): `/./` → `/`, `/../` → `/`, `/a/../` → `/`, `/a/b/../../` → `/`; hanya `..` (dua titik) yang membatalkan komponen sebelumnya.
+   - Tidak ada regresi: seluruh skenario adversarial lama (RM_CRITICAL, VULN-01 variable substitution, mkfs, dd, fork bomb, subshell/quoting, chaining bypass allowlist, YOLO mode) tetap BLOCKED/DANGEROUS sesuai ekspektasi.
+
+2. **H3 + H6 — SSRF via notasi IP (`src/agent/webtools.ts` + `src/core/config.ts`)**
+   - `isPrivateOrLocalIPv4()` kini hanya menerima desimal murni; segmen leading-zero (oktal), hex, tanda, dan whitespace diperlakukan sebagai *malformed* → **unsafe (fail closed)**. Sebelumnya `parseInt(p, 10)` membuat `0177.0.0.1` diparsing sebagai `177.0.0.1` sehingga loopback lolos.
+   - `isPrivateOrLocalHost()` kini me-unwrap IPv4-mapped IPv6 (`::ffff:10.0.0.1` dan `::ffff:a00:1`) lalu memeriksa IPv4 hasil unwrap, serta mendeteksi IPv6 ULA `fc00::/7` (`fc00::`–`fdff::`) dan link-local `fe80::/10` (`fe80::`–`febf::`). Pengecekan range loopback (`127.0.0.0/8`) dan link-local IPv4 (`169.254.0.0/16`) juga diperluas. Deteksi ULA/link-local mewajibkan karakter `:` sehingga hostname biasa seperti `fcorp.com` tidak salah dianggap IPv6.
+
+3. **H4 — API key plaintext di config (`src/core/config.ts`)**
+   - `loadConfig()` menampilkan warning eksplisit (stderr) saat menemukan `apiKey` plaintext di berkas config (top-level maupun `apiKey` literal di dalam `profiles`) dan tidak ada env var API key yang aktif (`RUKO_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`).
+   - **PENTING (batasan, bukan klaim):** ini **hanya mitigasi awareness**, **BUKAN enkripsi at-rest**. Key tetap plaintext di disk dan tetap rentan terhadap backup otomatis, commit VCS tak sengaja, snapshot container, atau proses lain milik user yang sama. Enkripsi penuh sengaja TIDAK diimplementasikan (butuh manajemen kunci terpisah: key derivation, penyimpanan passphrase, rotasi) dan berada di luar scope batch ini. Dokumentasi lengkap: README bagian "Security Boundaries & Known Limitations" poin #8.
+
+4. **H5 — Redaksi API key terlalu informatif (`src/core/config.ts`)**
+   - Format lama: 3 karakter awal + 4 karakter akhir (membocorkan ~35% key 20–30 karakter).
+   - Format baru: key < 40 karakter → `[REDACTED]` (tanpa karakter apa pun); key ≥ 40 karakter → `[REDACTED...xxxx]` (hanya 4 karakter terakhir). String < 10 karakter (mis. `short`) tetap dibiarkan utuh, dan redaksi key inline di dalam pesan error/stack trace tetap berjalan.
+
+**Dampak pada test suite:**
+- Sebelum: 773 test (semua lulus). Sesudah: **793 test (semua lulus)**, `npm run typecheck` 0 error, E2E 1 passed.
+- Dua assertion lama di `src/tests/api_key_security.test.ts` (`redactApiKey masks sk- correctly`, `redactApiKey masks key- correctly`) mengunci format redaksi LAMA yang justru menjadi objek temuan H5, sehingga **nilai ekspektasinya diperketat** menjadi `[REDACTED]` (input tidak diubah; assertion baru membocorkan informasi lebih sedikit, bukan lebih banyak). Test lama lainnya tidak disentuh.
+
+**Temuan audit yang BELUM dieksekusi (batch berikutnya):** H7 (`tui.ts` `patchStdout` tanpa `try/finally`), M1–M9 (subshell DANGEROUS pada argumen non-chained, trim `apiKey` di `sanitizeConfigFile`, userinfo URL `isHostnameOrSubdomain`, `BASH_ENV`/`ENV`/`PROMPT_COMMAND` di `executor.ts`, `charWidth` emoji/grapheme, kompleksitas `sanitizeHtml`, batas 5 pass resolusi variabel, `ANSI_RE` CSI privat, `truncateVisible`/`padVisible`), dan L1–L4 (`RUKO_TRUST_FOLDER` tanpa warning, `GUARDIAN_PROMPT` tanpa instruksi JSON-only, label `renderApprovalBox` hardcoded, API key default hardcoded di `Fee.py`).
+
+---
+
+## Audit v1.7.7 — Remediasi Batch 2 (feedback.txt item 1 & 2, H7, M1–M9, L1–L3)
+- Kontribusi: Perbaikan parser multi-invoke DSML/XML, dialog approval TUI, dan 15 temuan audit lanjutan + 24 test baru anti-regresi
+- Tanggal: 24 September 2026
+
+**Item yang dieksekusi:**
+
+1. **feedback item 1 — Parser DSML/XML multi-tool call (`src/agent/tools.ts`, `src/core/ui.ts`, `src/agent/agent.ts`)**
+   - Prefix DSML kini OPSIONAL di tag penutup, dan ditambahkan parser untuk bentuk XML telanjang `<invoke name="..."><parameter name="...">…</parameter></invoke>` (gaya Anthropic/DeepSeek native) yang sebelumnya diklasifikasikan MALFORMED sehingga hanya panggilan pertama yang dieksekusi.
+   - `stripToolBlocks()` membersihkan seluruh blok invoke + tag penutup sisa (`</parameter>`, `</invoke>`, `</|DSML|invoke>`, `<function_calls>`) — kebocoran `.github/workflows</parameter></invoke>` yang dilaporkan tidak lagi muncul.
+   - `RevealFilter` menahan tag invoke parsial saat streaming per karakter (`invokeTagPrefixHold`) dan tidak lagi menelan sisa teks setelah blok DSML dengan penutup telanjang.
+   - Chunk reasoning kini melewati `RevealFilter` sendiri, sehingga tool call di dalam `<thought>` tidak tumpah ke reasoning ticker/box.
+
+2. **feedback item 2 — Dialog approval TUI (`src/core/tui.ts`, `src/core/loop.ts`, `src/core/ui.ts`)**
+   - Opsi baru `readLine({ hideEcho: true })`: region live dihapus dan baris prompt `y/N` TIDAK di-commit ke scrollback; loop mencetak satu baris keputusan bersih (`✓ Disetujui` / `✗ Ditolak`) sebagai gantinya. Jalur `node:readline` (non-editor) menimpa baris prompt dengan `ERASE_PREVIOUS_LINE`.
+   - Perintah read-only dasar (`git status`, `git diff`, `npm test`, dll.) terverifikasi tetap NONE tanpa prompt, baik mode normal maupun otonom (`approvalEnabled: false`).
+
+3. **H7 — `patchStdout` tanpa error recovery (`src/core/tui.ts`)**: body handler dipecah ke `patchedBody`; wrapper `try/catch` memanggil `unpatchStdout()` lalu melempar ulang, sehingga stdout tidak pernah tetap ter-hijack setelah error.
+
+4. **M1–M9**
+   - M1 `chainedSegments()` rekursif (cap kedalaman 4) — subshell bersarang dari argumen non-chained ikut dievaluasi.
+   - M2 `sanitizeConfigFile()` men-trim `apiKey` dan membuang nilai kosong/whitespace (dengan warning).
+   - M3 `isHostnameOrSubdomain()` menolak URL ber-userinfo (`user@host`).
+   - M4 `executor.ts` memfilter `BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `CDPATH`, `BASH_RCFILE`.
+   - M5 `charWidth`/`visibleLength` grapheme-aware: emoji U+1F800–U+1FFFF, combining marks/ZWJ/VS = 0 kolom, flag & ZWJ-sequence dihitung 2 kolom (implementasi mandiri, tanpa bergantung pada data ICU).
+   - M6 `sanitizeHtml()` memakai pemindai tag linear (sticky regex + depth) menggantikan loop O(n²).
+   - M7 resolusi variabel iteratif sampai stabil (cap 32 pass).
+   - M8 `ANSI_RE`/`DANGEROUS_TERMINAL_RE` mencakup CSI private-mode (`ESC[?25l`, `ESC[?1049h`) dan intermediate bytes; SGR tetap dipertahankan.
+   - M9 `padVisible()` menutup SGR sebelum padding; `truncateVisible()` menyaring sequence berbahaya walau tidak memotong.
+
+5. **L1–L3**: warning eksplisit untuk `RUKO_TRUST_FOLDER`, `GUARDIAN_PROMPT` menuntut output English-only/JSON-only tanpa preamble, label approval dipusatkan di `APPROVAL_LABELS`.
+   - L4 (`Fee.py`) dan `py.py` sengaja TIDAK disentuh (di luar ruang lingkup, sesuai instruksi).
+
+**Dampak pada test suite:**
+- Sebelum: 793 test (semua lulus). Sesudah: **817 test (semua lulus)**, `npm run typecheck` 0 error.
+- 24 test baru: parser multi-invoke & pembersihan tag (8), approval M1/M7/read-only (6), config M2/M3 (2), UI M5/M8/M9/L3/item 2 (6), TUI H7 + hideEcho (3), executor M4 (2), trust L1 (1), guardian L2 (1), sanitizer M6 (2) — total 31 test baru (sebagian di dalam blok test gabungan).
+- Tidak ada assertion lama yang diubah/dihapus/dilemahkan.
+- Re-run adversarial eksplisit (skrip batch 2): 192 PASS, 0 FAIL (semua kategori lama A–L + kategori baru K–O).
+
