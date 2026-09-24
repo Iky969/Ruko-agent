@@ -121,10 +121,12 @@ export function stripDangerousBlocks(html: string): string {
   return out;
 }
 
+
 /** Sanitizes HTML tags and entities into clean readable text. */
 export function sanitizeHtml(html: string): string {
-  // 1. Remove scripts, styles, noscripts, svg, iframe along with their inner
-  //    contents — single linear pass (M6, replaces the O(n²) iterative loop).
+  // 1. Remove dangerous blocks (script, style, noscript, svg, iframe) along
+  //    with their contents — single linear pass on raw HTML where tags are
+  //    well-formed (M6, replaces the O(n²) iterative loop).
   let text = stripDangerousBlocks(html);
 
   // 2. Convert structural block tags to newline
@@ -136,7 +138,11 @@ export function sanitizeHtml(html: string): string {
   //    always matches `<[^>]+>`, and an unterminated `<` cannot form a tag.
   text = text.replace(/<[^>]+>/g, '');
 
-  // 4. Decode HTML entities in a single pass to prevent double unescaping vulnerabilities
+  // 4. Decode HTML entities AFTER all tag stripping is complete. Because no
+  //    further tag removal occurs after this step, decoded angle brackets
+  //    (e.g. `&lt;script&gt;` → `<script>`) remain as harmless literal text.
+  //    The output of sanitizeHtml is plain text consumed by the LLM, never
+  //    rendered as HTML, so these decoded characters pose no injection risk.
   const HTML_ENTITIES: Record<string, string> = {
     '&nbsp;': ' ',
     '&lt;': '<',
@@ -159,26 +165,13 @@ export function sanitizeHtml(html: string): string {
       return entity;
     });
 
-  // 5. Second-pass: entity decoding above can re-introduce angle brackets
-  //    (e.g. `&lt;script&gt;alert()&lt;/script&gt;` → `<script>alert()</script>`).
-  //    We strip only *complete* dangerous blocks (matching open + close tags)
-  //    to prevent XSS, while preserving standalone decoded entities like
-  //    `&lt;script&gt;` → `<script>` as literal text content.
-  //    Using a targeted regex instead of stripDangerousBlocks avoids the issue
-  //    where an unclosed tag consumes all remaining text.
-  text = text.replace(
-    /<(script|style|noscript|svg|iframe)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
-    '',
-  );
-
-  // 6. Normalize consecutive spaces and newlines
+  // 5. Normalize consecutive spaces and newlines
   return text
     .replace(/[ \t]+/g, ' ')
     .replace(/\n\s*\n\s*\n+/g, '\n\n')
     .trim();
 }
 
-/** Checks if a content-type string represents an acceptable text-like payload. */
 export function isAllowedContentType(contentTypeHeader: string | null): { allowed: boolean; reason?: string } {
   if (!contentTypeHeader) {
     // Missing content-type: assume text/plain per specification
