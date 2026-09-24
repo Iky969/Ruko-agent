@@ -510,3 +510,66 @@ test('anti-flickering: in-place tail updates (spinner frames) do not erase and r
   editor.stopAmbient();
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// H7 (audit v1.7.7, batch 2): patchStdout tanpa try/finally — error di dalam
+// handler membuat terminal tetap ter-hijack permanen.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('H7: patch stdout dilepas saat handler-nya melempar error (terminal tidak rusak permanen)', () => {
+  const { editor, output } = makeEditor();
+  let armed = false;
+  editor.startAmbient({
+    prompt: '› ',
+    statusLine: () => {
+      if (armed) throw new Error('render boom');
+      return 'status';
+    },
+    onSubmit: () => {},
+    onInterrupt: () => {},
+  });
+  armed = true;
+
+  // Menulis lewat stdout memicu render ulang yang melempar.
+  assert.throws(() => output.write('hello\n'), /render boom/);
+
+  // Setelah error, stdout TIDAK boleh tetap ter-patch: write berikutnya harus
+  // langsung tembus ke output asli (bukan memicu render yang melempar lagi).
+  output.data = '';
+  assert.doesNotThrow(() => output.write('plain\n'));
+  assert.ok(output.data.includes('plain'), 'write setelah error harus tembus ke output asli');
+  editor.stopAmbient();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// feedback.txt item 2: prompt konfirmasi approval tidak boleh meninggalkan
+// artefak `y/n` di riwayat terminal.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('Item 2: hideEcho menghapus baris prompt konfirmasi alih-alih menuliskannya', async () => {
+  const { editor, input, output } = makeEditor();
+  const line = editor.readLine({ prompt: '  Jalankan? [Y/N] ', hideEcho: true });
+  output.data = '';
+  input.send('y');
+  input.send('\r');
+
+  assert.equal(await line, 'y');
+  // Aksi terakhir adalah penghapusan region: tidak ada baris prompt/jawaban
+  // yang di-commit ke scrollback (perilaku lama: `prompt + 'y' + '\n'`).
+  assert.ok(output.data.endsWith('\r\u001b[0J'), 'region live harus dihapus sebagai aksi terakhir');
+  assert.ok(
+    !output.data.includes('Jalankan? [Y/N] y\n'),
+    'jawaban tidak boleh di-commit sebagai baris permanen',
+  );
+});
+
+test('Item 2: tanpa hideEcho perilaku lama tetap terjaga (baris final di-commit)', async () => {
+  const { editor, input, output } = makeEditor();
+  const line = editor.readLine({ prompt: '› ' });
+  output.data = '';
+  input.send('hi');
+  input.send('\r');
+
+  assert.equal(await line, 'hi');
+  assert.ok(output.data.includes('› hi'), 'baris final harus di-commit tanpa hideEcho');
+});
+

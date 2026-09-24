@@ -1,16 +1,24 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  APPROVAL_LABELS,
   buildStatusBar,
   buildUsageLine,
+  charWidth,
+  CLEAR_CURRENT_LINE,
   colorsEnabled,
   createSpinner,
+  ERASE_PREVIOUS_LINE,
   formatK,
   formatProcessSummary,
+  graphemeWidth,
   LineGate,
-  renderBox,
+  padVisible,
   renderApprovalBox,
+  renderApprovalDecision,
+  renderBox,
   renderDivider,
+  sanitizeTerminalOutput,
   terminalWidth,
   truncateVisible,
   stripAnsi,
@@ -361,6 +369,93 @@ test('terminalWidth respects process.env.COLUMNS when stdout.columns is undefine
     if (origEnv !== undefined) process.env.COLUMNS = origEnv;
     else delete process.env.COLUMNS;
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M5 (audit v1.7.7, batch 2): charWidth tidak grapheme-aware — emoji
+// U+1F800–U+1FFFF, combining marks, ZWJ, dan regional indicator (flag) salah
+// dihitung sehingga lebar baris bisa melenceng.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('M5: charWidth mencakup emoji U+1F800–U+1FFFF dan kelas zero-width', () => {
+  assert.equal(charWidth(0x1f800), 2, 'Supplemental Symbols & Pictographs = 2');
+  assert.equal(charWidth(0x1f9ff), 2, 'masih dalam rentang emoji');
+  assert.equal(charWidth(0x1fae0), 2, 'Symbols & Pictographs Extended-A = 2');
+  assert.equal(charWidth(0x1f1e6), 1, 'satu regional indicator = 1 kolom');
+  assert.equal(charWidth(0x200d), 0, 'ZWJ = 0');
+  assert.equal(charWidth(0x0301), 0, 'combining acute = 0');
+  assert.equal(charWidth(0xfe0f), 0, 'variation selector-16 = 0');
+  assert.equal(charWidth(0xfeff), 0, 'BOM/ZWNBSP = 0');
+});
+
+test('M5: visibleLength menghitung per grapheme cluster (flag, ZWJ, combining)', () => {
+  // Ditulis dengan escape agar ZWJ (U+200D) tidak hilang saat berkas ditulis.
+  const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
+  assert.equal(visibleLength('🇮🇩'), 2, 'flag emoji = 2 kolom (bukan 2 per indikator)');
+  assert.equal(visibleLength('e\u0301'), 1, 'e + combining acute = 1 kolom');
+  assert.equal(visibleLength(family), 2, 'keluarga ZWJ = 2 kolom');
+  assert.equal(visibleLength('CJK 漢字'), 4 + 4, 'teks wide tetap 2 kolom per aksara');
+  assert.equal(graphemeWidth('🇮🇩'), 2);
+  assert.equal(graphemeWidth('e\u0301'), 1);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M8 (audit v1.7.7, batch 2): ANSI_RE terlalu sempit — CSI dengan parameter
+// privat (\u001b[?25l, \u001b[?1049h) lolos sanitizeTerminalOutput.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('M8: sanitizeTerminalOutput membuang CSI private-mode dan intermediate bytes', () => {
+  assert.equal(sanitizeTerminalOutput('A\u001b[?25lB'), 'AB', 'hide cursor dibuang');
+  assert.equal(sanitizeTerminalOutput('A\u001b[?1049hB'), 'AB', 'alt screen dibuang');
+  assert.equal(sanitizeTerminalOutput('A\u001b[?25hB'), 'AB');
+  assert.equal(sanitizeTerminalOutput('A\u001b[>0cB'), 'AB');
+  assert.equal(sanitizeTerminalOutput('A\u001b[2 qB'), 'AB', 'intermediate byte + final');
+  // SGR tetap dipertahankan (warna tidak dianggap berbahaya)
+  const colored = '\u001b[1;32mOK\u001b[0m';
+  assert.equal(sanitizeTerminalOutput(colored), colored);
+  // stripAnsi juga bersih dari sisa artefak
+  assert.equal(stripAnsi('A\u001b[?25lB'), 'AB');
+  assert.equal(visibleLength('A\u001b[?25lB'), 2);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M9 (audit v1.7.7, batch 2): padding ditambahkan setelah SGR masih aktif dan
+// early-return truncateVisible meneruskan ANSI berbahaya.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('M9: padVisible menutup SGR sebelum padding sehingga spasi tidak ikut berwarna', () => {
+  assert.equal(padVisible('abc', 5), 'abc  ', 'tanpa ANSI tetap sama');
+  assert.equal(padVisible('\u001b[31mab', 4), '\u001b[31mab\u001b[0m  ');
+  assert.equal(padVisible('\u001b[31mab\u001b[0m', 4), '\u001b[31mab\u001b[0m  ');
+  assert.equal(padVisible('abcdef', 3), 'abcdef', 'tidak memotong, hanya padding');
+});
+
+test('M9: truncateVisible menyaring sequence berbahaya walau tidak memotong', () => {
+  assert.equal(truncateVisible('A\u001b[?25lB', 80), 'AB');
+  assert.equal(truncateVisible('short', 50), 'short');
+  assert.equal(truncateVisible('\u001b[31mred\u001b[0m', 50), '\u001b[31mred\u001b[0m');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// L3 + feedback item 2: label approval terpusat & helper pembersihan baris.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('L3: label kotak approval terpusat di APPROVAL_LABELS dan dipakai renderApprovalBox', () => {
+  assert.equal(APPROVAL_LABELS.header, '⚠ KONFIRMASI BERISIKO');
+  assert.equal(APPROVAL_LABELS.reason, 'Alasan  :');
+  assert.equal(APPROVAL_LABELS.command, 'Perintah:');
+
+  const box = renderApprovalBox('rm -rf node_modules', 'menghapus direktori dependensi');
+  assert.ok(box.includes(APPROVAL_LABELS.header));
+  assert.ok(box.includes(APPROVAL_LABELS.reason));
+  assert.ok(box.includes(APPROVAL_LABELS.command));
+});
+
+test('Item 2: helper pembersihan baris konfirmasi & baris hasil approval', () => {
+  assert.equal(CLEAR_CURRENT_LINE, '\r\u001b[2K');
+  assert.equal(ERASE_PREVIOUS_LINE, '\u001b[1A\r\u001b[2K');
+  assert.equal(stripAnsi(renderApprovalDecision(true)), APPROVAL_LABELS.approved);
+  assert.equal(stripAnsi(renderApprovalDecision(false)), APPROVAL_LABELS.denied);
 });
 
 

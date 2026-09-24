@@ -79,15 +79,78 @@ export interface ToolCall {
 }
 
 const TOOL_BLOCK_RE = /```tool\s*\n([\s\S]*?)```/g;
-const DSML_INVOKE_RE = /<\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*invoke\s+name=["']?([^"'>\s]+)["']?[^>]*>([\s\S]*?)<\/\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*invoke\s*>/gi;
-const DSML_INVOKE_SELF_RE = /<\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*invoke\s+name=["']?([^"'>\s]+)["']?[^>]*\/>/gi;
-const DSML_PARAM_RE = /<\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*parameter\s+name=["']?([^"'>\s]+)["']?(?:\s+string=["']?(true|false)["']?)?[^>]*>([\s\S]*?)<\/\s*(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*parameter\s*>/gi;
+/**
+ * DSML prefix, e.g. `<|DSML|`, `<||DSML||`, `<｜DSML｜`, `<｜｜DSML｜｜`.
+ * Kept as a source fragment so the invoke/parameter patterns below can accept
+ * the prefix as OPTIONAL on the CLOSING tag: real DeepSeek output frequently
+ * opens with `<|DSML|invoke ...>` but closes with a bare `</invoke>` (or the
+ * other way around), and requiring the prefix on both ends made the parser
+ * execute only the first call and leak the rest of the block as plain text.
+ */
+const DSML_PREFIX_SRC = '(?:\\|\\|?|｜｜?)\\s*DSML\\s*(?:\\|\\|?|｜｜?)\\s*';
+const DSML_INVOKE_RE = new RegExp(
+  `<\\s*${DSML_PREFIX_SRC}invoke\\s+name=["']?([^"'>\\s]+)["']?[^>]*>([\\s\\S]*?)<\\/\\s*(?:${DSML_PREFIX_SRC})?invoke\\s*>`,
+  'gi',
+);
+const DSML_INVOKE_SELF_RE = new RegExp(
+  `<\\s*${DSML_PREFIX_SRC}invoke\\s+name=["']?([^"'>\\s]+)["']?[^>]*\\/>`,
+  'gi',
+);
+const DSML_PARAM_RE = new RegExp(
+  `<\\s*${DSML_PREFIX_SRC}parameter\\s+name=["']?([^"'>\\s]+)["']?(?:\\s+string=["']?(true|false)["']?)?[^>]*>([\\s\\S]*?)<\\/\\s*(?:${DSML_PREFIX_SRC})?parameter\\s*>`,
+  'gi',
+);
+/**
+ * Bare XML invoke blocks (Anthropic / DeepSeek "native" XML tool calls):
+ *   <invoke name="write_file"><parameter name="path">a.txt</parameter></invoke>
+ * No DSML pipes at all — these were previously classified as MALFORMED and
+ * never executed (only the first DSML-prefixed call in a batch ran).
+ */
+const XML_INVOKE_RE = new RegExp(
+  `<invoke\\s+name=["']?([^"'>\\s]+)["']?[^>]*>([\\s\\S]*?)<\\/\\s*(?:${DSML_PREFIX_SRC})?invoke\\s*>`,
+  'gi',
+);
+const XML_INVOKE_SELF_RE = /<invoke\s+name=["']?([^"'>\s]+)["']?[^>]*\/>/gi;
+const XML_PARAM_RE = new RegExp(
+  `<parameter\\s+name=["']?([^"'>\\s]+)["']?(?:\\s+string=["']?(true|false)["']?)?[^>]*>([\\s\\S]*?)<\\/\\s*(?:${DSML_PREFIX_SRC})?parameter\\s*>`,
+  'gi',
+);
+/** Closing tags left behind by a partially parsed invoke block (any prefix). */
+const STRAY_TOOL_TAG_RE =
+  /<\/?\s*(?:(?:\|\|?|｜｜?)\s*DSML\s*(?:\|\|?|｜｜?)\s*)?(?:invoke|parameter|function_calls|tool_calls)\b[^>]*>/gi;
 const XML_TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
 export const MALFORMED_TOOL_TAG_RE = /[<＜]\s*([^\s>]+)\s+([^>]*?\b(?:name|tool|query|path|command|action)\s*=\s*(?:["'][^"']*["']|[^\s>]+)[^>]*?)(?:\/>|>([\s\S]*?)<\/\s*\1\s*>|>|$)/gi;
 
 export interface ParseToolCallsResult {
   calls: ToolCall[];
   malformedBlocks: string[];
+}
+
+/**
+ * Extracts `<parameter name="..." string="true|false">value</parameter>` pairs
+ * from the body of a DSML or bare-XML invoke block. `string="true"` keeps the
+ * raw text; otherwise the value is parsed as JSON when possible (numbers,
+ * booleans, arrays), falling back to the raw string.
+ */
+function extractInvokeParameters(body: string): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  for (const paramRe of [DSML_PARAM_RE, XML_PARAM_RE]) {
+    for (const pMatch of body.matchAll(paramRe)) {
+      const pName = pMatch[1].trim();
+      const isString = pMatch[2]?.toLowerCase() === 'true';
+      const pValRaw = pMatch[3].trim();
+      if (isString) {
+        params[pName] = pValRaw;
+      } else {
+        try {
+          params[pName] = JSON.parse(pValRaw);
+        } catch {
+          params[pName] = pValRaw;
+        }
+      }
+    }
+  }
+  return params;
 }
 
 /** Extracts all tool-call blocks from a model reply (markdown fence, DeepSeek DSML, or XML). */
@@ -133,35 +196,27 @@ export function parseToolCalls(text: string): ParseToolCallsResult {
   }
 
   // 2. DeepSeek DSML (<|DSML|invoke name="...">... or full-width <｜DSML｜invoke...>)
-  for (const match of text.matchAll(DSML_INVOKE_RE)) {
-    const tool = normalizeToolName(match[1].trim());
-    const body = match[2];
-    const params: Record<string, unknown> = {};
-
-    for (const pMatch of body.matchAll(DSML_PARAM_RE)) {
-      const pName = pMatch[1].trim();
-      const isString = pMatch[2]?.toLowerCase() === 'true';
-      const pValRaw = pMatch[3].trim();
-      if (isString) {
-        params[pName] = pValRaw;
-      } else {
-        try {
-          params[pName] = JSON.parse(pValRaw);
-        } catch {
-          params[pName] = pValRaw;
-        }
+  //    and the bare-XML variant (<invoke name="...">...<parameter .../invoke>).
+  //    The closing tag may or may not carry the DSML prefix in both cases —
+  //    a real DeepSeek batch mixes them, and requiring the prefix on both ends
+  //    is what made only the first call execute (feedback.txt item 1a).
+  const invokePatterns: ReadonlyArray<RegExp> = [DSML_INVOKE_RE, XML_INVOKE_RE];
+  for (const invokeRe of invokePatterns) {
+    for (const match of text.matchAll(invokeRe)) {
+      const tool = normalizeToolName(match[1].trim());
+      const body = match[2];
+      if (tool) {
+        calls.push({ tool, ...extractInvokeParameters(body) });
       }
-    }
-
-    if (tool) {
-      calls.push({ tool, ...params });
     }
   }
 
-  for (const match of text.matchAll(DSML_INVOKE_SELF_RE)) {
-    const tool = normalizeToolName(match[1].trim());
-    if (tool) {
-      calls.push({ tool });
+  for (const selfRe of [DSML_INVOKE_SELF_RE, XML_INVOKE_SELF_RE]) {
+    for (const match of text.matchAll(selfRe)) {
+      const tool = normalizeToolName(match[1].trim());
+      if (tool) {
+        calls.push({ tool });
+      }
     }
   }
 
@@ -254,7 +309,13 @@ export function parseToolCalls(text: string): ParseToolCallsResult {
     if (!rawTag) continue;
     const tagName = match[1].trim().toLowerCase();
     // Skip if it was already parsed as standard DSML or XML call
-    if (tagName.includes('dsml') || tagName === 'tool_call' || tagName === 'tool') {
+    if (
+      tagName.includes('dsml') ||
+      tagName === 'tool_call' ||
+      tagName === 'tool' ||
+      tagName === 'invoke' ||
+      tagName === 'parameter'
+    ) {
       continue;
     }
     malformedBlocks.push(rawTag);
@@ -276,7 +337,13 @@ export function stripToolBlocks(text: string): string {
     .replace(TOOL_BLOCK_RE, '')
     .replace(DSML_INVOKE_RE, '')
     .replace(DSML_INVOKE_SELF_RE, '')
+    .replace(XML_INVOKE_RE, '')
+    .replace(XML_INVOKE_SELF_RE, '')
     .replace(/<\/?(?:\|\|?|｜｜?)DSML(?:\|\|?|｜｜?)[^>]*>/gi, '')
+    // feedback.txt item 1: closing tags of a partially recognised invoke block
+    // (`</parameter></invoke>`, `</|DSML|invoke>`, stray `<function_calls>`) must
+    // never survive into the visible reply.
+    .replace(STRAY_TOOL_TAG_RE, '')
     .replace(XML_TOOL_CALL_RE, '')
     .replace(/<tool(?:[^>]*)>[\s\S]*?<\/tool>/gi, '')
     .replace(/<tool(?:[^>]*)\/>/gi, '')

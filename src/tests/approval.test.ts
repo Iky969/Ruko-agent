@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { detectRisk, extractAndResolveShellVariables, guardedExecute } from '../core/approval.js';
+import {
+  chainedSegments,
+  detectRisk,
+  extractAndResolveShellVariables,
+  guardedExecute,
+  normalizeDotPathComponents,
+} from '../core/approval.js';
 import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
 
 function config(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -398,4 +404,186 @@ test('VULN-01: TARGET=/; rm -rf $TARGET is BLOCKED by detectRisk and guardedExec
   const res = await guardedExecute(cmd, { confirm: async () => true }, config());
   assert.equal(res.code, null);
   assert.match(res.output, /\[BLOCKED oleh Ruko:/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H1 + H2 (audit v1.7.7): path obfuscation dot (/./ dan /../)
+//
+// `rm -rf /./` melewati SELURUH BLOCKED_PATTERNS karena regex path matching
+// tidak mencocokkan notasi "/./" (padahal di Linux itu me-resolve ke root).
+// Fix: pattern baru RM_DOT_PATH_OBFUSCATION_RE + normalisasi komponen path di
+// testCandidates() sebelum matching.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('H1/H2: rm dengan path obfuscasi dot → BLOCKED (semua varian)', () => {
+  for (const cmd of [
+    'rm -rf /./',
+    'rm -rf /../',
+    'rm -rf /./.',
+    'rm -rf /a/../',
+    'rm -rf /../.',
+    'rm -rf /etc/../',
+    'rm -rf /home/../etc',
+    'rm -rf /./*',
+    'rm -rf /tmp/../..',
+    'rm -rf /.//',
+    'rm -rf $HOME/../',
+    'rmdir /./',
+    'sudo rm -rf /./',
+    'bash -c "rm -rf /./"',
+    'echo ok && rm -rf /../',
+    'DIR=/; rm -rf $DIR/./',
+  ]) {
+    assert.equal(detectRisk(cmd, config()).risk, 'blocked', `Expected BLOCKED for: ${cmd}`);
+  }
+});
+
+test('H1/H2: dot-path obfuscation tetap BLOCKED saat approvalEnabled=false (YOLO)', () => {
+  for (const cmd of ['rm -rf /./', 'rm -rf /../', 'rm -rf /a/../', 'rm -rf /./.']) {
+    assert.equal(
+      detectRisk(cmd, config({ approvalEnabled: false })).risk,
+      'blocked',
+      `Expected BLOCKED in YOLO mode for: ${cmd}`,
+    );
+  }
+});
+
+test('H1/H2: dot-path obfuscation tidak bisa di-downgrade oleh allowlist', () => {
+  const cfg = config({ approvalAllowlist: ['rm', 'rm -rf', 'rmdir'] });
+  for (const cmd of ['rm -rf /./', 'rm -rf /../', 'rm -rf /a/../']) {
+    assert.equal(detectRisk(cmd, cfg).risk, 'blocked', `allowlist must not bypass: ${cmd}`);
+  }
+});
+
+test('H1/H2: guardedExecute menolak dot-path obfuscation tanpa prompt', async () => {
+  let asked = false;
+  const res = await guardedExecute(
+    'rm -rf /./',
+    {
+      confirm: async () => {
+        asked = true;
+        return true;
+      },
+    },
+    config(),
+  );
+  assert.equal(res.code, null);
+  assert.match(res.output, /\[BLOCKED oleh Ruko:/);
+  assert.equal(asked, false, 'BLOCKED tidak boleh sampai ke prompt konfirmasi');
+});
+
+test('H1/H2: normalisasi dot-path TIDAK menimbulkan false positive', () => {
+  // Dot-path yang tidak me-resolve ke root tetap DANGEROUS (bukan BLOCKED)
+  for (const cmd of ['rm -rf /tmp/./build', 'rm -rf ./build', 'rm -rf ../build', 'rmdir /a/b/../']) {
+    assert.equal(detectRisk(cmd, config()).risk, 'dangerous', `Expected DANGEROUS for: ${cmd}`);
+  }
+  // Command aman dengan segmen titik tetap NONE
+  for (const cmd of ['cat ./README.md', 'ls /tmp/..', 'cp src/index.ts src/index.backup.ts', 'find . -name "*.ts"']) {
+    assert.equal(detectRisk(cmd, config()).risk, 'none', `Expected NONE for: ${cmd}`);
+  }
+});
+
+test('H1/H2: normalizeDotPathComponents me-resolve varian dot-path ke root', () => {
+  assert.equal(normalizeDotPathComponents('rm -rf /./'), 'rm -rf /');
+  assert.equal(normalizeDotPathComponents('rm -rf /../'), 'rm -rf /');
+  assert.equal(normalizeDotPathComponents('rm -rf /./.'), 'rm -rf /');
+  assert.equal(normalizeDotPathComponents('rm -rf /a/../'), 'rm -rf /');
+  assert.equal(normalizeDotPathComponents('rm -rf /etc/../'), 'rm -rf /');
+  assert.equal(normalizeDotPathComponents('rm -rf /.//'), 'rm -rf /');
+  // Satu titik tidak membatalkan komponen sebelumnya ("." ≠ "..")
+  assert.equal(normalizeDotPathComponents('rm -rf /tmp/./x'), 'rm -rf /tmp/x');
+  // String tanpa dot-path tidak berubah
+  assert.equal(normalizeDotPathComponents('rm -rf ./build'), 'rm -rf ./build');
+  assert.equal(normalizeDotPathComponents('cp src/index.ts src/index.backup.ts'), 'cp src/index.ts src/index.backup.ts');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M1 + M7 (audit v1.7.7, batch 2): subshell non-chained & kedalaman resolusi
+// variabel. M1: konten subshell dari argumen non-chained harus ikut dievaluasi
+// oleh BLOCKED/DANGEROUS patterns. M7: rantai variabel > 5 level tidak boleh
+// menjadi celah bypass.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('M1: konten subshell dari argumen non-chained dievaluasi (bukan hanya interpreter flag)', () => {
+  const cases: Array<[string, string]> = [
+    ["python3 -c '$(rm -rf ~)'", 'blocked'],
+    ['echo "$(sudo rm -rf /tmp/x)"', 'dangerous'],
+    ["bash -c '$(git push origin main)'", 'dangerous'],
+    ["node -e '$(kill -9 1)'", 'dangerous'],
+    ['echo `rm -rf /etc`', 'blocked'],
+    ['python3 -c "$(echo "$(rm -rf /etc)")"', 'blocked'],
+    ["perl -e 'system($(truncate -s 0 /tmp/scratch.txt))'", 'dangerous'],
+  ];
+  for (const [cmd, expected] of cases) {
+    assert.equal(detectRisk(cmd, config()).risk, expected, `${cmd} harus ${expected}`);
+  }
+});
+
+test('M1: subshell bersarang tetap terdeteksi lewat chainedSegments rekursif', () => {
+  const segments = chainedSegments('python3 -c "$(echo "$(rm -rf /etc)")"');
+  assert.ok(
+    segments.some((s) => s.includes('rm -rf /etc')),
+    `subshell terdalam harus jadi segmen: ${JSON.stringify(segments)}`,
+  );
+});
+
+test('M7: rantai variabel lebih dari 5 level tetap ter-resolve (tidak ada bypass BLOCKED)', () => {
+  const deep = 'J=$I; I=$H; H=$G; G=$F; F=$E; E=$D; D=$C; C=$B; B=$A; A=/etc; rm -rf $J';
+  assert.match(extractAndResolveShellVariables(deep), /rm -rf \/etc/);
+  assert.equal(detectRisk(deep, config()).risk, 'blocked');
+
+  const toRoot = 'L=$K; K=$J; J=$I; I=$H; H=$G; G=$F; F=$E; E=$D; D=$C; C=$B; B=$A; A=/; rm -rf $L';
+  assert.match(extractAndResolveShellVariables(toRoot), /rm -rf \//);
+  assert.equal(detectRisk(toRoot, config()).risk, 'blocked');
+});
+
+test('M7: assignment self-referensial tidak membuat resolusi variabel berputar tanpa henti', () => {
+  const selfRef = 'A=$A; B=$A; rm -f scratch.txt';
+  const resolved = extractAndResolveShellVariables(selfRef);
+  assert.ok(typeof resolved === 'string' && resolved.length > 0);
+  assert.equal(detectRisk(selfRef, config()).risk, 'dangerous');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// feedback.txt item 2b: perintah read-only dasar harus tetap "aman" (NONE)
+// tanpa konfirmasi manual — termasuk di mode otonom (approvalEnabled: false).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('Item 2b: perintah read-only dasar tetap NONE di mode normal maupun otonom', () => {
+  const readOnly = [
+    'git status',
+    'git status --short',
+    'git diff',
+    'git diff HEAD',
+    'git log --oneline -5',
+    'npm test',
+    'ls -la',
+    'cat README.md',
+    'grep -r "function" src/',
+    'node --version',
+  ];
+  for (const cmd of readOnly) {
+    assert.equal(detectRisk(cmd, config()).risk, 'none', `harus NONE: ${cmd}`);
+    assert.equal(
+      detectRisk(cmd, config({ approvalEnabled: false })).risk,
+      'none',
+      `harus NONE di mode otonom: ${cmd}`,
+    );
+  }
+});
+
+test('Item 2b: guardedExecute menjalankan perintah read-only tanpa memanggil prompt konfirmasi', async () => {
+  let asked = false;
+  const res = await guardedExecute(
+    'git status',
+    {
+      confirm: async () => {
+        asked = true;
+        return false;
+      },
+    },
+    config({ approvalEnabled: false }),
+  );
+  assert.equal(asked, false, 'perintah read-only tidak boleh sampai ke prompt konfirmasi');
+  assert.ok(!/\[BLOCKED oleh Ruko|\[Persetujuan ditolak/.test(res.output), `tidak boleh ditolak: ${res.output}`);
 });

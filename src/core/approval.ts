@@ -63,7 +63,18 @@ export interface RiskVerdict {
  * then a critical path.
  */
 const RM_CRITICAL_RE =
-  /\brm\s+(?:-[a-z]*r[a-z]*f[a-z]*|-[a-z]*f[a-z]*r[a-z]*|-[rR]\s+-[fF]|-[fF]\s+-[rR]|--recursive(?:\s+--force)?|--force\s+--recursive)(?:\s+-[a-zA-Z0-9_\-=]+)*\s+(?:\/[*]?(?:\s|$)|\/(?:etc|bin|usr|lib(?:64)?|boot|sys|proc|var|dev|home|root|run|opt|srv)(?:[\/\s*]|$)|~(?:\/|\s|$)|\$(?:HOME|USER)(?:\/|\s|$))/i;
+  /\brm\s+(?:-[a-z]*r[a-z]*f[a-z]*|-[a-z]*f[a-z]*r[a-z]*|-[rR]\s+-[fF]|-[fF]\s+-[rR]|--recursive(?:\s+--force)?|--force\s+--recursive)(?:\s+-[a-zA-Z0-9_\-=]+)*\s+(?:\/[*]?(?:\s|$)|\/(?:etc|bin|usr|lib(?:64)?|boot|sys|proc|var|dev|home|root|run|opt|srv)(?:[\/\s*]|$)|~(?:[\/\s]|$)|\$(?:HOME|USER)(?:[\/\s]|$))/i;
+
+/**
+ * H1/H2 fix: `rm`/`rmdir` whose target is a dot-path that resolves to the
+ * filesystem root on Linux — "/./", "/../", "/./.", "/../.", "/./*".
+ * These notations resolve to `/` but contain a dot right after the slash, so
+ * neither RM_CRITICAL_RE nor the system-path pattern below matched them.
+ * Only exact dot-paths match: "/./build" (→ /build) is intentionally NOT
+ * caught here, it is handled by path normalisation in testCandidates().
+ */
+const RM_DOT_PATH_OBFUSCATION_RE =
+  /\b(?:rm|rmdir)\b[^|;&\n]*\s\/\.{1,2}(?:\/\.{1,2})*[*]?(?:\s|$)/i;
 
 /** Always-refused patterns (hardline). */
 const BLOCKED_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
@@ -74,6 +85,8 @@ const BLOCKED_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\b(?:rm|rmdir)\b(?:\s+-[a-zA-Z0-9_\-=]+)*\s+(?:\/[*]?(?:\s|$)|\/(?:etc|bin|usr|lib(?:64)?|boot|sys|proc|var|dev|home|root|run|opt|srv)(?:[\/\s*]|$)|~(?:\/|\s|$)|\$(?:HOME|USER)(?:\/|\s|$))/i, 'rm/rmdir ke path sistem kritis (selalu diblokir)'],
   // rm dengan --no-preserve-root (melewati perlindungan root secara eksplisit)
   [/\brm\b[^|;&\n]*--no-preserve-root/i, 'rm --no-preserve-root (melewati proteksi root)'],
+  // H1/H2 fix: path obfuscation dot (/./ atau /../) yang me-resolve ke root
+  [RM_DOT_PATH_OBFUSCATION_RE, 'rm dengan path obfuscasi dot (/./ atau /../)'],
   // Format filesystem
   [/\bmkfs\b/i, 'mkfs (memformat filesystem)'],
   // dd menimpa disk fisik
@@ -189,32 +202,70 @@ export function extractSubshells(str: string): string[] {
 }
 
 
+/** Maximum nesting depth when expanding subshells inside a command (M1). */
+const MAX_SUBSHELL_DEPTH = 4;
+
 /**
  * Splits a shell command on chain operators (;  &&  ||  |) into individual
- * segments, extracts subshells, and evaluates variable expansions.
- * Both the full original command AND each extracted segment are
+ * segments, extracts subshells (recursively, bounded), and evaluates variable
+ * expansions. Both the full original command AND each extracted segment are
  * evaluated, so a destructive sub-command cannot hide inside an innocent
  * wrapper to lower its risk level.
+ *
+ * M1: subshell contents are expanded RECURSIVELY (previously only one level,
+ * and only for chained parts), so `python3 -c "$(echo "$(rm -rf ~)")"` is
+ * classified by its inner command instead of by the interpreter flag alone.
  */
 export function chainedSegments(command: string): string[] {
   const result = new Set<string>();
   result.add(command);
 
-  // Split by chain operators ; && || | and newlines
-  const parts = command.split(/\s*(?:&&|\|\|?|;|\n)\s*/).map(s => s.trim()).filter(Boolean);
-  for (const p of parts) {
-    result.add(p);
-    const subs = extractSubshells(p);
-    for (const s of subs) {
-      result.add(s);
-      const subParts = s.split(/\s*(?:&&|\|\|?|;|\n)\s*/).map(sp => sp.trim()).filter(Boolean);
-      for (const sp of subParts) {
-        result.add(sp);
+  const expand = (cmd: string, depth: number): void => {
+    // Split by chain operators ; && || | and newlines
+    const parts = cmd.split(/\s*(?:&&|\|\|?|;|\n)\s*/).map((s) => s.trim()).filter(Boolean);
+    for (const p of parts) {
+      result.add(p);
+      if (depth >= MAX_SUBSHELL_DEPTH) continue;
+      for (const s of extractSubshells(p)) {
+        result.add(s);
+        expand(s, depth + 1);
       }
     }
-  }
+  };
+
+  expand(command, 0);
 
   return Array.from(result);
+}
+
+/**
+ * H1/H2 fix: lexically normalises dot-segment path obfuscation inside a
+ * command segment so the (unchanged) critical-path patterns can match it.
+ *
+ *   "/./"        → "/"
+ *   "/."         → "/"      (trailing, audit: replace /\/\.+$/)
+ *   "/../"       → "/"
+ *   "/a/../"     → "/"      (".." cancels the preceding component)
+ *   "/a/b/../../"→ "/"
+ *   "/tmp/./x"   → "/tmp/x" (no root, stays DANGEROUS — not blocked)
+ *
+ * Runs in bounded passes so interleaved forms ("/./.././") collapse fully.
+ * Duplicate slashes produced by the replacements are collapsed because
+ * "rm -rf //" and "rm -rf /" are the same target for the kernel.
+ */
+export function normalizeDotPathComponents(segment: string): string {
+  let out = segment;
+  for (let pass = 0; pass < 8; pass++) {
+    const next = out
+      .replace(/\/[^/\s|;&]*\/\.\.(?=\/)/g, '') // "/a/../" → "/" (only ".." cancels)
+      .replace(/\/[^/\s|;&]*\/\.\.$/g, '/') // "/tmp/.." (end of segment) → "/"
+      .replace(/\/\.{1,2}(?=\/)/g, '/') // "/./" and "/../" → "/"
+      .replace(/\/\.{1,2}$/g, '/') // trailing "/." and "/.." → "/"
+      .replace(/\/{2,}/g, '/'); // "//" → "/" (kernel-equivalent target)
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }
 
 /**
@@ -224,6 +275,7 @@ export function chainedSegments(command: string): string[] {
  * - unescaped backslashes variant (defends vs r\m -rf /)
  * - both quote-stripped and unescaped
  * - URL-decoded variants (defends vs encoding bypasses)
+ * - H1/H2: dot-path normalised variants (defends vs /./ and /../ obfuscation)
  */
 function testCandidates(segment: string): string[] {
   const candidates = new Set<string>();
@@ -245,6 +297,12 @@ function testCandidates(segment: string): string[] {
   for (const c of Array.from(candidates)) {
     const dec = decodePathSafely(c);
     if (dec && dec !== c) candidates.add(dec);
+  }
+
+  // 5. H1/H2: dot-segment path normalisation (rm -rf /./, /../, /a/../ → /)
+  for (const c of Array.from(candidates)) {
+    const normalized = normalizeDotPathComponents(c);
+    if (normalized && normalized !== c) candidates.add(normalized);
   }
 
   return Array.from(candidates);
@@ -275,8 +333,13 @@ export function extractAndResolveShellVariables(command: string): string {
     return command;
   }
 
-  // Resolve cross-variable references within variable values (up to 5 passes)
-  for (let pass = 0; pass < 5; pass++) {
+  // Resolve cross-variable references within variable values.
+  // M7: the old hard stop at 5 passes left deep chains unresolved, which let a
+  // BLOCKED command hide behind >5 levels of nesting. Iterate until the map
+  // stops changing, with a bounded safety cap so a self-referential assignment
+  // (A=$A) can never loop forever.
+  const MAX_VARIABLE_RESOLUTION_PASSES = 32;
+  for (let pass = 0; pass < MAX_VARIABLE_RESOLUTION_PASSES; pass++) {
     let changed = false;
     for (const [name, val] of vars.entries()) {
       let resolvedVal = val;
@@ -455,6 +518,11 @@ RULES:
 4. If the command is clearly benign (e.g. printing text, reading files, listing directories): verdict "safe".
 5. If the command is clearly destructive (deletes system files, wipes disks, kills critical processes, exfiltrates data): verdict "blocked".
 6. If you cannot determine with confidence: verdict "blocked" (fail-safe — NEVER guess "safe" when uncertain).
+
+OUTPUT FORMAT (strict):
+- Respond in ENGLISH ONLY.
+- Output the JSON object ONLY: no preamble, no explanation, no markdown fences, no text before or after it.
+- The response must be parseable by JSON.parse as-is.
 
 Respond with ONLY a JSON object, no other text:
 {"verdict": "safe"|"dangerous"|"blocked", "reasoning": "<one sentence>"}`;

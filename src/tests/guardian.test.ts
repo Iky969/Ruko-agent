@@ -467,3 +467,22 @@ test('GAP-03: writeGuardianAuditLog direct call handles errors gracefully', () =
 
   rmSync(dir, { recursive: true, force: true });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// L2 (audit v1.7.7, batch 2): GUARDIAN_PROMPT tidak menuntut output JSON-only
+// dalam Bahasa Inggris, sehingga response bisa mengandung preamble non-JSON.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('L2: prompt guardian menuntut output JSON-only dalam Bahasa Inggris tanpa preamble', async () => {
+  let systemPrompt = '';
+  const provider = fakeProvider(async (messages) => {
+    systemPrompt = String(messages[0]?.content ?? '');
+    return '{"verdict":"safe","reasoning":"benign listing"}';
+  });
+
+  const verdict = await assessWithGuardian('ls -la', config(), provider);
+  assert.equal(verdict.verdict, 'safe');
+  assert.match(systemPrompt, /ENGLISH ONLY/i, 'harus eksplisit English-only');
+  assert.match(systemPrompt, /JSON object ONLY|JSON only/i, 'harus eksplisit JSON-only');
+  assert.match(systemPrompt, /no preamble/i, 'harus melarang preamble');
+});
