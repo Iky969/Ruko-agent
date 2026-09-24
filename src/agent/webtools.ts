@@ -134,9 +134,12 @@ export function sanitizeHtml(html: string): string {
     .replace(/<\/(div|p|h[1-6]|li|tr|section|article|header|footer|nav|blockquote)>/gi, '\n')
     .replace(/<(br|hr)\s*\/?>/gi, '\n');
 
-  // 3. Remove all remaining HTML tags. One pass is exhaustive: a complete tag
-  //    always matches `<[^>]+>`, and an unterminated `<` cannot form a tag.
-  text = text.replace(/<[^>]+>/g, '');
+  // 3. Remove all remaining HTML tags, then strip any residual angle brackets
+  //    so malformed/incomplete tags (for example "<script" without ">")
+  //    cannot survive sanitization.
+  text = text
+    .replace(/<[^>]+>/g, '')
+    .replace(/[<>]/g, '');
 
   // 4. Decode HTML entities AFTER all tag stripping is complete. Because no
   //    further tag removal occurs after this step, decoded angle brackets
