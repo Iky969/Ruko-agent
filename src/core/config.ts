@@ -239,7 +239,64 @@ export function sanitizeConfigFile(raw: unknown): Partial<RukoConfigFile> {
     clean.guardianTimeoutMs = Math.min(Math.trunc(obj.guardianTimeoutMs), 60_000);
   }
   if (obj.profiles && typeof obj.profiles === 'object' && !Array.isArray(obj.profiles)) {
-    clean.profiles = obj.profiles as Record<string, ProviderProfile>;
+    const rawProfiles = obj.profiles as Record<string, unknown>;
+    const sanitizedProfiles: Record<string, ProviderProfile> = {};
+    for (const [alias, rawProfile] of Object.entries(rawProfiles)) {
+      if (!rawProfile || typeof rawProfile !== 'object' || Array.isArray(rawProfile)) continue;
+      const p = rawProfile as Record<string, unknown>;
+      const sp: ProviderProfile = {};
+
+      // Sanitize provider
+      if (typeof p.provider === 'string' && p.provider.trim()) {
+        sp.provider = p.provider.trim();
+      }
+      // Sanitize model
+      if (typeof p.model === 'string' && p.model.trim()) {
+        sp.model = p.model.trim();
+      }
+      // Sanitize baseUrl — identical validation to the top-level baseUrl (TASK-01)
+      if (typeof p.baseUrl === 'string' && p.baseUrl.trim()) {
+        const trimmedUrl = p.baseUrl.trim();
+        try {
+          const parsed = new URL(trimmedUrl);
+          const isHttp = parsed.protocol === 'http:';
+          const isHttps = parsed.protocol === 'https:';
+          if (!isHttp && !isHttps) {
+            console.warn(`[config] Mengabaikan baseUrl profil "${alias}": protokol harus http atau https.`);
+          } else if (isHttp && !isPrivateOrLocalHost(parsed.hostname)) {
+            console.warn(`[config] Mengabaikan baseUrl profil "${alias}" ("${trimmedUrl}"): HTTP tidak aman untuk host remote (gunakan HTTPS, localhost, atau jaringan lokal).`);
+          } else {
+            sp.baseUrl = trimmedUrl;
+          }
+        } catch {
+          console.warn(`[config] Mengabaikan baseUrl profil "${alias}" ("${trimmedUrl}"): URL tidak valid.`);
+        }
+      }
+      // Sanitize apiKey (trim, drop empty)
+      if (typeof p.apiKey === 'string') {
+        const trimmedKey = p.apiKey.trim();
+        if (trimmedKey) {
+          sp.apiKey = trimmedKey;
+        }
+      }
+      // Sanitize apiKeyEnv — whitelist only known LLM provider env vars (TASK-02)
+      if (typeof p.apiKeyEnv === 'string' && p.apiKeyEnv.trim()) {
+        const envName = p.apiKeyEnv.trim();
+        if (ALLOWED_API_KEY_ENV_VARS.has(envName)) {
+          sp.apiKeyEnv = envName;
+        } else {
+          console.warn(`[config] Mengabaikan apiKeyEnv profil "${alias}" ("${envName}"): hanya env var LLM resmi yang diizinkan (${[...ALLOWED_API_KEY_ENV_VARS].join(', ')}).`);
+        }
+      }
+
+      // Only add profile if it has at least one meaningful field
+      if (sp.provider || sp.model || sp.baseUrl || sp.apiKey || sp.apiKeyEnv) {
+        sanitizedProfiles[alias] = sp;
+      }
+    }
+    if (Object.keys(sanitizedProfiles).length > 0) {
+      clean.profiles = sanitizedProfiles;
+    }
   }
   if (typeof obj.defaultProfile === 'string' && obj.defaultProfile.trim()) {
     clean.defaultProfile = obj.defaultProfile.trim();
@@ -262,6 +319,24 @@ export function sanitizeConfigFile(raw: unknown): Partial<RukoConfigFile> {
  * Kept in sync with the names listed in the CLI help (buildUsage).
  */
 const API_KEY_ENV_VARS = ['RUKO_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY'] as const;
+
+/**
+ * TASK-02 whitelist: env var names allowed in profile `apiKeyEnv` fields.
+ * Prevents malicious repos from exfiltrating arbitrary env vars (e.g.
+ * GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY) by crafting a profile in
+ * `.ruko/config.json`.  Only recognised LLM-provider key names are accepted.
+ */
+export const ALLOWED_API_KEY_ENV_VARS = new Set([
+  'RUKO_API_KEY',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GEMINI_API_KEY',
+  'DEEPSEEK_API_KEY',
+  'GROQ_API_KEY',
+  'MISTRAL_API_KEY',
+  'XAI_API_KEY',
+  'OPENROUTER_API_KEY',
+]);
 
 /** True when at least one API key env var supplies a non-empty value. */
 function hasApiKeyFromEnv(): boolean {

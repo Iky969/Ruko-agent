@@ -36,12 +36,12 @@ function withProfile(p: Record<string, ProviderProfile>, extra: object = {}) {
 test('resolveProfileCredentials: defaultProfile fills baseUrl/model, apiKeyEnv wins (§2.12)', () => {
   const cfg = withProfile(
     {
-      hemat: { baseUrl: 'https://x/v1', model: 'qwen3-flash', apiKeyEnv: 'QWEN_API_KEY' },
+      hemat: { baseUrl: 'https://x/v1', model: 'qwen3-flash', apiKeyEnv: 'OPENAI_API_KEY' },
       kuat: { baseUrl: 'https://y/v1', model: 'big' },
     },
     { defaultProfile: 'hemat' },
   );
-  const resolved = resolveProfileCredentials(cfg, { QWEN_API_KEY: 'sk' + '-env' });
+  const resolved = resolveProfileCredentials(cfg, { OPENAI_API_KEY: 'sk' + '-env' });
   assert.equal(resolved.baseUrl, 'https://x/v1');
   assert.equal(resolved.model, 'qwen3-flash');
   assert.equal(resolved.apiKey, 'sk' + '-env');

@@ -66,3 +66,54 @@ test('plan mode and beginner addenda append last (§4d/§7)', () => {
   assert.ok(p.includes('USER MODE — BEGINNER'));
   assert.ok(p.indexOf(planModeAddendum()) < p.indexOf('USER MODE — BEGINNER'));
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK-04: AGENT.md isolation — project instructions are wrapped in
+// <untrusted_project_instructions> with a security disclaimer.
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { readProjectAgentDoc } from '../agent/roles.js';
+
+test('TASK-04: readProjectAgentDoc wraps content in untrusted tags', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ruko-agent-doc-'));
+  writeFileSync(join(dir, 'AGENT.md'), '# My Project\nUse pnpm for everything.\n', 'utf8');
+  try {
+    const result = readProjectAgentDoc(dir);
+    assert.ok(result !== null, 'should read AGENT.md');
+    assert.ok(result!.includes('<untrusted_project_instructions>'), 'must have opening tag');
+    assert.ok(result!.includes('</untrusted_project_instructions>'), 'must have closing tag');
+    assert.ok(result!.includes('Use pnpm for everything'), 'original content must be preserved');
+    assert.ok(result!.includes('UNTRUSTED'), 'must mention UNTRUSTED');
+    assert.ok(result!.includes('security policy'), 'must mention security policy restriction');
+    assert.ok(result!.includes('approval gate'), 'must mention approval gate restriction');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('TASK-04: readProjectAgentDoc returns null when no AGENT.md exists', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ruko-no-agent-'));
+  try {
+    const result = readProjectAgentDoc(dir);
+    assert.equal(result, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('TASK-04: buildSystemPrompt includes untrusted tags when agentDoc has them', () => {
+  const sandboxedDoc =
+    '# Project instructions (AGENT.md)\n\n' +
+    '<untrusted_project_instructions>\n' +
+    'Use pnpm.\n' +
+    '</untrusted_project_instructions>';
+  const p = buildSystemPrompt({
+    role: getBuiltInRole('default')!,
+    planMode: false,
+    mode: 'beginner',
+    agentDoc: sandboxedDoc,
+  });
+  assert.ok(p.includes('<untrusted_project_instructions>'), 'system prompt must carry untrusted tags');
+  assert.ok(p.includes('</untrusted_project_instructions>'), 'system prompt must carry closing tag');
+  assert.ok(p.includes('Use pnpm'), 'project content must be in the prompt');
+});
