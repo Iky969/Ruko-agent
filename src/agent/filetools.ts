@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs } from 'node:fs';
 import { Buffer } from 'node:buffer';
 import * as path from 'node:path';
 import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isPathInsideWorkspace, isSensitivePath } from './tools.js';
@@ -10,6 +10,9 @@ export const DEFAULT_READ_LIMIT = 200;
 
 /** Hard cap per `read_file` call so one read cannot flood the context. */
 export const MAX_READ_LIMIT = 2000;
+
+/** Max file size for read_file (TASK-06 OOM). */
+export const MAX_READ_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 /** Cap for a single line echoed back by read/search (defends vs minified files). */
 const MAX_LINE_CHARS = 2_000;
@@ -47,6 +50,9 @@ export const DEFAULT_CONTEXT_LINES = 1;
 
 /** Max context lines before and after match in `code_search`. */
 export const MAX_CONTEXT_LINES = 2;
+
+/** Max regex query length for code_search (TASK-06 ReDoS). */
+export const MAX_REGEX_QUERY_LENGTH = 500;
 
 /** Directories always ignored by file traversal to save tokens and avoid slow scans. */
 export const IGNORED_DIRS = new Set([
@@ -145,15 +151,31 @@ export async function readFileTool(
   let handle;
   let stat;
   try {
-    handle = await fs.open(abs, 'r');
+    // TASK-05: O_NOFOLLOW — defense-in-depth anti-TOCTOU. Symlink apa pun
+    // ditolak di level open (ELOOP), termasuk symlink internal yang lolos
+    // pengecekan lstat di atas (deny-by-default).
+    handle = await fs.open(abs, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
     stat = await handle.stat();
   } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP') {
+      return { ok: false, text: `read_file: '${filePath}' adalah symbolic link — ditolak demi keamanan (O_NOFOLLOW).` };
+    }
     return { ok: false, text: `read_file: tidak bisa membuka '${filePath}': ${errorMessage(err)}` };
   }
 
   let content: string;
   const cacheKey = `${abs}::${offset}::${limit}`;
   try {
+    if (stat.size > MAX_READ_FILE_SIZE) {
+      // TASK-06 (OOM): tolak file raksasa sebelum dibaca ke RAM. Tutup handle
+      // dulu supaya tidak bocor (finally di bawah juga menutup, close bersifat idempoten).
+      await handle.close().catch(() => {});
+      return {
+        ok: false,
+        text: `read_file: '${filePath}' terlalu besar (${(stat.size / 1024 / 1024).toFixed(1)} MB, max ${MAX_READ_FILE_SIZE / 1024 / 1024} MB). Gunakan 'exec' dengan head/tail/sed.`,
+      };
+    }
     if (stat.isDirectory()) {
       return { ok: false, text: `read_file: '${filePath}' adalah direktori, bukan file.` };
     }
@@ -803,6 +825,17 @@ export async function codeSearchTool(
     return {
       ok: false,
       text: 'code_search: missing "query" field',
+      totalMatches: 0,
+      totalFiles: 0,
+      truncated: false,
+    };
+  }
+
+  // TASK-06 (ReDoS): batasi panjang query sebelum dikompilasi jadi regex.
+  if (query.length > MAX_REGEX_QUERY_LENGTH) {
+    return {
+      ok: false,
+      text: `code_search: query terlalu panjang (${query.length} chars, max ${MAX_REGEX_QUERY_LENGTH})`,
       totalMatches: 0,
       totalFiles: 0,
       truncated: false,
