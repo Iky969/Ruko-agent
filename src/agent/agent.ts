@@ -15,7 +15,7 @@ import {
   WorkflowTree,
   yellow,
 } from '../core/ui.js';
-import { AgentConfig, ContextMessage } from '../types.js';
+import { AgentConfig, ContextMessage, createDefaultSessionState, SessionState } from '../types.js';
 import { LLMProvider } from './llm.js';
 import { allRoles, buildSystemPrompt, getBuiltInRole, readProjectAgentDoc, RoleDef } from './roles.js';
 import {
@@ -35,6 +35,35 @@ export const DEFAULT_MAX_TOOL_ITERATIONS = 30;
 
 /** §5.35 — same tool+args invoked more than this many times = likely loop. */
 const LOOP_REPEAT_LIMIT = 2;
+
+/** Tool read-only resmi yang terdaftar di codebase (rujuk IDEMPOTENT_READ_TOOLS). */
+export const IDEMPOTENT_READ_TOOLS = new Set([
+  'read_file',
+  'glob',
+  'list_dir',
+  'list_directory',
+  'code_search',
+  'read_logs',
+  'read_process_logs',
+]);
+
+/** Tool mutating untuk Build mode phase transition (Fase 1). */
+export const BUILD_MUTATING_TOOLS = new Set([
+  'write_file',
+  'edit_file',
+  'patch_file',
+  'delete_file',
+  'exec',
+]);
+
+/** Parameter injection per-SessionState ke loop detector (Fase 1). */
+export interface LoopDetectorParams {
+  loopThreshold: number;
+  consecutiveThreshold: number;
+  cycleThreshold: number;
+  softWarningThreshold: number;
+  readOnlyRelaxed: boolean;
+}
 
 /** Per-instruction token-ish usage snapshot (chars, provider-agnostic). */
 export interface TurnUsage {
@@ -150,6 +179,45 @@ export class Agent {
       lastTurnDurationMs: 0,
     };
     this.lastUsage = null;
+  }
+
+  /** State mode per-sesi in-memory (Fase 1: Default, Research, Code, Build). */
+  public sessionState: SessionState = createDefaultSessionState();
+
+  /** Reset state sesi ke nilai default tiap sesi baru. */
+  resetSessionState(): void {
+    this.sessionState = createDefaultSessionState();
+  }
+
+  /** Parameter injection loop detector per-SessionState (Fase 1). */
+  public getLoopDetectorParams(tool: string): LoopDetectorParams {
+    const isReadOnly = IDEMPOTENT_READ_TOOLS.has(tool);
+    const mode = this.sessionState?.mode ?? 'default';
+    let relaxed = false;
+
+    if (mode === 'research' && isReadOnly) {
+      relaxed = true;
+    } else if (mode === 'build' && this.sessionState?.buildPhase === 'explore' && isReadOnly) {
+      relaxed = true;
+    }
+
+    if (relaxed) {
+      return {
+        loopThreshold: 10,
+        consecutiveThreshold: 10,
+        cycleThreshold: 10,
+        softWarningThreshold: 10,
+        readOnlyRelaxed: true,
+      };
+    }
+
+    return {
+      loopThreshold: LOOP_REPEAT_LIMIT,
+      consecutiveThreshold: 2,
+      cycleThreshold: 2,
+      softWarningThreshold: 2,
+      readOnlyRelaxed: false,
+    };
   }
 
   /** Active role (built-in or custom file), resolved from config (§4). */
@@ -271,14 +339,6 @@ export class Agent {
       'move_file',
       'revert_file',
     ]);
-    const IDEMPOTENT_READ_TOOLS = new Set([
-      'read_file',
-      'glob',
-      'list_dir',
-      'list_directory',
-      'code_search',
-      'read_logs',
-    ]);
     const turnToolCache = new Map<string, string>();
 
     const maxIterations = this.config.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
@@ -350,6 +410,8 @@ export class Agent {
             onThought: (chunk) => thoughtReveal.feed(chunk),
             signal,
             maxTokens: this.config.maxOutputTokens ?? 4096,
+            // Fase 2: wiring /reasoning → parameter provider di llm.ts.
+            reasoning: this.sessionState.reasoningLevel,
           });
         } catch (err) {
           // v0.7: an interrupted stream rejects with AbortError — that is a
@@ -507,6 +569,20 @@ export class Agent {
             return '';
           }
 
+          // Build mode phase transition:
+          // Begitu tool mutating (write_file, edit_file, patch_file, delete_file, exec) dipanggil pertama kali,
+          // beralih ke 'mutate' (ketat) PERMANEN sampai /mode diganti manual atau sesi baru.
+          if (
+            this.sessionState.mode === 'build' &&
+            this.sessionState.buildPhase === 'explore' &&
+            BUILD_MUTATING_TOOLS.has(call.tool)
+          ) {
+            this.sessionState.buildPhase = 'mutate';
+          }
+
+          // Injected loop detector parameters based on SessionState and tool whitelist (Fase 1)
+          const loopParams = this.getLoopDetectorParams(call.tool);
+
           // Item 2 & Solusi 2: Deteksi pemanggilan tool berulang & siklus N-gram
           const sig = this.getCallSignature(call);
           const isBatchDuplicate = batchSignatures.has(sig);
@@ -523,20 +599,20 @@ export class Agent {
           const cycle = this.detectCycle(this.callHistory, sig);
 
           // 1. Interupsi loop agen jika:
-          // - Pemanggilan berturut-turut > 2 kali (consecutive loop)
-          // - Terdeteksi siklus N-gram berulang > 2 kali (cycle loop)
-          // - Tool signature dipanggil ulang melebihi repeat cap (> LOOP_REPEAT_LIMIT)
+          // - Pemanggilan berturut-turut > params.consecutiveThreshold kali (consecutive loop)
+          // - Terdeteksi siklus N-gram berulang > params.cycleThreshold kali (cycle loop)
+          // - Tool signature dipanggil ulang melebihi repeat cap (> params.loopThreshold)
           if (
-            this.consecutiveRepeatCount > 2 ||
-            (cycle && cycle.count > 2) ||
-            (this.callCounts.get(sig) ?? 0) > LOOP_REPEAT_LIMIT
+            this.consecutiveRepeatCount > loopParams.consecutiveThreshold ||
+            (cycle && cycle.count > loopParams.cycleThreshold) ||
+            (this.callCounts.get(sig) ?? 0) > loopParams.loopThreshold
           ) {
             if (tree.isTreeActive) {
               tree.finish('Dihentikan karena deteksi loop');
             }
-            const cycleInfo = (cycle && cycle.count > 2)
+            const cycleInfo = (cycle && cycle.count > loopParams.cycleThreshold)
               ? `siklus pemanggilan ${cycle.cycleLength} tool berulang ${cycle.count}×`
-              : `tool "${call.tool}" dengan argumen sama sudah dipanggil > ${LOOP_REPEAT_LIMIT}×`;
+              : `tool "${call.tool}" dengan argumen sama sudah dipanggil > ${loopParams.loopThreshold}×`;
             return (
               `[deteksi loop] ${cycleInfo} — eksekusi dihentikan. Silakan simpulkan atau lanjutkan ke respons akhir berdasarkan data yang sudah ada di riwayat.`
             );
@@ -544,7 +620,10 @@ export class Agent {
 
           // 2. Jika perintah terdeteksi identik berturut-turut atau duplikat dalam batch yang sama,
           // cegah eksekusi ulang I/O dan kirim warning terstandarisasi.
-          if (this.consecutiveRepeatCount === 2 || isBatchDuplicate) {
+          if (
+            this.consecutiveRepeatCount === loopParams.softWarningThreshold ||
+            (isBatchDuplicate && !loopParams.readOnlyRelaxed)
+          ) {
             const warn = 'Perintah identik terdeteksi berulang, dilewati';
             tree.log(yellow(`⚠ ${warn}`));
             messages.push({

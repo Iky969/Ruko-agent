@@ -1,4 +1,4 @@
-import { AgentConfig, ContextMessage } from '../types.js';
+import { AgentConfig, ContextMessage, ReasoningLevel } from '../types.js';
 import { isHostnameOrSubdomain } from '../core/config.js';
 import { parseToolCalls } from './tools.js';
 
@@ -66,6 +66,114 @@ export interface ChatOptions {
    * when the user interrupts the turn.
    */
   signal?: AbortSignal;
+  /** Level reasoning sesi (Fase 2: /reasoning) → parameter native per provider. */
+  reasoning?: ReasoningLevel;
+}
+
+/*
+ * ============================================================================
+ * MAPPING PASTI Fase 2: level reasoning → parameter API per provider.
+ * Hanya field yang benar-benar dikirim di payload provider di bawah — jangan
+ * invent field lain. Level native didahulukan; fallback prompt injection hanya
+ * untuk provider tanpa parameter native / yang menolaknya (400).
+ * ============================================================================
+ */
+
+/** Urutan kekuatan reasoning: high < xhigh < max < extreme. */
+export const REASONING_LEVELS: ReasoningLevel[] = ['high', 'xhigh', 'max', 'extreme'];
+
+/**
+ * OpenAI-compatible: field top-level `reasoning_effort` di body /chat/completions.
+ * Nilai yang didukung API: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+ * (model-dependent). 'extreme' BUKAN nilai API → di-CLAMP ke 'max'.
+ */
+export function toOpenAiReasoningEffort(level: ReasoningLevel): 'high' | 'xhigh' | 'max' {
+  switch (level) {
+    case 'high':
+      return 'high';
+    case 'xhigh':
+      return 'xhigh';
+    case 'max':
+    case 'extreme':
+    default:
+      return 'max';
+  }
+}
+
+/**
+ * Anthropic: field top-level `thinking: { type: 'enabled', budget_tokens }`.
+ * Range API: 1024–32768 (integer). Mapping: 4096 / 8192 / 16384 / 32768.
+ */
+export function toAnthropicBudgetTokens(level: ReasoningLevel): number {
+  switch (level) {
+    case 'high':
+      return 4096;
+    case 'xhigh':
+      return 8192;
+    case 'max':
+      return 16384;
+    case 'extreme':
+    default:
+      return 32768;
+  }
+}
+
+/**
+ * Gemini: field top-level `thinkingConfig: { thinkingBudget }`.
+ * Range API: 0–24576 → budget Extreme (32768) di-CLAMP ke 24576.
+ */
+export function toGeminiThinkingBudget(level: ReasoningLevel): number {
+  return Math.min(toAnthropicBudgetTokens(level), 24576);
+}
+
+/**
+ * Fallback prompt-injection (footer feedback.txt): dipakai HANYA jika provider
+ * TIDAK punya parameter reasoning native atau menolaknya (400).
+ * Template per level: High / XHigh / Max / Extreme.
+ */
+export function reasoningPromptAddendum(level: ReasoningLevel): string {
+  switch (level) {
+    case 'high':
+      return 'REASONING DEPTH — HIGH: think carefully before acting; state a brief plan and verify assumptions, but keep the reasoning concise.';
+    case 'xhigh':
+      return 'REASONING DEPTH — XHIGH: reason step by step before every action; consider alternatives and edge cases explicitly before choosing a tool or answer.';
+    case 'max':
+      return 'REASONING DEPTH — MAX: analyze the problem exhaustively before acting; enumerate options, weigh trade-offs, and verify each assumption against evidence.';
+    case 'extreme':
+    default:
+      return 'REASONING DEPTH — EXTREME: perform maximal deliberation; explore every relevant angle, simulate failure modes, double-check conclusions against evidence, then act.';
+  }
+}
+
+/** Sisipkan instruksi depth reasoning ke system prompt (fallback prompt injection). */
+export function withReasoningDirective(
+  messages: ContextMessage[],
+  level: ReasoningLevel,
+): ContextMessage[] {
+  const addendum = reasoningPromptAddendum(level);
+  const out = [...messages];
+  const idx = out.findIndex((m) => m.role === 'system');
+  if (idx >= 0) {
+    out[idx] = { ...out[idx], content: `${out[idx].content}\n\n${addendum}` };
+    return out;
+  }
+  out.unshift({ role: 'system', content: addendum, timestamp: new Date().toISOString() });
+  return out;
+}
+
+/** Penanda sekali-jalan: log debug HANYA sekali saat fallback reasoning aktif. */
+export class ReasoningFallbackLog {
+  private logged = false;
+
+  note(reason: string): void {
+    if (this.logged) return;
+    this.logged = true;
+    if (process.env.DEBUG || process.env.RUKO_DEBUG) {
+      console.error(
+        `[DEBUG] Parameter reasoning native tidak didukung (${reason}) — fallback ke prompt injection; request tetap dilanjutkan.`,
+      );
+    }
+  }
 }
 
 /** Abstraction over any chat-completion backend the agent can talk to. */
@@ -283,6 +391,9 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   private readonly retry: RetryOptions;
   lastFinishReason: string | null = null;
   lastReasoning: string | null = null;
+  /** True setelah endpoint menolak `reasoning_effort` (Fase 2: fallback prompt injection). */
+  private reasoningParamUnsupported = false;
+  private reasoningFallbackLog = new ReasoningFallbackLog();
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     const rawKey = cfg.apiKey ?? process.env.OPENAI_API_KEY ?? '';
@@ -412,42 +523,78 @@ export class OpenAiCompatibleProvider implements LLMProvider {
 
     this.lastFinishReason = null;
 
+    const reasoningLevel = options?.reasoning ?? null;
+    let useNativeReasoning = Boolean(reasoningLevel) && !this.reasoningParamUnsupported;
+
     // Normalisasi & Validasi Skema Tool Result: Pastikan payload pesan balik setelah tool execution
     // sesuai dengan skema standar provider (role: "tool" dengan tool_call_id yang valid)
     // dan invariant struktur pesan OpenAI-compatible terjaga secara lengkap dan berurutan.
-    const validated = validateOpenAiMessages(messages);
-    const formattedMessages = validated.map((m) => {
-      if (m.role === 'tool') {
-        const toolCallId = (m.tool_call_id && m.tool_call_id.trim()) || `call_${Date.now()}`;
-        return {
-          role: 'tool',
-          tool_call_id: toolCallId,
+    const formatMessages = (source: ContextMessage[]): Array<Record<string, unknown>> => {
+      const validated = validateOpenAiMessages(source);
+      return validated.map((m) => {
+        if (m.role === 'tool') {
+          const toolCallId = (m.tool_call_id && m.tool_call_id.trim()) || `call_${Date.now()}`;
+          return {
+            role: 'tool',
+            tool_call_id: toolCallId,
+            content: m.content,
+            ...(m.name ? { name: m.name } : {}),
+          };
+        }
+        const msgObj: Record<string, unknown> = {
+          role: m.role,
           content: m.content,
-          ...(m.name ? { name: m.name } : {}),
         };
-      }
-      const msgObj: Record<string, unknown> = {
-        role: m.role,
-        content: m.content,
-      };
-      if (m.tool_calls && m.tool_calls.length > 0) {
-        msgObj.tool_calls = m.tool_calls;
-      }
-      return msgObj;
-    });
+        if (m.tool_calls && m.tool_calls.length > 0) {
+          msgObj.tool_calls = m.tool_calls;
+        }
+        return msgObj;
+      });
+    };
 
-    const response = await this.requestWithRetry(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: this.authHeaders(),
-      body: JSON.stringify({
+    const buildRequestBody = (withNative: boolean): string => {
+      // Fallback prompt injection: dipakai saat parameter native tidak didukung.
+      const source =
+        reasoningLevel && !withNative ? withReasoningDirective(messages, reasoningLevel) : messages;
+      return JSON.stringify({
         model: options?.model ?? this.currentModel,
-        messages: formattedMessages,
+        messages: formatMessages(source),
         temperature: options?.temperature ?? 0.3,
         max_tokens: options?.maxTokens ?? 2048,
         stream: true,
-      }),
+        // Mapping PASTI Fase 2: field top-level `reasoning_effort` (clamped ke enum API).
+        ...(withNative && reasoningLevel
+          ? { reasoning_effort: toOpenAiReasoningEffort(reasoningLevel) }
+          : {}),
+      });
+    };
+
+    let response = await this.requestWithRetry(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: this.authHeaders(),
+      body: buildRequestBody(useNativeReasoning),
       signal: options?.signal,
     });
+
+    // Endpoint menolak `reasoning_effort` (mis. Ollama standar tanpa thinking):
+    // JANGAN gagalkan request — strip parameter native, retry SEKALI dengan
+    // fallback prompt injection, lalu log sekali di level debug.
+    if (!response.ok && useNativeReasoning && reasoningLevel && response.status === 400) {
+      const errBody = await response.text();
+      if (/reasoning/i.test(errBody)) {
+        this.reasoningParamUnsupported = true;
+        useNativeReasoning = false;
+        this.reasoningFallbackLog.note('reasoning_effort');
+        response = await this.requestWithRetry(`${this.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: this.authHeaders(),
+          body: buildRequestBody(false),
+          signal: options?.signal,
+        });
+      } else {
+        throw new Error(`LLM API error ${response.status}: ${errBody.slice(0, 500)}`);
+      }
+    }
 
     if (!response.ok) {
       const body = await response.text();
@@ -482,6 +629,13 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       }
       const apiToolCalls = msg?.tool_calls;
       if (Array.isArray(apiToolCalls) && apiToolCalls.length > 0) {
+        // Solusi 1 (jalur non-streaming): dedup identik dengan jalur streaming di
+        // bawah. Model bisa menuliskan tool call dua kali — sekali sebagai fence
+        // ```tool di content, sekali via tool_calls native API. Tanpa dedup,
+        // blok identik disintesis ulang, parseToolCalls menghasilkan batch
+        // ganda, dan loop detector mem-flag "Perintah identik terdeteksi
+        // berulang" pada panggilan pertama di sesi baru (false-positive).
+        const existingCalls = parseToolCalls(content).calls;
         for (const tc of apiToolCalls) {
           const fnName = tc.function?.name;
           if (fnName) {
@@ -491,7 +645,20 @@ export class OpenAiCompatibleProvider implements LLMProvider {
             } catch {
               // fallback
             }
-            content += `\n\`\`\`tool\n${JSON.stringify({ tool: fnName, ...fnArgs })}\n\`\`\`\n`;
+            // Signature normalisasi sama persis dengan jalur streaming:
+            // nama lowercased tanpa underscore + argumen JSON-serialisasi.
+            const normName = fnName.toLowerCase().replace(/_/g, '');
+            const candidateSig = `${normName}:${JSON.stringify(fnArgs)}`;
+            const alreadyInContent = existingCalls.some((ec) => {
+              const { id: _eId, tool: ecTool, ...ecRest } = ec;
+              const normEcTool = (ecTool ?? '').toLowerCase().replace(/_/g, '');
+              return `${normEcTool}:${JSON.stringify(ecRest)}` === candidateSig;
+            });
+            if (!alreadyInContent) {
+              const toolObj: Record<string, unknown> = { tool: fnName, ...fnArgs };
+              if (tc.id) toolObj.id = tc.id;
+              content += `\n\`\`\`tool\n${JSON.stringify(toolObj)}\n\`\`\`\n`;
+            }
           }
         }
       }
@@ -637,6 +804,9 @@ export class AnthropicProvider implements LLMProvider {
   private readonly retry: RetryOptions;
   lastFinishReason: string | null = null;
   lastReasoning: string | null = null;
+  /** True setelah endpoint menolak `thinking` (Fase 2: fallback prompt injection). */
+  private reasoningParamUnsupported = false;
+  private reasoningFallbackLog = new ReasoningFallbackLog();
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     this.apiKey = cfg.apiKey ?? process.env.ANTHROPIC_API_KEY ?? process.env.OPENAI_API_KEY ?? '';
@@ -739,36 +909,54 @@ export class AnthropicProvider implements LLMProvider {
       throw new Error('Konfigurasi Anthropic belum lengkap (API key kosong) — jalankan /login atau set ANTHROPIC_API_KEY.');
     }
 
-    const systemParts: string[] = [];
-    const nonSystem: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+    const reasoningLevel = options?.reasoning ?? null;
+    let useNativeReasoning = Boolean(reasoningLevel) && !this.reasoningParamUnsupported;
 
-    for (const m of messages) {
-      if (m.role === 'system') {
-        systemParts.push(m.content);
-      } else {
-        const role: 'user' | 'assistant' = (m.role === 'tool' || m.role === 'tool_call') ? 'user' : m.role;
-        if (nonSystem.length > 0 && nonSystem[nonSystem.length - 1].role === role) {
-          nonSystem[nonSystem.length - 1].content += '\n\n' + m.content;
+    const buildPayload = (withNative: boolean): Record<string, unknown> => {
+      // Fallback prompt injection: dipakai saat parameter native `thinking` tidak didukung.
+      const source =
+        reasoningLevel && !withNative ? withReasoningDirective(messages, reasoningLevel) : messages;
+      const systemParts: string[] = [];
+      const nonSystem: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+
+      for (const m of source) {
+        if (m.role === 'system') {
+          systemParts.push(m.content);
         } else {
-          nonSystem.push({ role, content: m.content });
+          const role: 'user' | 'assistant' = (m.role === 'tool' || m.role === 'tool_call') ? 'user' : m.role;
+          if (nonSystem.length > 0 && nonSystem[nonSystem.length - 1].role === role) {
+            nonSystem[nonSystem.length - 1].content += '\n\n' + m.content;
+          } else {
+            nonSystem.push({ role, content: m.content });
+          }
         }
       }
-    }
 
-    if (nonSystem.length === 0) {
-      nonSystem.push({ role: 'user', content: 'Hello' });
-    }
+      if (nonSystem.length === 0) {
+        nonSystem.push({ role: 'user', content: 'Hello' });
+      }
 
-    const payload: Record<string, unknown> = {
-      model: options?.model ?? this.currentModel,
-      messages: nonSystem,
-      max_tokens: options?.maxTokens ?? 2048,
-      temperature: options?.temperature ?? 0.3,
-      stream: true,
+      const payload: Record<string, unknown> = {
+        model: options?.model ?? this.currentModel,
+        messages: nonSystem,
+        max_tokens: options?.maxTokens ?? 2048,
+        temperature: options?.temperature ?? 0.3,
+        stream: true,
+      };
+      if (systemParts.length > 0) {
+        payload.system = systemParts.join('\n\n');
+      }
+      if (withNative && reasoningLevel) {
+        // Mapping PASTI Fase 2: field top-level `thinking: { type: 'enabled', budget_tokens }`.
+        const budgetTokens = toAnthropicBudgetTokens(reasoningLevel);
+        payload.thinking = { type: 'enabled', budget_tokens: budgetTokens };
+        // Guard API extended thinking: hanya kompatibel dengan temperature 1,
+        // dan mensyaratkan max_tokens > budget_tokens.
+        payload.temperature = 1;
+        payload.max_tokens = Math.max(payload.max_tokens as number, budgetTokens + 1024);
+      }
+      return payload;
     };
-    if (systemParts.length > 0) {
-      payload.system = systemParts.join('\n\n');
-    }
 
     const url = this.buildEndpointUrl('/messages');
 
@@ -777,9 +965,29 @@ export class AnthropicProvider implements LLMProvider {
       response = await this.requestWithRetry(url, {
         method: 'POST',
         headers: this.authHeaders(),
-        body: JSON.stringify(payload),
+        body: JSON.stringify(buildPayload(useNativeReasoning)),
         signal: options?.signal,
       });
+
+      // Model/endpoint menolak `thinking` (mis. model tanpa extended thinking):
+      // JANGAN gagalkan request — strip parameter native, retry SEKALI dengan
+      // fallback prompt injection, lalu log sekali di level debug.
+      if (!response.ok && useNativeReasoning && reasoningLevel && response.status === 400) {
+        const errBody = await response.text();
+        if (/thinking|budget_tokens/i.test(errBody)) {
+          this.reasoningParamUnsupported = true;
+          useNativeReasoning = false;
+          this.reasoningFallbackLog.note('thinking.budget_tokens');
+          response = await this.requestWithRetry(url, {
+            method: 'POST',
+            headers: this.authHeaders(),
+            body: JSON.stringify(buildPayload(false)),
+            signal: options?.signal,
+          });
+        } else {
+          throw new Error(`Anthropic API error ${response.status}: ${sanitizeSensitiveText(errBody.slice(0, 500), this.apiKey)}`);
+        }
+      }
     } catch (err) {
       throw sanitizeError(err, this.apiKey);
     }
@@ -899,6 +1107,9 @@ export class GeminiProvider implements LLMProvider {
   private readonly retry: RetryOptions;
   lastFinishReason: string | null = null;
   lastReasoning: string | null = null;
+  /** True setelah endpoint menolak `thinkingConfig` (Fase 2: fallback prompt injection). */
+  private reasoningParamUnsupported = false;
+  private reasoningFallbackLog = new ReasoningFallbackLog();
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     this.apiKey = cfg.apiKey ?? process.env.GEMINI_API_KEY ?? process.env.OPENAI_API_KEY ?? '';
@@ -1003,38 +1214,51 @@ export class GeminiProvider implements LLMProvider {
       throw new Error('Konfigurasi Gemini belum lengkap (API key kosong) — jalankan /login atau set GEMINI_API_KEY.');
     }
 
-    const systemParts: string[] = [];
-    const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+    const reasoningLevel = options?.reasoning ?? null;
+    let useNativeReasoning = Boolean(reasoningLevel) && !this.reasoningParamUnsupported;
 
-    for (const m of messages) {
-      if (m.role === 'system') {
-        systemParts.push(m.content);
-      } else {
-        const role: 'user' | 'model' = m.role === 'assistant' ? 'model' : 'user';
-        if (contents.length > 0 && contents[contents.length - 1].role === role) {
-          contents[contents.length - 1].parts[0].text += '\n\n' + m.content;
+    const buildPayload = (withNative: boolean): Record<string, unknown> => {
+      // Fallback prompt injection: dipakai saat parameter native `thinkingConfig` tidak didukung.
+      const source =
+        reasoningLevel && !withNative ? withReasoningDirective(messages, reasoningLevel) : messages;
+      const systemParts: string[] = [];
+      const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+
+      for (const m of source) {
+        if (m.role === 'system') {
+          systemParts.push(m.content);
         } else {
-          contents.push({ role, parts: [{ text: m.content }] });
+          const role: 'user' | 'model' = m.role === 'assistant' ? 'model' : 'user';
+          if (contents.length > 0 && contents[contents.length - 1].role === role) {
+            contents[contents.length - 1].parts[0].text += '\n\n' + m.content;
+          } else {
+            contents.push({ role, parts: [{ text: m.content }] });
+          }
         }
       }
-    }
 
-    if (contents.length === 0) {
-      contents.push({ role: 'user', parts: [{ text: 'Hello' }] });
-    }
+      if (contents.length === 0) {
+        contents.push({ role: 'user', parts: [{ text: 'Hello' }] });
+      }
 
-    const payload: Record<string, unknown> = {
-      contents,
-      generationConfig: {
-        maxOutputTokens: options?.maxTokens ?? 2048,
-        temperature: options?.temperature ?? 0.3,
-      },
-    };
-    if (systemParts.length > 0) {
-      payload.systemInstruction = {
-        parts: [{ text: systemParts.join('\n\n') }],
+      const payload: Record<string, unknown> = {
+        contents,
+        generationConfig: {
+          maxOutputTokens: options?.maxTokens ?? 2048,
+          temperature: options?.temperature ?? 0.3,
+        },
       };
-    }
+      if (systemParts.length > 0) {
+        payload.systemInstruction = {
+          parts: [{ text: systemParts.join('\n\n') }],
+        };
+      }
+      if (withNative && reasoningLevel) {
+        // Mapping PASTI Fase 2: field top-level `thinkingConfig: { thinkingBudget }` (clamped 0–24576).
+        payload.thinkingConfig = { thinkingBudget: toGeminiThinkingBudget(reasoningLevel) };
+      }
+      return payload;
+    };
 
     const modelName = options?.model ?? this.currentModel;
     const url = this.buildEndpointUrl(`/models/${modelName}:streamGenerateContent`, { alt: 'sse' });
@@ -1044,9 +1268,29 @@ export class GeminiProvider implements LLMProvider {
       response = await this.requestWithRetry(url, {
         method: 'POST',
         headers: this.authHeaders(),
-        body: JSON.stringify(payload),
+        body: JSON.stringify(buildPayload(useNativeReasoning)),
         signal: options?.signal,
       });
+
+      // Model/endpoint menolak `thinkingConfig` (mis. seri tanpa thinking):
+      // JANGAN gagalkan request — strip parameter native, retry SEKALI dengan
+      // fallback prompt injection, lalu log sekali di level debug.
+      if (!response.ok && useNativeReasoning && reasoningLevel && response.status === 400) {
+        const errBody = await response.text();
+        if (/thinking/i.test(errBody)) {
+          this.reasoningParamUnsupported = true;
+          useNativeReasoning = false;
+          this.reasoningFallbackLog.note('thinkingConfig.thinkingBudget');
+          response = await this.requestWithRetry(url, {
+            method: 'POST',
+            headers: this.authHeaders(),
+            body: JSON.stringify(buildPayload(false)),
+            signal: options?.signal,
+          });
+        } else {
+          throw new Error(`Gemini API error ${response.status}: ${sanitizeSensitiveText(errBody.slice(0, 500), this.apiKey)}`);
+        }
+      }
     } catch (err) {
       throw sanitizeError(err, this.apiKey);
     }

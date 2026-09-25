@@ -368,9 +368,14 @@ export class SystemLoop {
             config: this.config,
             llm: this.agent.llm,
             agent: this.agent,
+            sessionState: this.agent.sessionState,
             confirm: this.makeConfirmer(),
             ask: this.makeAsk(),
             askSecret: this.makeAskSecret(),
+            select: (options) => {
+              if (this.editor) return this.editor.askSelector(options);
+              return Promise.resolve(null);
+            },
             updateConfig: (patch) => {
               Object.assign(this.config, patch);
               saveConfig(this.config, this.configPath);
