@@ -11,7 +11,7 @@
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test \"dist/tests/*.test.js\"",
+    "test": "npm run build && node --test dist/tests/*.test.js",
     "test:e2e": "npm run build && node --test dist/tests/e2e.test.js"
   },
   "engines": {
