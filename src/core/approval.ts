@@ -98,6 +98,48 @@ const BLOCKED_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\b(\w+)\s*\(\s*\)\s*\{\s*\1\s*[|]\s*\1\s*[&]\s*\}\s*;\s*\1/i, 'fork bomb (fungsi kustom)'],
   // Redirect (>, >>) ke perangkat disk — echo x > /dev/sda, cat y >> /dev/nvme0n1
   [/>{1,2}\s*\/dev\/(sd|nvme|hd|disk)\S*/i, 'redirect ke perangkat disk'],
+
+  // ───────────────────────────────────────────────────────────────────────
+  // FASE C (v1.9.0) — PowerShell / Windows BLOCKED patterns (ADDITIVE ONLY).
+  // Append ke daftar existing; chainedSegments, ranking risk, dan logika
+  // Guardian TIDAK diubah. Semua pattern case-insensitive + word-boundary.
+  //
+  // SCOPE ANTI-BENTURAN UNIX (desain eksplisit):
+  //  - Alias `rm`/`ri`/`rd` hanya match dengan LONG-FORM `-Recurse` (token
+  //    yang bukan flag Unix rm) ATAU path drive Windows (di DANGEROUS).
+  //    Short-form `-r` / `-rf` TIDAK ditambahkan — deteksi Unix rm existing
+  //    (generic DANGEROUS + critical BLOCKED) tetap persis seperti sebelumnya.
+  //  - `remove-item`, `format-volume`, dll. adalah token berhyphen yang tidak
+  //    ada di command Unix mana pun.
+  //  - `iex` di-scope ke posisi eksekusi (awal segmen / setelah `;|&`) —
+  //    BUKAN generic string match, agar `grep iex file` tetap NONE.
+  //  - Catatan fail-safe: `rmdir a/b/s` (Unix, dir bernama "s") ikut ter-block
+  //    oleh pattern `\/s` — tetap aman karena `rmdir` sudah minimal DANGEROUS
+  //    di deteksi existing.
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Remove-Item DENGAN -Recurse (hapus rekursif PowerShell) — BLOCKED.
+  // `[^\n;&|]*` membatasi pencarian flag dalam satu segmen; urutan flag bebas
+  // (Remove-Item -Path C:\x -Recurse juga tertangkap).
+  [/\bremove-item\b[^\n;&|]*\s-recurse\b/i, 'Remove-Item -Recurse (hapus rekursif PowerShell)'],
+  // Alias bawaan PowerShell `rm`/`ri`/`rd` + long-form -Recurse — BLOCKED.
+  // Sengaja TANPA short-form (-r/-rf): itu ranah deteksi Unix existing.
+  [/\b(?:rm|ri|rd)\b[^\n;&|]*\s-recurse\b/i, 'rm/ri/rd -Recurse (alias hapus rekursif PowerShell)'],
+  // Penghancur disk/volume/partisi Windows — BLOCKED (paritas mkfs/dd Unix).
+  [/\bformat-volume\b/i, 'Format-Volume (memformat volume Windows)'],
+  [/\bclear-disk\b/i, 'Clear-Disk (menghapus data disk Windows)'],
+  [/\bremove-partition\b/i, 'Remove-Partition (menghapus partisi Windows)'],
+  // iex / Invoke-Expression pada posisi EKSEKUSI — BLOCKED:
+  // awal segmen (^) atau tepat setelah separator ; | & (payload downstream
+  // tidak dapat diverifikasi regex). `grep iex file` TIDAK match (posisi argumen).
+  [/(?:^|[;&|])\s*&?\s*(?:iex|invoke-expression)\b/i, 'iex/Invoke-Expression pada posisi eksekusi (payload tak terverifikasi)'],
+  // cmd.exe recursive delete: del /s, rmdir /s, erase /s (+ rd alias /s) — BLOCKED.
+  // `/s` wajib token tersendiri (spasi sebelum), `/srv` Unix tidak match (\b).
+  [/\b(?:del|erase|rmdir|rd)\b[^\n;&|]*\s\/s\b/i, 'del/rmdir /s (hapus rekursif cmd.exe Windows)'],
+  // PowerShell dengan payload base64 terobfuskasi — BLOCKED.
+  // Di-scope: `-EncodedCommand`/`-enc` hanya berbahaya SETELAH token powershell/pwsh,
+  // sehingga tool Unix dengan flag -e (grep/perl) tidak terpengaruh.
+  [/\b(?:powershell|pwsh)(?:\.exe)?\b[^\n;&|]*-(?:enc|encodedcommand)\b/i, 'PowerShell -EncodedCommand (payload terobfuskasi base64)'],
 ];
 
 /** Ask-the-user patterns (dangerous but sometimes legitimate). */
@@ -125,6 +167,21 @@ const DANGEROUS_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\btruncate\b/i, 'truncate (pengosongan/pemotongan ukuran file)'],
   [/\bshred\b/i, 'shred (penghancuran file/disk secara permanen)'],
   [/\bwipefs\b/i, 'wipefs (penghapusan signature filesystem)'],
+
+  // ───────────────────────────────────────────────────────────────────────
+  // FASE C (v1.9.0) — PowerShell / Windows DANGEROUS patterns (ADDITIVE
+  // ONLY). Paritas dengan Unix existing: Remove-Item apa pun = paritas
+  // `rm` (DANGEROUS); bentuk -Recurse sudah lebih dulu tertangkap BLOCKED
+  // di atas (BLOCKED selalu dicek sebelum DANGEROUS di detectRisk).
+  // ───────────────────────────────────────────────────────────────────────
+  [/\bremove-item\b/i, 'Remove-Item (hapus file/objek PowerShell)'],
+  [/\b(?:clear-content|remove-content)\b/i, 'Clear-Content/Remove-Content (mengosongkan isi file)'],
+  [/\b(?:stop-computer|restart-computer|clear-eventlog)\b/i, 'Stop-Computer/Restart-Computer/Clear-EventLog (gangguan sistem Windows)'],
+  [/\binvoke-expression\b/i, 'Invoke-Expression (eksekusi string sebagai kode)'],
+  // rm/ri/rd + path drive Windows (C:\, D:/) — DANGEROUS (paritas `rm <path>`).
+  // Unix rm dengan target `C:\x` sudah DANGEROUS via generic pattern existing;
+  // klasifikasi tetap DANGEROUS (tidak ada perubahan verdict untuk Unix).
+  [/\b(?:rm|ri|rd)\s+"?[A-Za-z]:[\\/]/i, 'rm/ri/rd ke path drive Windows'],
 ];
 
 /** High-risk dangerous patterns that can cause irreversible data loss or disruption (Tugas 12). */

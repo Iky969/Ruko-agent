@@ -1,7 +1,10 @@
 import { execFile } from 'node:child_process';
+import { join } from 'node:path';
 import { ExecResult } from '../types.js';
 import { summarizeLog } from './summarizer.js';
 import { sanitizeTerminalOutput } from './ui.js';
+// Fase D (v1.9.0): satu sumber kebenaran pemilihan shell (envProfile.shellFamily).
+import { getEnvProfile, type EnvProfile } from './env.js';
 
 export interface ExecOptions {
   timeoutMs?: number;
@@ -36,6 +39,87 @@ const DANGEROUS_ENV_VARS = new Set([
   'BASH_RCFILE', // alternative bash rc file
 ]);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Fase D (v1.9.0) — Shell selection: SATU sumber kebenaran.
+//
+// Pemilihan shell binary kini hanya lewat `resolveShellSelection()` yang membaca
+// `envProfile.shellFamily` (EnvProfile dari Fase A). TIDAK ada lagi cek
+// `process.platform`/flavor tersebar di banyak tempat.
+//
+// KONTRAK NON-WIN32 (linux/darwin/wsl/colab/ci/unknown): BIT-IDENTIK dengan
+// perilaku sebelum Fase D — binary `/bin/sh`, args `['-c', command]`. Flavor
+// TIDAK mengubah pemilihan shell: Termux pun tetap `/bin/sh` (PATH `$PREFIX/bin`
+// adalah urusan environment shell; resolusi skrip eksplisit lewat
+// `resolveTermuxBin()` di bawah — no-op untuk environment lain).
+//
+// WIN32 (TAMBAHAN pilihan, perilaku cmd existing dipertahankan):
+//  - shellFamily 'cmd'        → ComSpec (fallback cmd.exe) + ['/d','/s','/c', cmd].
+//    Delta terdokumentasi: ComSpec kosong/whitespace kini fallback ke cmd.exe
+//    (sebelumnya string kosong/whitespace dipakai mentah).
+//  - shellFamily 'powershell' → powershell.exe (atau path pwsh bila ComSpec
+//    menunjuk pwsh.exe — PS7 terdeteksi) dengan flags:
+//    `-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command`.
+//    SCOPE FLAGS: hanya berlaku untuk PROSES powershell child yang di-spawn
+//    Ruko ini (process-scoped) — execution policy sistem/machine/user TIDAK
+//    diubah. -NoProfile mencegah profil user dieksekusi; -NonInteractive
+//    mencegah prompt interaktif menggantung proses; -ExecutionPolicy Bypass
+//    agar tidak terhambat policy default Windows pada sesi child ini saja.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ShellSelection {
+  /** Shell binary (path atau nama). */
+  binary: string;
+  /** Argumen SEBELUM `command`; command selalu menjadi elemen terakhir args. */
+  argsPrefix: string[];
+}
+
+/**
+ * Resolves shell binary + prefix args dari `envProfile.shellFamily`.
+ * Pure — menerima profile & env eksplisit agar mudah dites.
+ */
+export function resolveShellSelection(
+  profile: EnvProfile,
+  env: NodeJS.ProcessEnv = process.env,
+): ShellSelection {
+  if (profile.os === 'win32') {
+    if (profile.shellFamily === 'powershell') {
+      const comspec = env.ComSpec?.trim() ?? '';
+      // ComSpec menunjuk pwsh(.exe) → pakai path itu (PowerShell 7 terdeteksi).
+      const isPwsh = /pwsh(?:\.exe)?$/i.test(comspec);
+      return {
+        binary: isPwsh ? comspec : 'powershell.exe',
+        argsPrefix: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command'],
+      };
+    }
+    const comspec = env.ComSpec?.trim();
+    return { binary: comspec ? comspec : 'cmd.exe', argsPrefix: ['/d', '/s', '/c'] };
+  }
+  // non-win32: kontrak bit-identik dengan kode sebelum Fase D.
+  return { binary: '/bin/sh', argsPrefix: ['-c'] };
+}
+
+/** Gabungan selection + command → argumen final untuk spawn. */
+export function buildShellInvocation(
+  profile: EnvProfile,
+  command: string,
+  env: NodeJS.ProcessEnv = process.env,
+): { binary: string; args: string[] } {
+  const sel = resolveShellSelection(profile, env);
+  return { binary: sel.binary, args: [...sel.argsPrefix, command] };
+}
+
+/**
+ * Termux: resolve nama skrip/binari telanjang terhadap `$PREFIX/bin`
+ * (`profile.pathPrefix`). No-op untuk environment lain (flavor !== 'termux') —
+ * path resolution environment lain TIDAK berubah. Nama yang sudah mengandung
+ * separator (path eksplisit) dibiarkan apa adanya.
+ */
+export function resolveTermuxBin(script: string, profile: EnvProfile): string {
+  if (profile.flavor !== 'termux' || !profile.pathPrefix) return script;
+  if (!script || script.includes('/') || script.includes('\\')) return script;
+  return join(profile.pathPrefix, 'bin', script);
+}
+
 /**
  * Runs a shell command and returns its output, exit code and duration.
  *
@@ -61,9 +145,11 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
     // Interleaved stream chunk collection for true sequential ordering of stdout & stderr
     const interleavedChunks: string[] = [];
 
-    const isWindows = process.platform === 'win32';
-    const shellBinary = isWindows ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh';
-    const shellArgs = isWindows ? ['/d', '/s', '/c', command] : ['-c', command];
+    // Fase D: shell dipilih dari SATU sumber kebenaran (envProfile.shellFamily).
+    // Non-win32 hasilnya bit-identik dengan perilaku lama: /bin/sh + ['-c', command].
+    const shellSelection = resolveShellSelection(getEnvProfile());
+    const shellBinary = shellSelection.binary;
+    const shellArgs = [...shellSelection.argsPrefix, command];
 
     const child = execFile(
       shellBinary,

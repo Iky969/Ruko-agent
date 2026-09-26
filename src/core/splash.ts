@@ -1,42 +1,34 @@
 /**
- * Ruko entry splash — aquarium animation (anim.js) + box layout (anim.txt).
+ * splash.ts — Banner maskot Ruki (v1.9.0). Pengganti aquarium/fish animation.
  *
- * Sequence on a real TTY (normal buffer, cursor hidden during frames):
- *   1. Aquarium scene plays inside the box — water ripples on the surface,
- *      bubbles rising, three fish swimming back and forth (tails flicking),
- *      sandy bottom and swaying plants. Same logic as anim.js, 110 ms frames,
- *      redrawn in place via the shared `createInPlaceBlock` helper.
- *   2. The scene freezes and the text sweeps in left-to-right:
+ * PERUBAHAN v1.9.0:
+ *  - Animasi ikan (aquarium loop, ikan `><>`, text sweep, hide/show cursor)
+ *    DIHAPUS TOTAL. Tidak ada lagi loop frame / delay bertingkat; CLI langsung
+ *    tampil bersih. Karena tidak ada timer sama sekali, tidak ada setInterval
+ *    yang bisa tertinggal menggantung (memory leak impossible by design).
+ *  - Banner baru: maskot Ruki di kiri (`> _ <`, `/// ///`, `RUKO-AGENT`) +
+ *    panel info di kanan (model/provider/mode/env/status), digambar sekali
+ *    sebagai box unicode `╭─╮│╰─╯` dan langsung commit ke scrollback.
  *
- *        ┌Ruko-agent────────────────version 0.6.0─────┐
- *        │                                             │
- *        │  "Masuk Ruko..."                            │
- *        │                                             │
- *        │  model: claude-5 ──── provider: custom       │
- *        │                                             │
- *        │  Ketik / untuk daftar perintah, Ctrl+C keluar│
- *        └─────────────────────────────────────────────┘
- *
- *   3. The final box is committed to scrollback.
- *
- * Non-TTY, CI, NO_COLOR, or RUKO_NO_ANIM=1 skip straight to the static print
- * so tests and pipes stay deterministic.
+ * Aturan render (sesuai konvensi existing):
+ *  - Lebar >= 48 kolom  → banner penuh (maskot + panel info).
+ *  - Lebar < 48 kolom   → versi ringkas TANPA maskot (Termux 40 kolom aman,
+ *    tidak wrap). Deteksi lebar sama dengan konvensi status bar Fase B.
+ *  - isInteractiveTTY === false (piped/CI/non-interaktif, dari EnvProfile
+ *    Fase A/B) → versi teks polos SATU BARIS saja, tanpa box ASCII penuh.
+ *  - RUKO_NO_ANIM=1     → tetap banner statis (tidak ada animasi sejak v1.9.0);
+ *  - NO_COLOR           → warna otomatis hilang (konvensi ui.ts `colorsEnabled`).
  */
 
-import { colorsEnabled, createInPlaceBlock, padVisible, stripAnsi, terminalWidth, truncateVisible, visibleLength } from './ui.js';
-
-/** The three fish shades from anim.js (93 bright yellow, 96 cyan, 95 grey). */
-const FISH_COLORS = [93, 96, 95];
-
-/** Aquarium scene height in rows: surface, 3 swim lanes, sandy bottom. */
-const SCENE_ROWS = 5;
+import { colorsEnabled, dim, green, cyan, stripAnsi, terminalWidth, truncateVisible, visibleLength, padVisible } from './ui.js';
+import { getEnvProfile } from './env.js';
 
 export interface SplashInfo {
   /** Header line, e.g. `Ruko-agent 0.6.0`. */
   title: string;
   /** Right-aligned header text, e.g. `version 0.6.0`. */
   version: string;
-  /** Centre tagline shown while the splash animates. */
+  /** Centre tagline (dipakai di versi sempit). */
   tagline: string;
   /** Model name or formatted line, e.g. `claude-3-5-sonnet-20241022`. */
   model?: string;
@@ -48,227 +40,174 @@ export interface SplashInfo {
   hint: string;
 }
 
-const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 /**
  * Total box width (incl. borders): clamped to `terminalWidth() - 1`. A box
- * exactly as wide as the terminal triggers the pending-wrap glitch and its
- * borders pile up as separate rows (feedback v0.6.1 — the splash bug, again).
+ * exactly as wide as the terminal triggers the pending-wrap glitch (borders
+ * pile up as separate rows) — the recurring splash bug this clamp prevents.
  */
 export function splashWidth(): number {
   return Math.max(20, Math.min(56, terminalWidth() - 1));
 }
 
+/** True when the (static) full banner may use colours; kept for tests/compat. */
+export function splashAnimatable(): boolean {
+  return colorsEnabled() && !!process.stdout.isTTY && !!process.stdin.isTTY && process.env.RUKO_NO_ANIM !== '1';
+}
+
+/** Maskot Ruki — baris-baris ASCII murni (tanpa warna). */
+const RUKI_ART: readonly string[] = [
+  '     ●      ',
+  '     │      ',
+  ' ╭───┴────╮ ',
+  ' │  > _ < │ ',
+  ' │ /// ///│ ',
+  ' │RUKO-AGENT',
+  ' ╰────────╯ ',
+];
+
 /**
- * Builds the static splash box lines (no trailing newline). Padding uses
- * visible width so ANSI-coloured fields never break the borders. Default
- * width follows the terminal (was a fixed 56 — the root cause of the
- * wrapping splash on narrow terminals).
+ * Panel info banner: pasangan label→nilai (sudah diformat).
+ * Export untuk pengujian.
  */
-export function renderSplashLines(info: SplashInfo, width = splashWidth()): string[] {
-  const inner = Math.max(10, width - 2);
-
-  let headerText = '';
-  const titleWithSpace = ` ${info.title}`;
-  const versionWithSpace = `${info.version} `;
-  const needed = visibleLength(titleWithSpace) + visibleLength(versionWithSpace);
-  if (inner >= needed) {
-    headerText = padVisible(titleWithSpace, inner - visibleLength(versionWithSpace)) + versionWithSpace;
-  } else if (inner >= visibleLength(titleWithSpace) + 1) {
-    headerText = padVisible(titleWithSpace, inner);
-  } else {
-    headerText = truncateVisible(titleWithSpace, inner);
-  }
-
-  const top = `┌${headerText}┐`;
-  const blank = `│${' '.repeat(inner)}│`;
-  const centre = (text: string): string => {
-    const t = truncateVisible(text, inner);
-    const pad = Math.max(0, Math.floor((inner - visibleLength(t)) / 2));
-    return `│${' '.repeat(pad)}${padVisible(t, inner - pad)}│`;
-  };
-  const bottom = `└${'─'.repeat(inner)}┘`;
-
-  let modelStr = info.model ? (info.model.startsWith('model:') ? info.model : `model: ${info.model}`) : '';
-  let providerStr = info.provider ? (info.provider.startsWith('provider:') ? info.provider : `provider: ${info.provider}`) : '';
-
-  if (!modelStr && !providerStr && info.modelLine) {
+export function buildRukiInfoRows(info: SplashInfo): Array<{ label: string; value: string }> {
+  const rows: Array<{ label: string; value: string }> = [];
+  let model = info.model;
+  let provider = info.provider;
+  // Legacy format kompatibel: `model: x ──── provider: y` dipecah jadi dua baris
+  // (perilaku sama dengan renderer splash lama).
+  if (!model && !provider && info.modelLine) {
     const splitMatch = info.modelLine.match(/^(.*?)\s+[─\-—]{2,}\s+(.*?)$/i);
     if (splitMatch) {
-      const p1 = splitMatch[1].trim();
-      const p2 = splitMatch[2].trim();
-      modelStr = p1.startsWith('model:') ? p1 : `model: ${p1}`;
-      providerStr = p2.startsWith('provider:') ? p2 : `provider: ${p2}`;
+      model = splitMatch[1].trim();
+      provider = splitMatch[2].trim();
     } else {
-      modelStr = info.modelLine;
+      model = info.modelLine;
     }
   }
-
-  const lines: string[] = [
-    top,
-    blank,
-    centre(info.tagline),
-    blank,
-  ];
-
-  if (modelStr) {
-    lines.push(centre(modelStr));
-  }
-  if (providerStr) {
-    lines.push(centre(providerStr));
-  }
-
-  lines.push(blank);
-  // Responsive hint: short version for narrow terminals to avoid over-truncation
-  let hintText = info.hint;
-  if (inner < 35) {
-    // Very narrow: use compact hint
-    if (hintText.includes('Ketik /')) {
-      hintText = 'Ketik / untuk bantuan';
-    } else if (hintText.length > inner) {
-      hintText = hintText.slice(0, Math.max(10, inner - 1)) + '…';
-    }
-  } else if (inner < 45 && hintText.length > inner) {
-    // Narrow: slightly shorter
-    hintText = hintText.replace('Ctrl+C untuk keluar', 'Ctrl+C keluar');
-  }
-  lines.push(centre(hintText));
-  lines.push(bottom);
-
-  return lines;
-}
-
-/** True when the animated splash may run in this environment. */
-export function splashAnimatable(): boolean {
-  return (
-    colorsEnabled() &&
-    !!process.stdout.isTTY &&
-    !!process.stdin.isTTY &&
-    process.env.RUKO_NO_ANIM !== '1'
-  );
-}
-
-function paint(text: string, color: number): string {
-  return `\u001b[${color}m${text}\u001b[0m`;
-}
-
-/**
- * One aquarium frame as a grid of painted cells (anim.js `put`/`rows` port).
- * Cells hold ANSI-painted characters; empty cells are plain spaces.
- */
-function sceneFrame(width: number, frame: number): string[][] {
-  const rows: string[][] = Array.from({ length: SCENE_ROWS }, () =>
-    Array.from({ length: width }, () => ' '),
-  );
-
-  const put = (text: string, x: number, y: number, color: number): void => {
-    [...text].forEach((char, i) => {
-      if (y >= 0 && y < SCENE_ROWS && x + i >= 0 && x + i < width) {
-        rows[y][x + i] = paint(char, color);
-      }
-    });
-  };
-
-  // Riak permukaan air.
-  for (let x = 0; x < width; x++) {
-    put((x + Math.floor(frame / 3)) % 6 < 2 ? '~' : '.', x, 0, 34);
-  }
-
-  // Gelembung bergerak naik dan sedikit ke samping.
-  for (let i = 0; i < 5; i++) {
-    const age = (Math.floor(frame / 3) + i) % SCENE_ROWS;
-    const x = (i * 11 + 6 + (age % 2)) % width;
-    put(age > 1 ? 'o' : '.', x, SCENE_ROWS - 1 - age, 96);
-  }
-
-  // Ikan berbalik arah setelah keluar dari layar.
-  for (let i = 0; i < 3; i++) {
-    const span = width + 10;
-    const step = Math.floor(frame / (i + 1)) + i * 17;
-    const phase = step % (span * 2);
-    const right = phase < span;
-    const x = right ? phase - 9 : span * 2 - phase - 9;
-    const tail = Math.floor(frame / 2) % 2;
-    const fish = right
-      ? tail ? '><(((o>' : '}-(((o>'
-      : tail ? '<o)))><' : '<o)))-{';
-    put(fish, x, i + 1, FISH_COLORS[i]);
-  }
-
-  // Dasar akuarium dan tanaman bergoyang.
-  for (let x = 0; x < width; x++) {
-    put(x % 3 === 0 ? '.' : '_', x, SCENE_ROWS - 1, 90);
-  }
-  for (let x = 3; x < width - 2; x += 9) {
-    const sway = Math.floor(frame / 4 + x) % 2;
-    put(sway ? '(' : ')', x, SCENE_ROWS - 2, 32);
-    put(sway ? '\\|/' : '/|\\', x - 1, SCENE_ROWS - 1, 92);
-  }
-
+  // Nilai TANPA prefix label (label 'Model'/'Provider' sudah membawa makna).
+  if (model) rows.push({ label: 'Model', value: model.replace(/^model:\s*/i, '') });
+  if (provider) rows.push({ label: 'Provider', value: provider.replace(/^provider:\s*/i, '') });
+  rows.push({ label: 'Env', value: envSummary() });
+  rows.push({ label: 'Status', value: '● Safe at Local' });
   return rows;
 }
 
-/** Wraps scene rows in the box border with the given header/bottom. */
-function framed(width: number, header: string, bottom: string, scene: string[][]): string[] {
-  const inner = width - 2;
-  const top = `┌${truncateVisible(header, inner)}┐`;
-  const body = scene.map((row) => `│${truncateVisible(row.join(''), inner)}│`);
-  return [top, ...body, bottom];
+/** Ringkasan lingkungan dari EnvProfile (Fase A/B) — satu sumber kebenaran. */
+function envSummary(): string {
+  const env = getEnvProfile();
+  const flavor = env.flavor !== 'none' ? `${env.flavor} ` : '';
+  return `${flavor}${env.isInteractiveTTY ? '(interactive)' : '(non-interactive)'}`.trim() || 'local';
 }
 
 /**
- * Plays the aquarium splash and commits the final text box to scrollback
- * afterwards. Returns the static lines either way.
+ * Baris header box `╭─ Title ──── version ─╮` dengan panjang pas `inner + 2`.
+ * Header di-share dua renderer agar lebar border selalu konsisten.
+ */
+function headerLine(title: string, version: string, inner: number): string {
+  const versionText = stripAnsi(version).trim();
+  const reserved = visibleLength(versionText) + 6; // '─ ' + ' ' + dashes(≥1) + ' ' + ' ─'
+  const titleText = truncateVisible(stripAnsi(title), Math.max(4, inner - reserved));
+  const dashCount = Math.max(1, inner - visibleLength(titleText) - visibleLength(versionText) - 6);
+  return `╭─ ${titleText} ${'─'.repeat(dashCount)} ${versionText} ─╮`;
+}
+
+/**
+ * Banner maskot Ruki penuh (>= 48 kolom). Semua baris di-clamp ke `width`
+ * sehingga tidak pernah melebihi terminal.
+ */
+export function renderRukiBannerLines(info: SplashInfo, width = splashWidth()): string[] {
+  const inner = Math.max(10, width - 2);
+  const top = headerLine(info.title, info.version, inner);
+  const blank = `│${' '.repeat(inner)}│`;
+  const row = (text: string): string => {
+    const t = truncateVisible(text, inner);
+    return `│ ${padVisible(t, inner - 2)} │`;
+  };
+
+  // Panel info kanan: label rata kiri + nilai.
+  const infoRows = buildRukiInfoRows(info).map((r) => `${r.label.padEnd(9)}: ${r.value}`);
+  const artLines = RUKI_ART.map((l) => l.padEnd(13));
+
+  const lines: string[] = [top, blank];
+  const rows = Math.max(RUKI_ART.length, infoRows.length);
+  for (let i = 0; i < rows; i++) {
+    const art = artLines[i] ?? ' '.repeat(13);
+    const info = infoRows[i] ?? '';
+    const left = green(art);
+    const right = info
+      ? `${dim((info.split(':')[0] ?? '').padEnd(10))}${cyan(info.slice(info.indexOf(':') + 1).trim())}`
+      : '';
+    lines.push(row(`${left}  ${right}`));
+  }
+  lines.push(blank);
+  lines.push(row(` ${dim(info.hint)}`));
+  lines.push(`╰${'─'.repeat(inner)}╯`);
+
+  // Clamp defensif: semua baris tidak boleh melebihi `width`.
+  return lines.map((l) => truncateVisible(l, width));
+}
+
+/**
+ * Versi ringkas (< 48 kolom): tanpa maskot, hint ringkas, tetap box unicode
+ * kecil supaya tetap khas Ruko tapi aman di Termux 40 kolom.
+ */
+export function renderRukiCompactLines(info: SplashInfo, width = splashWidth()): string[] {
+  const inner = Math.max(10, width - 2);
+  const top = headerLine(info.title, info.version, inner);
+  const row = (text: string): string => {
+    const t = truncateVisible(text, inner);
+    const pad = Math.max(0, inner - 2 - visibleLength(t));
+    return `│ ${t}${' '.repeat(pad)} │`;
+  };
+
+  const infoRows = buildRukiInfoRows(info);
+  const lines: string[] = [top];
+  for (const r of infoRows) {
+    lines.push(row(`${r.label}: ${r.value}`));
+  }
+  // Hint ringkas (konvensi responsive hint splash lama).
+  let hintText = info.hint;
+  if (inner < 40) hintText = 'Ketik / untuk bantuan';
+  else if (inner < 45) hintText = hintText.replace('Ctrl+C untuk keluar', 'Ctrl+C keluar');
+  lines.push(row(hintText));
+  lines.push(`╰${'─'.repeat(inner)}╯`);
+  return lines.map((l) => truncateVisible(l, width));
+}
+
+/** Satu baris teks polos untuk piped/CI/non-interaktif (isInteractiveTTY=false). */
+export function renderRukiPlainLine(info: SplashInfo): string {
+  const parts: string[] = [stripAnsi(info.title)];
+  if (info.model) parts.push(`model=${info.model}`);
+  if (info.provider) parts.push(`provider=${info.provider}`);
+  parts.push(`env=${envSummary()}`);
+  return parts.join(' · ');
+}
+
+/**
+ * Menampilkan banner pembuka. TANPA animasi — semuanya statis & sinkron dari
+ * sisi rendering (fungsi async dipertahankan demi kompatibilitas pemanggil).
  *
- * v0.6.1: redraw goes through the SHARED `createInPlaceBlock` helper on the
- * NORMAL buffer (was: alternate screen + hand-rolled `ESC[H` frame loop).
- * Two reasons: (a) the alt screen made the animation invisible on terminals
- * that don't restore it cleanly (feedback #6 "animasi gak muncul"), and (b)
- * the hand-rolled loop was a second box renderer whose frames could exceed
- * the terminal width and pile up as separate rows — the same stacking bug as
- * the splash text box. Every frame line is now clamped to `width` ≤
- * `terminalWidth()-1`, so the rewind math can never break.
+ * Aturan (urutan prioritas):
+ *   1. isInteractiveTTY === false (EnvProfile) → satu baris teks polos.
+ *   2. lebar terminal < 48 kolom               → versi ringkas tanpa maskot.
+ *   3. selain itu                              → banner maskot Ruki penuh.
+ * NO_COLOR / RUKO_NO_ANIM memengaruhi warna (konvensi ui.ts) — animasi tidak
+ * ada lagi sejak v1.9.0.
  */
 export async function playSplash(info: SplashInfo): Promise<string[]> {
+  const env = getEnvProfile();
+
+  // 1. Piped / CI / non-interaktif → teks polos satu baris (tanpa box penuh).
+  if (!env.isInteractiveTTY) {
+    const line = renderRukiPlainLine(info);
+    console.log(line);
+    return [line];
+  }
+
+  // 2/3. Banner statis: penuh pada terminal lega, ringkas pada sempit.
   const width = splashWidth();
-  const textLines = renderSplashLines(info, width);
-  if (!splashAnimatable()) {
-    console.log(textLines.join('\n'));
-    return textLines;
-  }
-
-  const SCENE_MS = 1800; // aquarium swims before the text arrives
-  const REVEAL_MS = 900; // left-to-right text sweep
-  const FRAME_MS = 110; // same cadence as anim.js
-
-  const inner = width - 2;
-  const header = textLines[0].slice(1, -1);
-  const bottom = textLines[textLines.length - 1];
-  const textPlain = textLines.map(stripAnsi);
-
-  const block = createInPlaceBlock();
-  process.stdout.write('\u001b[?25l'); // hide cursor while frames redraw
-  const started = Date.now();
-  // Phase 1 — aquarium swims in place.
-  for (let frame = 0; Date.now() - started < SCENE_MS; frame++) {
-    block.draw(framed(width, header, bottom, sceneFrame(inner, frame)));
-    await delay(Math.max(0, FRAME_MS - ((Date.now() - started) % FRAME_MS)));
-  }
-  // Phase 2 — text sweeps in left-to-right over the frozen frame.
-  const revealStart = Date.now();
-  for (;;) {
-    const elapsed = Date.now() - revealStart;
-    const reveal = Math.min(1, elapsed / REVEAL_MS);
-    block.draw(
-      textPlain.map((row) => row.slice(0, Math.ceil(row.length * reveal))),
-    );
-    if (reveal >= 1) break;
-    await delay(Math.max(0, 40 - (elapsed % 40)));
-  }
-  await delay(350);
-  // Erase the animation, restore the cursor, then commit the final static box once.
-  block.clear();
-  process.stdout.write('\u001b[?25h');
-  console.log(textLines.join('\n'));
-  return textLines;
+  const isNarrow = width < 48; // konvensi status bar Fase B (isNarrow boundary)
+  const lines = isNarrow ? renderRukiCompactLines(info, width) : renderRukiBannerLines(info, width);
+  console.log(lines.join('\n'));
+  return lines;
 }
