@@ -2,6 +2,57 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### v1.8.0 (26 September 2026) — UI Overhaul 6 Fase (/mode, /reasoning, Panel Thinking, Diff Ringkas, Status Bar, Placeholder) & Fix Loop Detector Non-Streaming
+
+#### Ditambahkan & Diperbarui
+- **FASE 1 — Command `/mode` (Popup Selector + Hook Loop Detector via Parameter Injection)**:
+  * Popup selector `/mode` terintegrasi LineEditor/input loop existing: navigasi ↑/↓, Enter konfirmasi, Esc batal tanpa side effect, input chat diblok saat popup terbuka.
+  * Pilihan: Default, Research, Code, Build — deskripsi 1 baris per opsi saat di-highlight.
+  * State `mode` in-memory di `SessionState` (`src/types.ts`), reset ke Default tiap sesi baru (`/new`), tidak ditulis ke config.json.
+  * Efek ke loop detector murni parameter injection per-sesi (algoritma inti deteksi tidak diubah):
+    - Research: `readOnlyRelaxed` — threshold dinaikkan khusus whitelist read-only resmi (`read_file`, `glob`, `list_dir`, `code_search`, `read_process_logs`).
+    - Code: threshold default tanpa pengecualian.
+    - Build: `buildPhase: 'explore' | 'mutate'` per sesi; transisi PERMANEN ke 'mutate' pada tool mutating pertama (`write_file`, `edit_file`, `patch_file`, `delete_file`, `exec`).
+  * Test: `src/tests/mode_fase1.test.ts` (navigasi popup, cancel, reset per sesi, loop detector menghormati threshold per mode).
+- **FASE 2 — Command `/reasoning` (Popup + Wiring Nyata ke Provider di `src/agent/llm.ts`)**:
+  * Popup selector serupa `/mode` (↑/↓ + deskripsi); pilihan High / XHigh / Max / Extreme; default sesi baru: XHigh.
+  * Mapping parameter native per provider:
+    - OpenAI-compatible: top-level `reasoning_effort` (clamped ke enum API: 'high' | 'xhigh' | 'max'; Extreme → 'max').
+    - Anthropic: top-level `thinking: { type: 'enabled', budget_tokens }` (4096/8192/16384/32768) + guard `max_tokens > budget_tokens` (+1024).
+    - Gemini: top-level `thinkingConfig: { thinkingBudget }` (clamped 0–24576; Extreme di-clamp dari 32768).
+  * Fallback prompt injection (`reasoningPromptAddendum()`, template per level) otomatis saat provider tidak mendukung atau menolak parameter (HTTP 400) — request TIDAK pernah gagal, fallback di-log sekali level debug, state UI/status bar tetap tersimpan.
+  * State per-sesi, reset ke default tiap sesi baru. Test: `src/tests/reasoning_fase2.test.ts` (verifikasi payload per provider, clamp, guard, fallback).
+- **FASE 3 — Panel Reasoning/Thinking Terpisah + Buffer Streaming (`src/core/ui.ts`, `src/agent/agent.ts`)**:
+  * Class `ReasoningPanel`: section box terpisah bergaya `─ Reasoning (collapsed) ▼ ─` yang tidak mencampur log tool call.
+  * Default COLLAPSED: `Thought for Xs (Y tokens)` — `Y tokens` hanya dicetak bila tersedia dari API usage; jika null cukup `Thought for Xs`.
+  * Toggle expand/collapse via `Ctrl+R` (dibajak di `LineEditor` `src/core/tui.ts`, diteruskan via callback `onToggleReasoning` dari `src/core/loop.ts`; tidak menimpa Ctrl+O activity tray).
+  * Buffer streaming: render per-baris selesai (newline) dengan throttle waktu 100ms — per-baris menjaga blok logis reasoning utuh dan tidak terpotong di tengah kata; throttle 100ms mencegah banjir redraw ANSI pada chunk SSE kecil tanpa terasa lag.
+  * Test: `src/tests/reasoning_panel_fase3.test.ts`.
+- **FASE 4 — Diff Ringkas untuk `write_file`, `edit_file`, `patch_file` (modul baru `src/core/diffui.ts`)**:
+  * Semua tool mutasi berkas menampilkan ringkasan `✍️ <tool> <nama_file>   +N -M   Xs` (N hijau, M merah, durasi dim) di depan detail.
+  * Detail diff default COLLAPSED dengan hint `[ctrl+d untuk expand/collapse]`; toggle expand/collapse via `Ctrl+D` — alternatif yang TIDAK menimpa `Ctrl+O` (sudah dipakai activity tray). EOF-with-empty-buffer bawaan Ctrl+D dipindah ke `Ctrl+Q`.
+  * Kabel data: `writeWithDiff` (`src/agent/tools.ts`) memancarkan baris ter-enkode marker form-feed (`\f<JSON payload>\f<render>`) via `onLog`; parser UI mengenali baris ini secara eksplisit (bukan heuristik emoji) sehingga isi berkas biasa yang memuat `✍️` tidak pernah salah terdeteksi.
+  * Angka N/M dihitung `countDiffLines()` dengan algoritma diff LCS yang SAMA dengan renderer (`src/core/diff.ts`) — selalu cocok dengan diff aktual saat block di-expand; payload JSON membawa oldText/newText sehingga Ctrl+D me-render ulang block persis tanpa baca disk ulang.
+  * Test wajib terpenuhi: `src/tests/diff_fase4.test.ts` + `src/tests/diff_fase4_agent.test.ts` (assertion N/M selalu cocok dengan baris +/− diff aktual).
+- **FASE 5 — Background Task & Info Model Dipisah dari Status Bar (`src/core/ui.ts`, `src/core/activity.ts`, `src/core/loop.ts`)**:
+  * Info model dan task background tidak lagi menumpuk di kotak Terminal utama.
+  * Hint tray `-- N more, ctrl+o to expand` hanya muncul bila task background aktif ≥ 2 (satu task tunggal tidak pernah menampilkan hint); handler `Ctrl+O` existing di `src/core/activity.ts` tetap dipakai.
+  * Indikator `mode:<aktif>  reasoning:<level>` pada status bar & status panel responsif (turun prioritas di layar sempit sebelum model terpotong; field opsional).
+  * Test: `src/tests/fase5_statusbar.test.ts`.
+- **FASE 6 — Placeholder Input Field & Lokalisasi (`src/core/tui.ts`, `src/core/ui.ts`, `src/core/loop.ts`)**:
+  * Teks default placeholder diubah ke Bahasa Indonesia: `"/? untuk bantuan, tanya apa saja..."` (warna abu-abu/dim), konsisten di `STATUS_PANEL_HINT` dan `PROMPT_HINT`.
+  * Placeholder hilang total saat karakter pertama diketik dan muncul kembali saat buffer kosong (backspace/Ctrl+U), termasuk di ambient input saat AI bekerja.
+  * Test: `src/tests/fase6_placeholder.test.ts` (render state hilang-muncul).
+- **Fix Bug Loop Detector (Dedup Tool Call Non-Streaming)**:
+  * De-duplikasi tool call duplikat within-batch yang sebelumnya hanya aktif di jalur streaming kini berlaku juga pada jalur non-streaming, menutup celah loop agen di mode tanpa stream.
+  * Algoritma inti deteksi (idempotent cache, stream dedup, N-gram cycle detector) tidak diubah — hanya kualitas sinyal input yang diperbaiki.
+- **Rilis & Dokumentasi v1.8.0**:
+  * Minor bump `1.7.7` → `1.8.0` (fitur baru `/mode` dan `/reasoning`, bukan sekadar bugfix) di `package.json` dan `package-lock.json`.
+  * Update badge versi & jumlah test (901 passed) di `README.md`; ringkasan status akhir di `PROGRESS.md`.
+  * Full test suite final (bukan incremental): **901 passed, 0 failed**; e2e 1 passed; `tsc --noEmit` clean.
+
+---
+
 ### Final P0 Closure, CodeQL Remediation, & Supply-Chain Hardening (23 September 2026)
 
 #### Ditambahkan & Diperbarui

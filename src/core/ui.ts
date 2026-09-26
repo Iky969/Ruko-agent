@@ -7,6 +7,7 @@
  */
 
 import path from 'node:path';
+import { isFileMutationLogLine, stripMarker as stripMutationMarker } from './diffui.js';
 
 /**
  * Matches ANSI escape sequences: CSI with any parameter bytes (`?`, `<`, `=`,
@@ -461,6 +462,10 @@ export interface StatusBarInput {
   pending?: number;
   /** Active background processes. */
   activeProcesses?: Array<{ id?: string; command?: string }>;
+  /** Fase 5: mode sesi aktif — indikator `mode:<aktif>` di bar. */
+  mode?: string;
+  /** Fase 5: level reasoning aktif — indikator `reasoning:<level>` di bar. */
+  reasoning?: string;
 }
 
 /**
@@ -507,6 +512,9 @@ export function buildStatusBar(input: StatusBarInput): string {
     const yolo = input.yoloMode ? '[YOLO] · ' : '';
     const busy = input.busy ? '⏳ AI bekerja · ' : '';
     const role = input.role && input.role !== 'default' ? ` · ${input.role}` : '';
+    // Fase 5: indikator mode + reasoning ditempel setelah badge mode lain.
+    const modeInd = input.mode ? `mode:${input.mode} · ` : '';
+    const reasoningInd = input.reasoning ? `reasoning:${input.reasoning} · ` : '';
     const turn = input.turn
       ? ` · ↑${formatK(input.turn.promptChars)} ↓${formatK(input.turn.completionChars)}${input.turn.durationMs ? ` · ${formatDuration(input.turn.durationMs)}` : ''}`
       : '';
@@ -521,22 +529,22 @@ export function buildStatusBar(input: StatusBarInput): string {
     }
 
     // Try full string first
-    const full = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}ctx ${pct}%${detailCtx}${turn}${hint}${waiting}`;
+    const full = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}${modeInd}${reasoningInd}ctx ${pct}%${detailCtx}${turn}${hint}${waiting}`;
     if (visibleLength(full) <= targetWidth) {
       return onDarkGreen(full);
     }
     // Drop hint
-    const noHint = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}ctx ${pct}%${detailCtx}${turn}${waiting ? waiting : ' '}`;
+    const noHint = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}${modeInd}${reasoningInd}ctx ${pct}%${detailCtx}${turn}${waiting ? waiting : ' '}`;
     if (visibleLength(noHint) <= targetWidth) {
       return onDarkGreen(noHint);
     }
     // Drop turn stats
-    const noTurn = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}ctx ${pct}%${detailCtx}${waiting ? waiting : ' '}`;
+    const noTurn = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}${modeInd}${reasoningInd}ctx ${pct}%${detailCtx}${waiting ? waiting : ' '}`;
     if (visibleLength(noTurn) <= targetWidth) {
       return onDarkGreen(noTurn);
     }
     // Drop detailCtx
-    const noDetail = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}ctx ${pct}%${waiting ? waiting : ' '}`;
+    const noDetail = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}${modeInd}${reasoningInd}ctx ${pct}%${waiting ? waiting : ' '}`;
     if (visibleLength(noDetail) <= targetWidth) {
       return onDarkGreen(noDetail);
     }
@@ -634,7 +642,7 @@ export function shortModelName(model: string, maxLen = 16): string {
 }
 
 /** Default hint row printed inside the status panel (the input line's hint). */
-export const STATUS_PANEL_HINT = '/? for help, ask anything...';
+export const STATUS_PANEL_HINT = '/? untuk bantuan, tanya apa saja...';
 
 export interface StatusPanelInput {
   model: string;
@@ -655,6 +663,10 @@ export interface StatusPanelInput {
   processes?: number;
   /** Bottom hint row (defaults to `STATUS_PANEL_HINT`). */
   hint?: string;
+  /** Fase 5: mode sesi aktif (default/research/code/build) — indikator status bar. */
+  mode?: string;
+  /** Fase 5: level reasoning aktif (high/xhigh/max/extreme) — indikator status bar. */
+  reasoning?: string;
 }
 
 /**
@@ -663,7 +675,7 @@ export interface StatusPanelInput {
  *   ┌──────────┬──────┬─────────────┐
  *   │ gemini   │ YOLO │ ↑ 3.2kt ↓ 800t │
  *   ├──────────┴──────┴─────────────┤
- *   │ /? for help, ask anything...  │
+ *   │ /? untuk bantuan, tanya apa saja... │
  *   └───────────────────────────────┘
  *
  * Every horizontal run is computed from the live terminal width — there are no
@@ -688,6 +700,14 @@ export function buildStatusPanel(input: StatusPanelInput): string[] {
   if (input.pending && input.pending > 0) badges.push(yellow(`⏳${input.pending}`));
   if (input.processes && input.processes > 0) badges.push(dim(`⚙️${input.processes}`));
   if (input.role && input.role !== 'default') badges.push(dim(input.role));
+  // Fase 5: indikator `mode:<aktif>` + `reasoning:<level>` — selalu tampil,
+  // duty dim (kecuali non-default) agar panel tetap tenang.
+  if (input.mode) {
+    badges.push(input.mode !== 'default' ? cyan(`mode:${input.mode}`) : dim(`mode:${input.mode}`));
+  }
+  if (input.reasoning) {
+    badges.push(dim(`reasoning:${input.reasoning}`));
+  }
   const badgeCell = badges.join(' ');
 
   const statsCell = input.turn
@@ -1521,6 +1541,213 @@ export function renderReasoningBox(reasoning: string, width?: number): string {
 }
 
 export const formatReasoningBox = renderReasoningBox;
+
+/** Level expand/collapse panel reasoning (Fase 3). */
+export type ReasoningExpandMode = 'collapsed' | 'expanded';
+
+/**
+ * Panel Reasoning/Thinking terpisah (Fase 3) — section box sendiri yang
+ * TIDAK mencampur log tool call. Default COLLAPSED; toggle via Ctrl+R.
+ *
+ * Rute tampilan:
+ *  - `onLive`    : dipakai SAAT model masih berpikir — satu baris in-place
+ *                  (\r\u001b[2K) ala ThinkingTicker, hilang total saat beres.
+ *  - `onPermanent`: dipakai saat reasoning selesai — menghasilkan TEPAT SATU
+ *                  baris permanen (collapsed) atau box penuh (expanded).
+ *
+ * Alasan buffer streaming (Fase 3): render per-baris selesai DENGAN throttle
+ * waktu. Per-baris menjaga blok logis reasoning tetap utuh dan tidak terpotong
+ * di tengah kata; throttle 100ms mencegah banjir redraw ANSI pada chunk SSE
+ * kecil (jitter frame 10x lebih cepat dari refresh mata) tanpa terasa lag.
+ */
+export class ReasoningPanel {
+  private buffer = '';
+  private startTime = 0;
+  private finished = false;
+  private lastRenderMs = 0;
+  private renderedOnce = false;
+  private lastElapsedSec = 0;
+  private lastTokens: number | null = null;
+
+  constructor(
+    private readonly options: {
+      /** Output in-place saat reasoning masih berjalan (default stdout). */
+      onLive?: (line: string) => void;
+      /** Hook pembersih baris live (default: kirim '\r\u001b[2K' ke onLive/stdout). */
+      onClear?: () => void;
+      /** Output permanen saat reasoning selesai (default console.log). */
+      onPermanent?: (line: string) => void;
+      /** Pemilih mode expand/collapse (dipanggil ulang tiap render/toggle). */
+      getMode?: () => ReasoningExpandMode;
+      /** Throttle render live dalam ms (default 100). */
+      throttleMs?: number;
+      /** Width provider responsif (default terminalWidth()). */
+      width?: () => number;
+      /** Token usage reasoning dari API; return null jika tidak tersedia. */
+      getTokens?: () => number | null;
+    } = {},
+  ) {}
+
+  /** Dipanggil setiap reasoning dimulai (mendukung beberapa segmen per turn). */
+  start(): void {
+    if (this.finished && !this.buffer.trim()) {
+      // Segmen baru setelah segmen sebelumnya selesai di-permanenkan.
+      this.finished = false;
+      this.segmentEmitted = false;
+      this.renderedOnce = false;
+    }
+    if (this.finished) return;
+    this.startTime = Date.now();
+  }
+
+  feed(chunk: string): void {
+    if (!chunk) return;
+    if (this.finished) {
+      // Chunk baru setelah finish = segmen reasoning BARU pada turn yang sama
+      // (model bisa mengirim <thought> berkali-kali). Segmen sebelumnya sudah
+      // jadi baris/box permanen sendiri; mulai buffer segar.
+      this.finished = false;
+      this.segmentEmitted = false;
+      this.renderedOnce = false;
+      this.buffer = '';
+      this.startTime = Date.now();
+    }
+    if (!this.startTime) this.startTime = Date.now();
+    this.buffer += chunk;
+
+    const now = Date.now();
+    const throttle = this.options.throttleMs ?? 100;
+    if (!this.renderedOnce || now - this.lastRenderMs >= throttle) {
+      this.renderLive();
+    }
+  }
+
+  /** Toggle expand/collapse (Ctrl+R). Me-render ulang permanen jika sudah beres. */
+  toggle(mode?: ReasoningExpandMode): void {
+    this.expandMode = mode ?? (this.expandMode === 'expanded' ? 'collapsed' : 'expanded');
+    this.emitPermanentIfFinished();
+  }
+
+  private expandMode: ReasoningExpandMode = 'collapsed';
+
+  private getMode(): ReasoningExpandMode {
+    return this.options.getMode?.() ?? this.expandMode;
+  }
+
+  private writeLive(text: string): void {
+    if (this.options.onLive) this.options.onLive(text);
+    else process.stdout.write(text);
+  }
+
+  private clearLive(): void {
+    if (this.options.onClear) {
+      this.options.onClear();
+    } else {
+      this.writeLive('\r\u001b[2K');
+    }
+  }
+
+  private renderLive(): void {
+    this.renderedOnce = true;
+    this.lastRenderMs = Date.now();
+
+    const cols = this.options.width ? this.options.width() : terminalWidth();
+    const cleaned = this.buffer.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const prefix = '┌─ Reasoning: ';
+    const suffix = '...';
+    const overhead = prefix.length + suffix.length;
+    const maxSnippet = Math.max(10, cols - 1 - overhead);
+    const snippet = cleaned.length > maxSnippet ? cleaned.slice(-maxSnippet).trimStart() : cleaned;
+    const line = dim(`${prefix}${snippet}${suffix}`);
+    const clamped = truncateVisible(line, Math.max(10, cols - 2));
+    this.writeLive(`\r\u001b[2K${clamped}`);
+  }
+
+  /**
+   * Satu baris selesai (\n) atau reasoning berakhir. Permanen TEPAT SEKALI;
+   * bentuk tergantung mode: collapsed = satu baris ringkas, expanded = box.
+   */
+  finish(): string | null {
+    if (!this.buffer.trim()) {
+      this.finished = true;
+      this.startTime = 0;
+      return null;
+    }
+    // Segmen yang sudah di-permanenkan oleh finishSegment TIDAK di-render ulang.
+    if (this.segmentEmitted) return stripAnsi(this.lastPermanentLine ?? '');
+    this.finished = true;
+    this.lastElapsedSec = Math.max(0, (Date.now() - (this.startTime || Date.now())) / 1000);
+    // Token usage dari API (jika provider menyediakan); null = tidak tersedia.
+    this.lastTokens = this.options.getTokens?.() ?? null;
+    this.clearLive();
+    this.emitPermanent();
+    return stripAnsi(this.lastPermanentLine ?? '');
+  }
+
+  private lastPermanentLine: string | null = null;
+
+  /**
+   * Satu blok <thought> berakhir di tengah turn — segmen ini di-permanenkan
+   * sekarang (baris collapsed / box). Segmen berikutnya buka section baru.
+   */
+  finishSegment(): void {
+    if (this.segmentEmitted || !this.buffer.trim()) return;
+    this.finished = true;
+    this.lastElapsedSec = Math.max(0, (Date.now() - (this.startTime || Date.now())) / 1000);
+    this.lastTokens = this.options.getTokens?.() ?? null;
+    this.clearLive();
+    this.emitPermanent();
+    this.startTime = 0;
+  }
+
+  /** Bentuk baris permanen collapsed: "Thought for Xs" (+ "(Y tokens)" jika tersedia). */
+  collapsedLine(): string | null {
+    if (!this.buffer.trim()) return null;
+    const secNum = this.lastElapsedSec;
+    const secStr = secNum < 1
+      ? Math.max(0.1, Number(secNum.toFixed(1))).toString()
+      : secNum.toFixed(1).replace(/\.0$/, '');
+    const tokens = this.lastTokens;
+    const base = `• Thought for ${secStr}s`;
+    const detail = tokens != null ? ` (${tokens} tokens)` : '';
+    return dim(`${base}${detail}`);
+  }
+
+  private segmentEmitted = false;
+
+  private emitPermanent(): void {
+    const mode = this.getMode();
+    const line = mode === 'expanded'
+      ? renderReasoningBox(this.buffer, this.options.width?.() ?? undefined)
+      : this.collapsedLine() ?? '';
+    this.lastPermanentLine = line;
+    this.segmentEmitted = true;
+    if (!line) return;
+    if (this.options.onPermanent) this.options.onPermanent(line);
+    else console.log(line);
+  }
+
+  /** Re-render permanen (dipakai toggle Ctrl+R setelah finish). */
+  private emitPermanentIfFinished(): void {
+    if (this.finished && this.buffer.trim()) this.emitPermanent();
+  }
+
+  isActive(): boolean {
+    return !this.finished && this.startTime > 0;
+  }
+
+  isFinished(): boolean {
+    return this.finished;
+  }
+
+  getBuffered(): string {
+    return this.buffer;
+  }
+
+  get lastPermanent(): string | null {
+    return this.lastPermanentLine;
+  }
+}
 
 /**
  * Options for ThoughtStreamParser.
@@ -2369,6 +2596,16 @@ export class WorkflowTree {
 
     if (this.branch) {
       for (const l of line.split('\n')) {
+        // Fase 4: baris mutasi berkas (marker \f dari writeWithDiff) selalu
+        // masuk buffer detail — juga saat isToolStartLine(l) true. Baris ini
+        // di-flush di bawah baris `├──` tool saat completeAction(); ia TIDAK
+        // menimpa pendingStart, sehingga hint shortcut tidak pernah hilang.
+        if (isFileMutationLogLine(l)) {
+          const shown = stripMutationMarker(l);
+          if (this.actionOpen) this.buffered.push(shown);
+          else this.out(shown);
+          continue;
+        }
         if (isToolStartLine(l)) {
           // A tool call is only worth one line — and only once it finished.
           if (this.actionOpen) {

@@ -208,7 +208,10 @@ export class ActivityTray extends EventEmitter {
     const visible = expanded ? items : items.slice(0, maxRows);
     const rows = visible.map((a) => formatActivityRow(a, now, width));
     const hidden = items.length - visible.length;
-    if (hidden > 0) rows.push(dim(`-- ${hidden} more, ctrl+o to expand`));
+    // Fase 5: hint `-- N more, ctrl+o to expand` HANYA muncul bila ada >= 2
+    // task aktif (satu task tunggal tidak pernah menampilkan hint) — handler
+    // Ctrl+O existing tetap dipakai untuk expand/collapse.
+    if (hidden > 0 && items.length >= 2) rows.push(dim(`-- ${hidden} more, ctrl+o to expand`));
     return rows;
   }
 }

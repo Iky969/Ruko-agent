@@ -55,6 +55,10 @@ export interface ReadLineOptions {
   activityRows?: (width?: number) => string[];
   /** Ctrl+O — toggles the tray's "expand all rows" mode. */
   onToggleTray?: () => void;
+  /** Ctrl+R — expand/collapse panel Reasoning (Fase 3, feedback.txt). */
+  onToggleReasoning?: () => void;
+  /** Ctrl+D — expand/collapse detail diff mutasi berkas (Fase 4, feedback.txt). */
+  onToggleDiffDetail?: () => void;
   /**
    * When true for the submitted buffer, Enter only CLOSES the overlay: the
    * region is erased and the line resolves to `null` WITHOUT echoing anything
@@ -88,6 +92,10 @@ export interface AmbientOptions {
   activityRows?: (width?: number) => string[];
   /** Ctrl+O — toggles the tray's "expand all rows" mode. */
   onToggleTray?: () => void;
+  /** Ctrl+R — expand/collapse panel Reasoning (Fase 3, feedback.txt). */
+  onToggleReasoning?: () => void;
+  /** Ctrl+D — expand/collapse detail diff mutasi berkas (Fase 4, feedback.txt). */
+  onToggleDiffDetail?: () => void;
   /** Enter pressed while the AI is busy — the loop shows the queue modal. */
   onSubmit: (line: string) => void;
   /** Ctrl+C pressed while the AI is busy — interrupt the turn, not the session. */
@@ -437,7 +445,7 @@ export class LineEditor {
   /** The options driving the live region right now (readLine wins over ambient). */
   private activeOptions(): Pick<
     ReadLineOptions,
-    'prompt' | 'placeholder' | 'statusLine' | 'getMenu' | 'mask' | 'activityRows' | 'onToggleTray'
+    'prompt' | 'placeholder' | 'statusLine' | 'getMenu' | 'mask' | 'activityRows' | 'onToggleTray' | 'onToggleReasoning' | 'onToggleDiffDetail'
   > {
     if (this.pending) return this.pending.options;
     return this.ambient ?? { prompt: '› ' };
@@ -1030,14 +1038,6 @@ export class LineEditor {
         this.cancel();
         return;
       }
-      if (ch === '\u0004') {
-        if (this.buffer.length === 0) {
-          this.cancel();
-          return;
-        }
-        i += 1;
-        continue;
-      }
       if (ch === '\u0015') {
         this.buffer = '';
         this.cursor = 0;
@@ -1059,6 +1059,30 @@ export class LineEditor {
         // Ctrl+O — expand/collapse the live activity tray (feedback §4:
         // "-- N more, ctrl+o to expand").
         this.activeOptions().onToggleTray?.();
+        i += 1;
+        continue;
+      }
+      if (ch === '\u0012') {
+        // Ctrl+R — expand/collapse panel Reasoning (Fase 3). Tidak menimpa
+        // Ctrl+O (activity tray): hanya memicu callback bila tersedia.
+        this.activeOptions().onToggleReasoning?.();
+        i += 1;
+        continue;
+      }
+      if (ch === '\u0004') {
+        // Ctrl+D — expand/collapse detail diff mutasi berkas (Fase 4).
+        // Shortcut alternatif atas Ctrl+O (sudah dipakai activity tray).
+        // EOF-with-empty-buffer (aksi bawaan Ctrl+D) pindah ke Ctrl+Q.
+        this.activeOptions().onToggleDiffDetail?.();
+        i += 1;
+        continue;
+      }
+      if (ch === '\u0011') {
+        // Ctrl+Q — menggantikan Ctrl+D lama: EOF/keluar saat buffer kosong.
+        if (this.buffer.length === 0) {
+          this.cancel();
+          return;
+        }
         i += 1;
         continue;
       }

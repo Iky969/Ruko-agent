@@ -34,7 +34,7 @@ import { getWorkspaceRoot } from '../agent/tools.js';
 import { defaultProcessManager } from '../agent/processManager.js';
 
 /** Prompt line shown under the status bar (placeholder until the user types). */
-const PROMPT_HINT = '/? for help, ask anything...';
+const PROMPT_HINT = '/? untuk bantuan, tanya apa saja...';
 
 function packageVersion(): string {
   try {
@@ -147,6 +147,15 @@ export class SystemLoop {
         onToggleTray: () => {
           this.agent.activityTray.toggleExpanded();
         },
+        // Fase 3: Ctrl+R — expand/collapse panel Reasoning (no-op saat idle,
+        // state di-reset tiap turn baru).
+        onToggleReasoning: () => {
+          this.agent.toggleReasoningExpanded();
+        },
+        // Fase 4: Ctrl+D — expand/collapse block detail diff mutasi berkas.
+        onToggleDiffDetail: () => {
+          this.agent.toggleDiffDetailExpanded();
+        },
         // The hint lives inside the panel's bottom row, so the input line
         // stays clean and the placeholder never duplicates it.
         placeholder: '',
@@ -208,6 +217,9 @@ export class SystemLoop {
       // §8: last turn's token-ish stats ride in the bar, not a separate line.
       turn: this.agent.lastUsage ?? undefined,
       activeProcesses: defaultProcessManager.getActiveProcesses(),
+      // Fase 5: indikator mode + reasoning di status bar.
+      mode: this.agent.sessionState.mode,
+      reasoning: this.agent.sessionState.reasoningLevel,
     });
   }
 
@@ -237,6 +249,9 @@ export class SystemLoop {
       turn: this.agent.lastUsage ?? undefined,
       processes: defaultProcessManager.getActiveProcesses().length,
       hint: this.panelHint(),
+      // Fase 5: indikator mode + reasoning di panel status.
+      mode: this.agent.sessionState.mode,
+      reasoning: this.agent.sessionState.reasoningLevel,
     });
   }
 
@@ -256,6 +271,9 @@ export class SystemLoop {
         startedAt: p.startTime,
       })),
     );
+    // Fase 5: hint overflow `-- N more, ctrl+o to expand` hanya muncul bila
+    // task aktif >= 2 (gating di ActivityTray.renderRows); baris tray itu
+    // sendiri tetap in-place di live region sesuai kontrak §4.
     return this.agent.activityTray.renderRows({
       width: width ?? terminalWidth(),
       expanded: this.agent.activityTray.expanded,
@@ -429,6 +447,14 @@ export class SystemLoop {
       activityRows: (w?: number) => this.activityRows(w),
       onToggleTray: () => {
         this.agent.activityTray.toggleExpanded();
+      },
+      // Fase 3: Ctrl+R — expand/collapse panel Reasoning turn berjalan.
+      onToggleReasoning: () => {
+        this.agent.toggleReasoningExpanded();
+      },
+      // Fase 4: Ctrl+D — expand/collapse block detail diff mutasi berkas.
+      onToggleDiffDetail: () => {
+        this.agent.toggleDiffDetailExpanded();
       },
       // The busy hint lives in the panel's bottom row (same text), so the
       // input line stays clean while the AI works.

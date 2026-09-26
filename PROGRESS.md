@@ -3,24 +3,32 @@
 > Ringkasan status pengerjaan & checkpoint handoff untuk AI berikutnya.  
 > Histori lengkap dipindahkan ke [CHANGELOG.md](CHANGELOG.md).
 
-## Status Saat Ini — v1.7.7 (23 Sep 2026)
+## Status Saat Ini — v1.8.0 (26 Sep 2026)
 
-- **Versi**: 1.7.7 (stable)
-- **Tests**: 817 passed, 0 failed
+- **Versi**: 1.8.0 (stable)
+- **Tests**: 901 passed, 0 failed
 - **E2E**: 1 passed
 - **Typecheck**: clean
 - **Node**: >=18.0.0, tested on 18.x & 20.x
 - **Dependencies**: 0 runtime (zero-dep)
 
-### Apa yang Baru di v1.7.7
+### Apa yang Baru di v1.8.0 — UI Overhaul 6 Fase + Fix Loop Detector
 
-- **UI Revamp**: inline duration `(11ms)`, framed reasoning box `┌─ Reasoning ─`, smart path truncation `truncatePath()`
-- **Anti-Loop Tri-Layer**: in-turn idempotent cache, stream-level dedup, N-gram cycle detection (3-1-2)
-- **Security**: ReDoS fix, clear-text logging fix, TOCTOU fix (open + O_NOFOLLOW), CodeQL 0 alerts
-- **Installer**: immutable SHA pinning `v1.7.7`, atomic swap, rollback otomatis
-- **Terminal**: `COLUMNS` priority, SIGKILL recovery guide (`reset`/`stty sane`)
+- **Fase 1 — `/mode`**: popup selector (Default/Research/Code/Build), state per-sesi in-memory; efek ke loop detector via parameter injection (`loopThreshold`, `readOnlyRelaxed`, `buildPhase: explore→mutate` permanen saat tool mutating pertama) — algoritma inti deteksi tidak disentuh
+- **Fase 2 — `/reasoning` + wiring provider**: High/XHigh/Max/Extreme (default XHigh); param native per provider (`reasoning_effort` / `thinking.budget_tokens` / `thinkingConfig.thinkingBudget`) + fallback prompt injection otomatis saat endpoint menolak — request tidak pernah gagal
+- **Fase 3 — Panel Reasoning terpisah**: box `─ Reasoning (collapsed) ▼`, ringkasan `Thought for Xs (Y tokens)` (Y hanya jika tersedia dari usage), toggle `Ctrl+R`, buffer streaming per-baris + throttle 100ms
+- **Fase 4 — Diff ringkas**: `✍️ <tool> <file>   +N -M   Xs` untuk write/edit/patch_file; detail diff default collapsed, toggle `Ctrl+D`; N/M dihitung algoritma LCS yang sama dengan renderer → selalu cocok dengan diff aktual
+- **Fase 5 — Status bar dipisah**: info model & task background tidak menumpuk kotak Terminal; hint tray `-- N more, ctrl+o to expand` hanya saat task aktif >= 2 (Ctrl+O tetap); indikator `mode:<aktif>  reasoning:<level>` responsif
+- **Fase 6 — Placeholder & lokalisasi**: `"/? untuk bantuan, tanya apa saja..."` (dim), hilang total saat mengetik, muncul kembali saat buffer kosong
+- **Fix loop detector**: dedup tool call duplikat within-batch kini berlaku juga di jalur non-streaming (deteksi siklus N-gram tidak diubah)
 
-### 2 Rilis Terakhir (Ringkas)
+### Rilis Sebelumnya (Ringkas)
+
+#### v1.7.7 — UI Revamp, Anti-Loop Tri-Layer (3-1-2), Security Hardening
+- Inline duration `(11ms)`, framed reasoning box `┌─ Reasoning ─`, smart path truncation `truncatePath()`
+- Tri-layer anti-loop: in-turn idempotent cache, stream-level dedup, N-gram cycle detection
+- Security: ReDoS fix, clear-text logging fix, TOCTOU fix (O_NOFOLLOW), CodeQL 0 alerts
+- Installer: immutable SHA pinning, atomic swap, rollback otomatis
 
 #### v1.7.6 — Universal Fallback Parser & Visual Polish
 - Parser universal: XML `<tool>`, DeepSeek DSML `<|DSML|invoke>`, markdown ```tool
@@ -60,7 +68,7 @@
 
 ```bash
 npm run typecheck   # harus 0 error
-npm test            # harus 817 passed
+npm test            # harus 901 passed
 npm run test:e2e    # harus 1 passed
 ```
 

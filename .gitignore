@@ -18,6 +18,7 @@ Fee.py
 py.py
 bot.log
 bot_log.txt
+LAPORAN_TASK05_06.md
 # Audit reports yang di-generate lokal tapi tidak untuk repo utama
 # (AUDIT_REPORT.md & CHANGELOG.md sekarang di-track untuk transparansi)
 # LAPORAN_AUDIT* — diizinkan jika untuk dokumentasi resmi

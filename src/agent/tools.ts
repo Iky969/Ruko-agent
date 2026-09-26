@@ -2,6 +2,7 @@ import { chainedSegments, Confirmer, decodePathSafely, detectRisk, extractAndRes
 import { AgentConfig, DEFAULT_CONFIG } from '../types.js';
 import { DEFAULT_TIMEOUT_MS } from '../core/executor.js';
 import { renderFileDiff, splitLines } from '../core/diff.js';
+import { countDiffLines, formatFileMutationLogLine } from '../core/diffui.js';
 import { revertFile, takeSnapshot } from '../core/undo.js';
 import type { ActivityTray } from '../core/activity.js';
 import { cyan, dim, green, magenta, red, yellow } from '../core/ui.js';
@@ -807,6 +808,7 @@ async function writeWithDiff(
   newContent: string,
   onLog?: (line: string) => void,
   workspaceRoot: string = getWorkspaceRoot(),
+  toolName: string = 'edit_file',
 ): Promise<string> {
   // Reject mutating immutable security core files
   assertNotSecurityCore(fileLabel, workspaceRoot);
@@ -819,6 +821,7 @@ async function writeWithDiff(
       `Payload terlalu besar: ukuran berkas (${byteLen} bytes) melebihi batas maksimum 5MB.`,
     );
   }
+  const startedAt = Date.now();
 
   let oldContent = '';
   let existed = false;
@@ -859,18 +862,32 @@ async function writeWithDiff(
   } finally {
     await writeHandle?.close();
   }
+
   onLog?.(green(`🟢 Edit(${fileLabel})`));
-  const diff = renderFileDiff(
+  // Fase 4: ringkasan diff ringkas `✍️ <tool> <file> +N -M Xs` — angka N/M
+  // dihitung dengan algoritma diff yang SAMA dengan renderer, jadi selalu
+  // cocok dengan isi diff aktual. Detail diff default COLLAPSED (hint
+  // ctrl+d): baris ter-enkode (marker \f + payload JSON) di-parse oleh
+  // WorkflowTree/agent.ts — UI hanya menampilkan ringkasan, sementara diff
+  // legacy dirender di belakangnya (konsumen onLog langsung tetap melihat
+  // diff utuh) dan tersedia untuk re-render Ctrl+D tanpa baca disk ulang.
+  const stats = countDiffLines(oldContent, newContent);
+  const block = formatFileMutationLogLine({
+    tool: toolName,
     fileLabel,
-    oldContent,
-    newContent,
-    { context: 3, maxLines: 120 },
-  );
-  onLog?.(diff);
+    oldText: oldContent,
+    newText: newContent,
+    durationMs: Date.now() - startedAt,
+  });
+  const legacyDiff = renderFileDiff(fileLabel, oldContent, newContent, {
+    context: 3,
+    maxLines: 120,
+  });
+  onLog?.(`${block}\n${legacyDiff}`);
   return JSON.stringify(
     existed
-      ? { ok: true, path: fileLabel, message: 'File diperbarui sesuai diff di atas.' }
-      : { ok: true, path: fileLabel, message: 'File baru dibuat.', lines: splitLines(newContent).length },
+      ? { ok: true, path: fileLabel, message: 'File diperbarui sesuai diff di atas.', added: stats.added, removed: stats.removed }
+      : { ok: true, path: fileLabel, message: 'File baru dibuat.', lines: splitLines(newContent).length, added: stats.added, removed: stats.removed },
     null,
     2,
   );
@@ -1642,7 +1659,9 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         });
       }
       try {
-        return await writeWithDiff(abs, rel, content, deps.onLog, ws);
+        // Fase 4: nama tool mengikuti call.tool (edit_file vs write_file) agar
+        // ringkasan `✍️ <tool> <file>` selalu akurat.
+        return await writeWithDiff(abs, rel, content, deps.onLog, ws, call.tool);
       } catch (err) {
         return JSON.stringify({
           error: `${call.tool}: ${err instanceof Error ? err.message : String(err)}`,
@@ -1685,7 +1704,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       try {
         const before = await readFile(abs, 'utf8');
         const after = applySearchReplace(before, oldText, newText, call.replaceAll === true);
-        return await writeWithDiff(abs, rel, after, deps.onLog, ws);
+        return await writeWithDiff(abs, rel, after, deps.onLog, ws, 'patch_file');
       } catch (err) {
         return JSON.stringify({
           error: err instanceof Error ? err.message : String(err),

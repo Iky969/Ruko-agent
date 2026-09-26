@@ -1,6 +1,7 @@
 import { Confirmer, guardedExecute } from '../core/approval.js';
 import { Context } from '../core/context.js';
 import { ActivityTray } from '../core/activity.js';
+import { isFileMutationLogLine, parseFileMutationLogLine, renderMutationSummary } from '../core/diffui.js';
 import {
   activityIconForTool,
   activityLabelForTool,
@@ -10,7 +11,7 @@ import {
   RevealFilter,
   stripThoughtBlocks,
   TerminalMarkdownFormatter,
-  ThinkingTicker,
+  ReasoningPanel,
   ThoughtStreamParser,
   WorkflowTree,
   yellow,
@@ -133,6 +134,58 @@ export class Agent {
   private consecutiveRepeatCount = 0;
   /** Sliding window history of recent tool call signatures for N-gram cycle detection. */
   private callHistory: string[] = [];
+  /** Fase 3: panel Reasoning aktif saat ini (null di luar turn). */
+  private reasoningPanel: ReasoningPanel | null = null;
+  /** Fase 3: mode expand/collapse panel Reasoning untuk turn berjalan. */
+  private reasoningExpanded = false;
+  /** Fase 4: mode expand/collapse block detail diff (Ctrl+D). */
+  private diffDetailExpanded = false;
+
+  /** Fase 3: toggle expand/collapse panel Reasoning (Ctrl+R dari loop/TUI). */
+  toggleReasoningExpanded(): void {
+    this.reasoningExpanded = !this.reasoningExpanded;
+    this.reasoningPanel?.toggle(this.reasoningExpanded ? 'expanded' : 'collapsed');
+  }
+
+  /** Fase 3: status expand panel Reasoning saat ini (untuk status bar/test). */
+  get isReasoningExpanded(): boolean {
+    return this.reasoningExpanded;
+  }
+
+  /** Fase 4: toggle expand/collapse block detail diff (Ctrl+D dari loop/TUI). */
+  toggleDiffDetailExpanded(): void {
+    this.diffDetailExpanded = !this.diffDetailExpanded;
+    // Me-render ulang SEMUA block mutasi turn berjalan dengan mode baru:
+    // payload JSON (old/new) dari writeWithDiff membuat re-render persis
+    // tanpa baca disk ulang. Console.log aman — patched stdout editor
+    // memindah output di bawah area input (v0.7).
+    if (this.mutationSummaryBuffer) {
+      for (const line of this.mutationSummaryBuffer) {
+        const info = parseFileMutationLogLine(line);
+        if (!info) continue;
+        const rendered = renderMutationSummary({
+          tool: info.tool,
+          fileLabel: info.fileLabel,
+          stats: { added: info.added, removed: info.removed },
+          mode: this.diffDetailExpanded ? 'expanded' : 'collapsed',
+          oldText: info.oldText,
+          newText: info.newText,
+        });
+        console.log(rendered);
+      }
+    }
+  }
+
+  /** Fase 4: status expand detail diff saat ini (untuk test). */
+  get isDiffDetailExpanded(): boolean {
+    return this.diffDetailExpanded;
+  }
+
+  /**
+   * Fase 4: baris mutasi turn berjalan (ter-enkode) — sumber re-render
+   * toggle Ctrl+D; state per-instance, bukan global singleton.
+   */
+  private mutationSummaryBuffer: string[] | null = null;
 
   constructor(
     private readonly ctx: Context,
@@ -343,6 +396,13 @@ export class Agent {
 
     const maxIterations = this.config.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
     let hasSeparatedFromTools = false;
+    // Fase 3: setiap instruksi baru mulai dengan panel Reasoning COLLAPSED;
+    // state expand hiduk di instance agar Ctrl+R bisa men-toggle saat turn jalan.
+    this.reasoningExpanded = false;
+    this.reasoningPanel = null;
+    this.diffDetailExpanded = false;
+    // Fase 4: log baris mutasi turn ini — sumber re-render toggle Ctrl+D.
+    this.mutationSummaryBuffer = [];
 
     this.callHistory = [];
     this.callCounts.clear();
@@ -362,24 +422,29 @@ export class Agent {
           return '';
         }
         usage.promptChars += messages.reduce((s, m) => s + m.content.length, 0);
-        const ticker = new ThinkingTicker();
         const mdFormatter = new TerminalMarkdownFormatter();
 
+        // Fase 3: panel Reasoning TERPISAH dari log tool call — box section
+        // sendiri, default COLLAPSED ("• Thought for Xs"), expand/collapse
+        // via Ctrl+R. Env RUKO_SHOW_REASONING=1 tetap memaksa expanded.
+        const showFullReasoning =
+          process.env.RUKO_SHOW_REASONING === '1' || process.env.RUKO_REASONING === '1';
+        const reasoningPanel = new ReasoningPanel({
+          getMode: () =>
+            showFullReasoning || this.reasoningExpanded ? 'expanded' : 'collapsed',
+          // "Y tokens" HANYA dicetak bila API usage tersedia dari provider;
+          // selain itu null → baris collapsed cukup "Thought for Xs".
+          getTokens: () =>
+            (this.llmProvider as { lastUsage?: { completionTokens?: number } | null }).lastUsage
+              ?.completionTokens ?? null,
+          onPermanent: (line) => console.log(line),
+        });
+        this.reasoningPanel = reasoningPanel;
+
         const finishThinking = () => {
-          if (ticker.isFinished()) return;
-          const showFull = process.env.RUKO_SHOW_REASONING === '1' || process.env.RUKO_REASONING === '1';
-          if (showFull && ticker.getBuffered().trim()) {
-            const framed = ticker.renderFramedReasoning();
-            ticker.flush();
-            if (framed) {
-              console.log(framed);
-            }
-            return;
-          }
-          const summary = ticker.flush();
-          if (summary) {
-            console.log(summary);
-          }
+          if (reasoningPanel.isFinished()) return;
+          if (showFullReasoning) this.reasoningExpanded = true;
+          reasoningPanel.finish();
         };
 
         const gate = new LineGate((text) => {
@@ -395,12 +460,14 @@ export class Agent {
         // feedback.txt item 1b: reasoning chunks run through their OWN reveal
         // filter, so a tool call emitted inside the thought stream can never
         // spill into the reasoning ticker as ordinary text.
-        const thoughtReveal = new RevealFilter((text) => ticker.feed(text));
+        const thoughtReveal = new RevealFilter((text) => reasoningPanel.feed(text));
         const thoughtParser = new ThoughtStreamParser({
           onText: (text) => reveal.feed(text),
           onThought: (thoughtChunk) => thoughtReveal.feed(thoughtChunk),
           onThoughtEnd: () => {
-            finishThinking();
+            // Fase 3: akhiri SEGMEN reasoning ini (baris collapsed / box per
+            // segmen) tanpa mematikan panel — <thought> berikutnya buka segmen baru.
+            reasoningPanel.finishSegment();
           },
         });
         let raw: string;
@@ -671,7 +738,17 @@ export class Agent {
             result = await runToolCall(call, {
               confirm: this.confirm,
               config: this.config,
-              onLog: (line) => tree.log(line),
+              onLog: (line) => {
+                // Fase 4: baris mutasi berkas (marker \f) — buffer untuk
+                // re-render Ctrl+D, dan hanya RINGKASAN yang masuk UI tree
+                // (diff legacy di belakang baris tidak ditampilkan saat
+                // collapsed; tersedia via toggle Ctrl+D dari payload JSON).
+                if (isFileMutationLogLine(line)) {
+                  const summaryOnly = line.split('\n')[0];
+                  if (this.mutationSummaryBuffer) this.mutationSummaryBuffer.push(summaryOnly);
+                }
+                tree.log(line);
+              },
               planMode: this.planMode,
               signal,
               llmProvider: this.llmProvider,
@@ -719,6 +796,7 @@ export class Agent {
 
       return '[agent] reached max tool iterations without a final answer; stopping.';
     } finally {
+      this.reasoningPanel = null;
       if (usage.promptChars > 0 || usage.completionChars > 0) {
         const pTok = Math.round(usage.promptChars / 4);
         const cTok = Math.round(usage.completionChars / 4);
