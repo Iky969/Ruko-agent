@@ -159,6 +159,67 @@ test('Solusi 1: OpenAiCompatibleProvider does not duplicate tool blocks when str
 });
 
 // ============================================================================
+// Solusi 1 (jalur non-streaming): dedup identik untuk response JSON polos.
+// Regression test untuk bug loop-detector false-positive: provider switch
+// gagal/timeout → sesi baru → instruksi pertama ter-flag "Perintah identik
+// terdeteksi berulang" padahal hanya dipanggil 1x. Penyebabnya: endpoint yang
+// mengabaikan `stream` membalas JSON polos berisi message.content (dengan fence
+// ```tool dari model) + message.tool_calls (call native yang sama) — jalur
+// non-streaming dulu menyintesis blok duplikat tanpa cek dedup.
+// ============================================================================
+
+test('Solusi 1 (non-streaming): OpenAiCompatibleProvider does not duplicate tool blocks when plain-JSON response has both content fence and message.tool_calls', async () => {
+  const provider = new OpenAiCompatibleProvider();
+  provider.setCredentials('sk-test-nonstream', 'https://api.openai.com/v1');
+  provider.setModel('gpt-4o');
+
+  const payload = {
+    choices: [
+      {
+        message: {
+          content: '```tool\n{"tool": "read_file", "path": "feedback.txt"}\n```',
+          tool_calls: [
+            {
+              id: 'call_456',
+              type: 'function',
+              function: { name: 'read_file', arguments: '{"path":"feedback.txt"}' },
+            },
+          ],
+        },
+        finish_reason: 'tool_calls',
+      },
+    ],
+  };
+
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    // Plain JSON, BUKAN text/event-stream → memaksa jalur non-streaming.
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const full = await provider.chat([
+      { role: 'user', content: 'baca feedback.txt', timestamp: new Date().toISOString() },
+    ]);
+
+    // Fence yang sudah ditulis model di content harus dipertahankan;
+    // tool_call native identik TIDAK boleh disintesis ulang.
+    const matches = full.match(/```tool/g) ?? [];
+    assert.equal(
+      matches.length,
+      1,
+      `Tool block must appear exactly once in non-streaming output, but appeared ${matches.length} times (duplicate synthesis!)`,
+    );
+    assert.ok(full.includes('feedback.txt'), 'Original content fence must be preserved');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+// ============================================================================
 // Solusi 2: Penguatan Loop Detector dengan Batch Deduplication & N-Gram Cycles
 // ============================================================================
 

@@ -9,10 +9,11 @@ import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
 import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot } from './tools.js';
-import { AgentConfig, DEFAULT_CONFIG, ProviderProfile, UiMode } from '../types.js';
+import { AgentConfig, AgentMode, createDefaultSessionState, DEFAULT_CONFIG, ProviderProfile, ReasoningLevel, SessionState, UiMode } from '../types.js';
 import { ConnectionResult, createProvider, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
 import { scanSkills } from '../core/skills.js';
+import type { SelectorOptions } from '../core/tui.js';
 import type { Agent } from './agent.js';
 
 /** Loop internals a command may touch. */
@@ -29,12 +30,16 @@ export interface CommandEnv {
   llm: LLMProvider;
   /** Agent runtime (plan mode, active role) — available inside the REPL. */
   agent?: Agent;
+  /** In-memory session state (Fase 1: mode, buildPhase). */
+  sessionState?: SessionState;
   /** Approval prompt hook (from the loop's readline). */
   confirm: Confirmer;
   /** Asks a free-text question through the loop's readline (for `/config setup`). */
   ask?: (question: string) => Promise<string>;
   /** Masked free-text question (API key) — falls back to `ask` when absent (§5). */
   askSecret?: (question: string) => Promise<string>;
+  /** Opens an interactive popup selector (Fase 1: /mode, Fase 2: /reasoning). */
+  select?: (options: SelectorOptions) => Promise<string | null>;
   /** Persists a config patch back to .ruko/config.json. */
   updateConfig: (patch: Partial<AgentConfig>) => void;
   handle: LoopHandle;
@@ -184,6 +189,14 @@ const COMMANDS: CommandDef[] = [
       }
       env.ctx.clear();
       env.handle.setSessionId(null);
+      if (env.agent) {
+        env.agent.resetSessionState();
+      }
+      if (env.sessionState) {
+        env.sessionState.mode = 'default';
+        env.sessionState.buildPhase = 'explore';
+        env.sessionState.reasoningLevel = 'xhigh';
+      }
       console.log('Percakapan baru dimulai (sesi sebelumnya tersimpan).');
     },
   },
@@ -441,35 +454,130 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'mode',
     category: 'Sistem & Bantuan',
-    help: 'Mode pengguna: beginner (guide penuh) atau pro (ringkas).',
-    hint: 'beginner | pro',
-    run: (args, env) => {
-      const wanted = args.trim().toLowerCase() as UiMode | '';
-      if (wanted !== 'beginner' && wanted !== 'pro') {
-        console.log(`Mode aktif: ${(env.config.mode ?? 'beginner')}  — ganti: /mode beginner|pro`);
+    help: 'Mode agen (Default, Research, Code, Build) untuk mengatur batasan kerja.',
+    hint: '[default|research|code|build]',
+    run: async (args, env) => {
+      const rawArg = args.trim().toLowerCase();
+      const validModes: AgentMode[] = ['default', 'research', 'code', 'build'];
+
+      const getSessionState = (): SessionState => {
+        if (env.agent) return env.agent.sessionState;
+        if (!env.sessionState) {
+          env.sessionState = createDefaultSessionState();
+        }
+        return env.sessionState;
+      };
+
+      const setSessionMode = (m: AgentMode) => {
+        const state = getSessionState();
+        state.mode = m;
+        if (m === 'build') {
+          state.buildPhase = 'explore';
+        }
+        const labelMap: Record<AgentMode, string> = {
+          default: 'Default (perilaku bawaan)',
+          research: 'Research (relaksasi loop untuk tool read-only)',
+          code: 'Code (threshold loop standar)',
+          build: 'Build [fase: explore]',
+        };
+        console.log(green(`✔ Mode aktif: ${labelMap[m]}`));
+      };
+
+      if (rawArg && validModes.includes(rawArg as AgentMode)) {
+        setSessionMode(rawArg as AgentMode);
         return;
       }
-      // §7: each mode ships sensible defaults; same engine, less/no training wheels.
-      const patch: Partial<AgentConfig> = { mode: wanted };
-      const current = env.config.role ?? 'default';
-      if (wanted === 'beginner' && (current === 'default' || current === 'minimal')) patch.role = 'teacher';
-      if (wanted === 'pro' && (current === 'default' || current === 'teacher')) patch.role = 'minimal';
-      env.updateConfig(patch);
-      if (wanted === 'beginner') {
-        // The beginner guide is rendered by the CLI through the SHARED box
-        // helper (feedback v0.6.1 audit) — never left to the model to draw.
-        console.log(
-          renderBox('Mode BEGINNER aktif', [
-            'Role: teacher — setiap langkah dijelaskan dengan bahasa sederhana.',
-            'Konfirmasi penuh: perintah berisiko selalu ditanya dulu (y/N).',
-            'Tips slash command aktif di setiap jawaban AI.',
-            '',
-            'Mulai cepat: /help daftar perintah · /undo batal edit terakhir · /mode pro untuk ringkas.',
-          ]),
-        );
-      } else {
-        console.log('Mode PRO aktif — role minimal, tanpa tips slash command.');
+
+      if (rawArg && !validModes.includes(rawArg as AgentMode)) {
+        console.log(`Mode tidak dikenal: "${rawArg}". Pilihan: Default, Research, Code, Build.`);
+        return;
       }
+
+      // No argument provided -> Open popup selector if select hook is available
+      if (env.select) {
+        const currentState = getSessionState();
+        const chosen = await env.select({
+          title: 'Pilih Mode',
+          defaultId: currentState.mode,
+          items: [
+            { id: 'default', label: 'Default', description: 'Perilaku bawaan sistem saat ini.' },
+            { id: 'research', label: 'Research', description: 'Relaksasi batas loop khusus whitelist tool read-only.' },
+            { id: 'code', label: 'Code', description: 'Batas loop standar, tanpa pengecualian.' },
+            { id: 'build', label: 'Build', description: 'Fase explore (longgar) lalu beralih ke mutate (ketat).' },
+          ],
+        });
+        if (chosen && validModes.includes(chosen as AgentMode)) {
+          setSessionMode(chosen as AgentMode);
+        }
+        return;
+      }
+
+      // Non-interactive fallback
+      const current = getSessionState().mode;
+      console.log(`Mode aktif saat ini: ${current}. Pilihan: default, research, code, build.`);
+    },
+  },
+  {
+    name: 'reasoning',
+    category: 'Sistem & Bantuan',
+    help: 'Level reasoning (High, XHigh, Max, Extreme) untuk mengatur kedalaman berpikir model.',
+    hint: '[high|xhigh|max|extreme]',
+    run: async (args, env) => {
+      const rawArg = args.trim().toLowerCase();
+      const validLevels: ReasoningLevel[] = ['high', 'xhigh', 'max', 'extreme'];
+
+      const getSessionState = (): SessionState => {
+        if (env.agent) return env.agent.sessionState;
+        if (!env.sessionState) {
+          env.sessionState = createDefaultSessionState();
+        }
+        return env.sessionState;
+      };
+
+      const setReasoningLevel = (level: ReasoningLevel) => {
+        const state = getSessionState();
+        state.reasoningLevel = level;
+        const labelMap: Record<ReasoningLevel, string> = {
+          high: 'High (tinggi)',
+          xhigh: 'XHigh (sangat tinggi — default sesi)',
+          max: 'Max (maksimal)',
+          extreme: 'Extreme (ekstrem)',
+        };
+        console.log(green(`✔ Reasoning aktif: ${labelMap[level]}`));
+      };
+
+      if (rawArg && validLevels.includes(rawArg as ReasoningLevel)) {
+        setReasoningLevel(rawArg as ReasoningLevel);
+        return;
+      }
+
+      if (rawArg && !validLevels.includes(rawArg as ReasoningLevel)) {
+        console.log(`Level reasoning tidak dikenal: "${rawArg}". Pilihan: High, XHigh, Max, Extreme.`);
+        return;
+      }
+
+      // No argument provided -> popup selector (pola sama dengan /mode)
+      if (env.select) {
+        const currentState = getSessionState();
+        const chosen = await env.select({
+          title: 'Pilih Level Reasoning',
+          defaultId: currentState.reasoningLevel,
+          items: [
+            { id: 'high', label: 'High', description: 'Berpikir hati-hati tapi ringkas — cepat dan hemat token.' },
+            { id: 'xhigh', label: 'XHigh', description: 'Langkah demi langkah, pertimbangkan alternatif dan edge case.' },
+            { id: 'max', label: 'Max', description: 'Analisis menyeluruh: opsi, trade-off, dan verifikasi asumsi.' },
+            { id: 'extreme', label: 'Extreme', description: 'Deliberasi maksimal: semua sudut, simulasi kegagalan, double-check.' },
+          ],
+        });
+        if (chosen && validLevels.includes(chosen as ReasoningLevel)) {
+          setReasoningLevel(chosen as ReasoningLevel);
+        }
+        return;
+      }
+
+      // Non-interactive fallback
+      const current = getSessionState().reasoningLevel;
+      console.log(`Level reasoning aktif: ${current}. Pilihan: high, xhigh, max, extreme.`);
     },
   },
   {

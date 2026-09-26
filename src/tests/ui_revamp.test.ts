@@ -67,7 +67,7 @@ test('buildStatusPanel renders a box whose rows all share one visible width', ()
   assert.ok(plain[1].includes('gemini'), 'short model name in the model cell');
   assert.ok(plain[1].includes('YOLO'), 'YOLO badge when bypass is active');
   assert.ok(plain[1].includes('↑ 800t ↓ 200t'), 'turn tokens per feedback spec');
-  assert.ok(plain[3].includes('/? for help, ask anything...'), 'hint row');
+  assert.ok(plain[3].includes('/? untuk bantuan, tanya apa saja...'), 'hint row (Fase 6: Indonesia)');
   assert.ok(plain[0].includes('┬') && plain[2].includes('┴'), 'column joins');
 });
 
@@ -335,7 +335,7 @@ test('status panel + activity tray are drawn in place inside the live region (no
     const plain = stripAnsi(frame);
     // Panel above, input in the middle, tray rows below it.
     assert.ok(plain.includes('gemini') && plain.includes('YOLO'), 'status panel drawn');
-    assert.ok(plain.includes('/? for help, ask anything...'), 'panel hint row drawn');
+    assert.ok(plain.includes('/? untuk bantuan, tanya apa saja...'), 'panel hint row drawn (Fase 6: Indonesia)');
     assert.ok(plain.indexOf('gemini') < plain.indexOf('›'), 'panel sits above the input line');
     assert.ok(plain.indexOf('›') < plain.indexOf('npm test'), 'tray sits below the input line');
     assert.ok(plain.includes('45s') && plain.includes('23s'), 'elapsed counters rendered');

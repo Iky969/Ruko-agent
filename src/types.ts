@@ -50,6 +50,28 @@ export interface SummaryResult {
 /** User experience mode — affects defaults only, never the engine (§7). */
 export type UiMode = 'beginner' | 'pro';
 
+/** Operational mode for loop detector and agent workflow (Fase 1). */
+export type AgentMode = 'default' | 'research' | 'code' | 'build';
+export type BuildPhase = 'explore' | 'mutate';
+
+/** Reasoning depth level (Fase 2: /reasoning). Urutan: high < xhigh < max < extreme. */
+export type ReasoningLevel = 'high' | 'xhigh' | 'max' | 'extreme';
+
+export interface SessionState {
+  mode: AgentMode;
+  buildPhase?: BuildPhase;
+  /** Level reasoning per-sesi in-memory (Fase 2). Default sesi baru: 'xhigh'. */
+  reasoningLevel: ReasoningLevel;
+}
+
+export function createDefaultSessionState(): SessionState {
+  return {
+    mode: 'default',
+    buildPhase: 'explore',
+    reasoningLevel: 'xhigh',
+  };
+}
+
 /**
  * A named provider profile (§2 multi-profil): switch quickly with
  * `/profile <alias>` (hemat, kuat, lokal, ...).

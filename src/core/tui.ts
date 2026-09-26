@@ -55,6 +55,10 @@ export interface ReadLineOptions {
   activityRows?: (width?: number) => string[];
   /** Ctrl+O — toggles the tray's "expand all rows" mode. */
   onToggleTray?: () => void;
+  /** Ctrl+R — expand/collapse panel Reasoning (Fase 3, feedback.txt). */
+  onToggleReasoning?: () => void;
+  /** Ctrl+D — expand/collapse detail diff mutasi berkas (Fase 4, feedback.txt). */
+  onToggleDiffDetail?: () => void;
   /**
    * When true for the submitted buffer, Enter only CLOSES the overlay: the
    * region is erased and the line resolves to `null` WITHOUT echoing anything
@@ -88,6 +92,10 @@ export interface AmbientOptions {
   activityRows?: (width?: number) => string[];
   /** Ctrl+O — toggles the tray's "expand all rows" mode. */
   onToggleTray?: () => void;
+  /** Ctrl+R — expand/collapse panel Reasoning (Fase 3, feedback.txt). */
+  onToggleReasoning?: () => void;
+  /** Ctrl+D — expand/collapse detail diff mutasi berkas (Fase 4, feedback.txt). */
+  onToggleDiffDetail?: () => void;
   /** Enter pressed while the AI is busy — the loop shows the queue modal. */
   onSubmit: (line: string) => void;
   /** Ctrl+C pressed while the AI is busy — interrupt the turn, not the session. */
@@ -105,6 +113,25 @@ export interface ModalOptions {
 
 interface Modal extends ModalOptions {
   resolve: (key: string | null) => void;
+}
+
+/** One selectable item in a popup selector (Fase 1: /mode, Fase 2: /reasoning). */
+export interface SelectorItem {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface SelectorOptions {
+  title?: string;
+  items: SelectorItem[];
+  defaultId?: string;
+}
+
+interface ActiveSelector extends SelectorOptions {
+  selectedIndex: number;
+  drawnRows: number;
+  resolve: (id: string | null) => void;
 }
 
 const CSI_RE = /^\u001b\[([0-9;]*)([A-Za-z~])/;
@@ -126,6 +153,8 @@ export class LineEditor {
   private ambientSaved: { buffer: string; cursor: number } | null = null;
   /** Inline modal question inside the live region (queue choice, y/N). */
   private modal: Modal | null = null;
+  /** Active popup selector (Fase 1: /mode, Fase 2: /reasoning). */
+  private selector: ActiveSelector | null = null;
   private buffer = '';
   private cursor = 0;
   private menu: MenuItem[] = [];
@@ -189,6 +218,38 @@ export class LineEditor {
   /** True while an inline modal question (queue choice / approval) is open. */
   get modalActive(): boolean {
     return this.modal !== null;
+  }
+
+  /** True while a popup selector (/mode, /reasoning) is active. */
+  get selectorActive(): boolean {
+    return this.selector !== null;
+  }
+
+  /**
+   * Opens an interactive popup selector with ↑/↓ navigation, Enter confirmation,
+   * Esc cancellation, and live single-line description of the highlighted item.
+   * Completely blocks chat input while open.
+   */
+  askSelector(options: SelectorOptions): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
+      if (this.selector) {
+        resolve(null);
+        return;
+      }
+      let defaultIdx = 0;
+      if (options.defaultId) {
+        const found = options.items.findIndex((it) => it.id === options.defaultId);
+        if (found !== -1) defaultIdx = found;
+      }
+      this.selector = {
+        ...options,
+        selectedIndex: defaultIdx,
+        drawnRows: 0,
+        resolve,
+      };
+      this.attach();
+      this.renderSelector();
+    });
   }
 
   /**
@@ -319,6 +380,7 @@ export class LineEditor {
       clearTimeout(this.renderThrottleTimer);
       this.renderThrottleTimer = null;
     }
+    if (this.selector) this.closeSelector(null);
     if (this.pending) this.finish(null);
     this.stopAmbient();
     this.detach();
@@ -383,7 +445,7 @@ export class LineEditor {
   /** The options driving the live region right now (readLine wins over ambient). */
   private activeOptions(): Pick<
     ReadLineOptions,
-    'prompt' | 'placeholder' | 'statusLine' | 'getMenu' | 'mask' | 'activityRows' | 'onToggleTray'
+    'prompt' | 'placeholder' | 'statusLine' | 'getMenu' | 'mask' | 'activityRows' | 'onToggleTray' | 'onToggleReasoning' | 'onToggleDiffDetail'
   > {
     if (this.pending) return this.pending.options;
     return this.ambient ?? { prompt: '› ' };
@@ -784,7 +846,110 @@ export class LineEditor {
 
   // --- input parsing -------------------------------------------------------
 
+  private handleSelectorData(data: string): void {
+    if (!this.selector) return;
+    let i = 0;
+    while (i < data.length) {
+      const ch = data[i];
+      if (ch === '\u001b') {
+        const match = data.slice(i).match(CSI_RE);
+        if (match) {
+          const final = match[2];
+          if (final === 'A') {
+            this.selector.selectedIndex =
+              (this.selector.selectedIndex - 1 + this.selector.items.length) % this.selector.items.length;
+            this.renderSelector();
+          } else if (final === 'B') {
+            this.selector.selectedIndex =
+              (this.selector.selectedIndex + 1) % this.selector.items.length;
+            this.renderSelector();
+          }
+          i += match[0].length;
+          continue;
+        }
+        // Lone Escape: cancel selector without side effect
+        this.closeSelector(null);
+        return;
+      }
+      if (ch === '\r' || ch === '\n') {
+        const chosen = this.selector.items[this.selector.selectedIndex]?.id ?? null;
+        this.closeSelector(chosen);
+        return;
+      }
+      if (ch === '\u0003') {
+        this.closeSelector(null);
+        return;
+      }
+      // Any other character ignored (chat input completely blocked while selector is open)
+      i += 1;
+    }
+  }
+
+  private closeSelector(result: string | null): void {
+    if (!this.selector) return;
+    this.eraseSelector();
+    const resolve = this.selector.resolve;
+    this.selector = null;
+    if (!this.pending && !this.ambient) {
+      this.detach();
+    }
+    resolve(result);
+  }
+
+  private renderSelector(): void {
+    if (!this.selector) return;
+    const { title, items, selectedIndex } = this.selector;
+    const width = Math.min(Math.max(40, this.termWidth() - 4), 62);
+
+    const lines: string[] = [];
+    const headerTitle = title ? ` ${title} ` : ' Pilihan ';
+    const headerPad = Math.max(0, width - 2 - visibleLength(headerTitle) - 2);
+    lines.push(`\x1b[36m┌─\x1b[1;37m${headerTitle}\x1b[0;36m${'─'.repeat(headerPad)}┐\x1b[0m`);
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const isSel = i === selectedIndex;
+      const prefix = isSel ? '\x1b[1;36m● \x1b[1;97m' : '  \x1b[90m';
+      const label = item.label;
+      const visLen = 2 + visibleLength(label);
+      const pad = Math.max(0, width - 2 - visLen - 2);
+      const row = `\x1b[36m│\x1b[0m ${prefix}${label}\x1b[0m${' '.repeat(pad)} \x1b[36m│\x1b[0m`;
+      lines.push(row);
+    }
+
+    lines.push(`\x1b[36m├${'─'.repeat(width - 2)}┤\x1b[0m`);
+
+    const selItem = items[selectedIndex];
+    const descText = selItem ? selItem.description : '';
+    const descTruncated = truncateVisible(descText, width - 4);
+    const descPad = Math.max(0, width - 2 - visibleLength(descTruncated) - 2);
+    lines.push(`\x1b[36m│\x1b[0m \x1b[33m${descTruncated}\x1b[0m${' '.repeat(descPad)} \x1b[36m│\x1b[0m`);
+    lines.push(`\x1b[36m└${'─'.repeat(width - 2)}┘\x1b[0m`);
+
+    let out = '';
+    if (this.selector.drawnRows > 0) {
+      out += `\u001b[${this.selector.drawnRows - 1}A\r\u001b[0J`;
+    }
+    out += lines.join('\n');
+    this.selector.drawnRows = lines.length;
+    this.rawWrite(out);
+  }
+
+  private eraseSelector(): void {
+    if (!this.selector || this.selector.drawnRows === 0) return;
+    const climb = this.selector.drawnRows - 1;
+    let out = '';
+    if (climb > 0) out += `\u001b[${climb}A`;
+    out += '\r\u001b[0J';
+    this.rawWrite(out);
+    this.selector.drawnRows = 0;
+  }
+
   private handleData(data: string): void {
+    if (this.selector) {
+      this.handleSelectorData(data);
+      return;
+    }
     if (!this.pending && !this.ambient) return;
     // A modal question owns the keyboard: only its keys (or Enter/Ctrl+C)
     // count — the buffer stays frozen underneath (feedback v0.7 #2/#6).
@@ -873,14 +1038,6 @@ export class LineEditor {
         this.cancel();
         return;
       }
-      if (ch === '\u0004') {
-        if (this.buffer.length === 0) {
-          this.cancel();
-          return;
-        }
-        i += 1;
-        continue;
-      }
       if (ch === '\u0015') {
         this.buffer = '';
         this.cursor = 0;
@@ -902,6 +1059,30 @@ export class LineEditor {
         // Ctrl+O — expand/collapse the live activity tray (feedback §4:
         // "-- N more, ctrl+o to expand").
         this.activeOptions().onToggleTray?.();
+        i += 1;
+        continue;
+      }
+      if (ch === '\u0012') {
+        // Ctrl+R — expand/collapse panel Reasoning (Fase 3). Tidak menimpa
+        // Ctrl+O (activity tray): hanya memicu callback bila tersedia.
+        this.activeOptions().onToggleReasoning?.();
+        i += 1;
+        continue;
+      }
+      if (ch === '\u0004') {
+        // Ctrl+D — expand/collapse detail diff mutasi berkas (Fase 4).
+        // Shortcut alternatif atas Ctrl+O (sudah dipakai activity tray).
+        // EOF-with-empty-buffer (aksi bawaan Ctrl+D) pindah ke Ctrl+Q.
+        this.activeOptions().onToggleDiffDetail?.();
+        i += 1;
+        continue;
+      }
+      if (ch === '\u0011') {
+        // Ctrl+Q — menggantikan Ctrl+D lama: EOF/keluar saat buffer kosong.
+        if (this.buffer.length === 0) {
+          this.cancel();
+          return;
+        }
         i += 1;
         continue;
       }

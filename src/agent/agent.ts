@@ -1,6 +1,7 @@
 import { Confirmer, guardedExecute } from '../core/approval.js';
 import { Context } from '../core/context.js';
 import { ActivityTray } from '../core/activity.js';
+import { isFileMutationLogLine, parseFileMutationLogLine, renderMutationSummary } from '../core/diffui.js';
 import {
   activityIconForTool,
   activityLabelForTool,
@@ -10,12 +11,12 @@ import {
   RevealFilter,
   stripThoughtBlocks,
   TerminalMarkdownFormatter,
-  ThinkingTicker,
+  ReasoningPanel,
   ThoughtStreamParser,
   WorkflowTree,
   yellow,
 } from '../core/ui.js';
-import { AgentConfig, ContextMessage } from '../types.js';
+import { AgentConfig, ContextMessage, createDefaultSessionState, SessionState } from '../types.js';
 import { LLMProvider } from './llm.js';
 import { allRoles, buildSystemPrompt, getBuiltInRole, readProjectAgentDoc, RoleDef } from './roles.js';
 import {
@@ -35,6 +36,35 @@ export const DEFAULT_MAX_TOOL_ITERATIONS = 30;
 
 /** §5.35 — same tool+args invoked more than this many times = likely loop. */
 const LOOP_REPEAT_LIMIT = 2;
+
+/** Tool read-only resmi yang terdaftar di codebase (rujuk IDEMPOTENT_READ_TOOLS). */
+export const IDEMPOTENT_READ_TOOLS = new Set([
+  'read_file',
+  'glob',
+  'list_dir',
+  'list_directory',
+  'code_search',
+  'read_logs',
+  'read_process_logs',
+]);
+
+/** Tool mutating untuk Build mode phase transition (Fase 1). */
+export const BUILD_MUTATING_TOOLS = new Set([
+  'write_file',
+  'edit_file',
+  'patch_file',
+  'delete_file',
+  'exec',
+]);
+
+/** Parameter injection per-SessionState ke loop detector (Fase 1). */
+export interface LoopDetectorParams {
+  loopThreshold: number;
+  consecutiveThreshold: number;
+  cycleThreshold: number;
+  softWarningThreshold: number;
+  readOnlyRelaxed: boolean;
+}
 
 /** Per-instruction token-ish usage snapshot (chars, provider-agnostic). */
 export interface TurnUsage {
@@ -104,6 +134,58 @@ export class Agent {
   private consecutiveRepeatCount = 0;
   /** Sliding window history of recent tool call signatures for N-gram cycle detection. */
   private callHistory: string[] = [];
+  /** Fase 3: panel Reasoning aktif saat ini (null di luar turn). */
+  private reasoningPanel: ReasoningPanel | null = null;
+  /** Fase 3: mode expand/collapse panel Reasoning untuk turn berjalan. */
+  private reasoningExpanded = false;
+  /** Fase 4: mode expand/collapse block detail diff (Ctrl+D). */
+  private diffDetailExpanded = false;
+
+  /** Fase 3: toggle expand/collapse panel Reasoning (Ctrl+R dari loop/TUI). */
+  toggleReasoningExpanded(): void {
+    this.reasoningExpanded = !this.reasoningExpanded;
+    this.reasoningPanel?.toggle(this.reasoningExpanded ? 'expanded' : 'collapsed');
+  }
+
+  /** Fase 3: status expand panel Reasoning saat ini (untuk status bar/test). */
+  get isReasoningExpanded(): boolean {
+    return this.reasoningExpanded;
+  }
+
+  /** Fase 4: toggle expand/collapse block detail diff (Ctrl+D dari loop/TUI). */
+  toggleDiffDetailExpanded(): void {
+    this.diffDetailExpanded = !this.diffDetailExpanded;
+    // Me-render ulang SEMUA block mutasi turn berjalan dengan mode baru:
+    // payload JSON (old/new) dari writeWithDiff membuat re-render persis
+    // tanpa baca disk ulang. Console.log aman — patched stdout editor
+    // memindah output di bawah area input (v0.7).
+    if (this.mutationSummaryBuffer) {
+      for (const line of this.mutationSummaryBuffer) {
+        const info = parseFileMutationLogLine(line);
+        if (!info) continue;
+        const rendered = renderMutationSummary({
+          tool: info.tool,
+          fileLabel: info.fileLabel,
+          stats: { added: info.added, removed: info.removed },
+          mode: this.diffDetailExpanded ? 'expanded' : 'collapsed',
+          oldText: info.oldText,
+          newText: info.newText,
+        });
+        console.log(rendered);
+      }
+    }
+  }
+
+  /** Fase 4: status expand detail diff saat ini (untuk test). */
+  get isDiffDetailExpanded(): boolean {
+    return this.diffDetailExpanded;
+  }
+
+  /**
+   * Fase 4: baris mutasi turn berjalan (ter-enkode) — sumber re-render
+   * toggle Ctrl+D; state per-instance, bukan global singleton.
+   */
+  private mutationSummaryBuffer: string[] | null = null;
 
   constructor(
     private readonly ctx: Context,
@@ -150,6 +232,45 @@ export class Agent {
       lastTurnDurationMs: 0,
     };
     this.lastUsage = null;
+  }
+
+  /** State mode per-sesi in-memory (Fase 1: Default, Research, Code, Build). */
+  public sessionState: SessionState = createDefaultSessionState();
+
+  /** Reset state sesi ke nilai default tiap sesi baru. */
+  resetSessionState(): void {
+    this.sessionState = createDefaultSessionState();
+  }
+
+  /** Parameter injection loop detector per-SessionState (Fase 1). */
+  public getLoopDetectorParams(tool: string): LoopDetectorParams {
+    const isReadOnly = IDEMPOTENT_READ_TOOLS.has(tool);
+    const mode = this.sessionState?.mode ?? 'default';
+    let relaxed = false;
+
+    if (mode === 'research' && isReadOnly) {
+      relaxed = true;
+    } else if (mode === 'build' && this.sessionState?.buildPhase === 'explore' && isReadOnly) {
+      relaxed = true;
+    }
+
+    if (relaxed) {
+      return {
+        loopThreshold: 10,
+        consecutiveThreshold: 10,
+        cycleThreshold: 10,
+        softWarningThreshold: 10,
+        readOnlyRelaxed: true,
+      };
+    }
+
+    return {
+      loopThreshold: LOOP_REPEAT_LIMIT,
+      consecutiveThreshold: 2,
+      cycleThreshold: 2,
+      softWarningThreshold: 2,
+      readOnlyRelaxed: false,
+    };
   }
 
   /** Active role (built-in or custom file), resolved from config (§4). */
@@ -271,18 +392,17 @@ export class Agent {
       'move_file',
       'revert_file',
     ]);
-    const IDEMPOTENT_READ_TOOLS = new Set([
-      'read_file',
-      'glob',
-      'list_dir',
-      'list_directory',
-      'code_search',
-      'read_logs',
-    ]);
     const turnToolCache = new Map<string, string>();
 
     const maxIterations = this.config.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
     let hasSeparatedFromTools = false;
+    // Fase 3: setiap instruksi baru mulai dengan panel Reasoning COLLAPSED;
+    // state expand hiduk di instance agar Ctrl+R bisa men-toggle saat turn jalan.
+    this.reasoningExpanded = false;
+    this.reasoningPanel = null;
+    this.diffDetailExpanded = false;
+    // Fase 4: log baris mutasi turn ini — sumber re-render toggle Ctrl+D.
+    this.mutationSummaryBuffer = [];
 
     this.callHistory = [];
     this.callCounts.clear();
@@ -302,24 +422,29 @@ export class Agent {
           return '';
         }
         usage.promptChars += messages.reduce((s, m) => s + m.content.length, 0);
-        const ticker = new ThinkingTicker();
         const mdFormatter = new TerminalMarkdownFormatter();
 
+        // Fase 3: panel Reasoning TERPISAH dari log tool call — box section
+        // sendiri, default COLLAPSED ("• Thought for Xs"), expand/collapse
+        // via Ctrl+R. Env RUKO_SHOW_REASONING=1 tetap memaksa expanded.
+        const showFullReasoning =
+          process.env.RUKO_SHOW_REASONING === '1' || process.env.RUKO_REASONING === '1';
+        const reasoningPanel = new ReasoningPanel({
+          getMode: () =>
+            showFullReasoning || this.reasoningExpanded ? 'expanded' : 'collapsed',
+          // "Y tokens" HANYA dicetak bila API usage tersedia dari provider;
+          // selain itu null → baris collapsed cukup "Thought for Xs".
+          getTokens: () =>
+            (this.llmProvider as { lastUsage?: { completionTokens?: number } | null }).lastUsage
+              ?.completionTokens ?? null,
+          onPermanent: (line) => console.log(line),
+        });
+        this.reasoningPanel = reasoningPanel;
+
         const finishThinking = () => {
-          if (ticker.isFinished()) return;
-          const showFull = process.env.RUKO_SHOW_REASONING === '1' || process.env.RUKO_REASONING === '1';
-          if (showFull && ticker.getBuffered().trim()) {
-            const framed = ticker.renderFramedReasoning();
-            ticker.flush();
-            if (framed) {
-              console.log(framed);
-            }
-            return;
-          }
-          const summary = ticker.flush();
-          if (summary) {
-            console.log(summary);
-          }
+          if (reasoningPanel.isFinished()) return;
+          if (showFullReasoning) this.reasoningExpanded = true;
+          reasoningPanel.finish();
         };
 
         const gate = new LineGate((text) => {
@@ -335,12 +460,14 @@ export class Agent {
         // feedback.txt item 1b: reasoning chunks run through their OWN reveal
         // filter, so a tool call emitted inside the thought stream can never
         // spill into the reasoning ticker as ordinary text.
-        const thoughtReveal = new RevealFilter((text) => ticker.feed(text));
+        const thoughtReveal = new RevealFilter((text) => reasoningPanel.feed(text));
         const thoughtParser = new ThoughtStreamParser({
           onText: (text) => reveal.feed(text),
           onThought: (thoughtChunk) => thoughtReveal.feed(thoughtChunk),
           onThoughtEnd: () => {
-            finishThinking();
+            // Fase 3: akhiri SEGMEN reasoning ini (baris collapsed / box per
+            // segmen) tanpa mematikan panel — <thought> berikutnya buka segmen baru.
+            reasoningPanel.finishSegment();
           },
         });
         let raw: string;
@@ -350,6 +477,8 @@ export class Agent {
             onThought: (chunk) => thoughtReveal.feed(chunk),
             signal,
             maxTokens: this.config.maxOutputTokens ?? 4096,
+            // Fase 2: wiring /reasoning → parameter provider di llm.ts.
+            reasoning: this.sessionState.reasoningLevel,
           });
         } catch (err) {
           // v0.7: an interrupted stream rejects with AbortError — that is a
@@ -507,6 +636,20 @@ export class Agent {
             return '';
           }
 
+          // Build mode phase transition:
+          // Begitu tool mutating (write_file, edit_file, patch_file, delete_file, exec) dipanggil pertama kali,
+          // beralih ke 'mutate' (ketat) PERMANEN sampai /mode diganti manual atau sesi baru.
+          if (
+            this.sessionState.mode === 'build' &&
+            this.sessionState.buildPhase === 'explore' &&
+            BUILD_MUTATING_TOOLS.has(call.tool)
+          ) {
+            this.sessionState.buildPhase = 'mutate';
+          }
+
+          // Injected loop detector parameters based on SessionState and tool whitelist (Fase 1)
+          const loopParams = this.getLoopDetectorParams(call.tool);
+
           // Item 2 & Solusi 2: Deteksi pemanggilan tool berulang & siklus N-gram
           const sig = this.getCallSignature(call);
           const isBatchDuplicate = batchSignatures.has(sig);
@@ -523,20 +666,20 @@ export class Agent {
           const cycle = this.detectCycle(this.callHistory, sig);
 
           // 1. Interupsi loop agen jika:
-          // - Pemanggilan berturut-turut > 2 kali (consecutive loop)
-          // - Terdeteksi siklus N-gram berulang > 2 kali (cycle loop)
-          // - Tool signature dipanggil ulang melebihi repeat cap (> LOOP_REPEAT_LIMIT)
+          // - Pemanggilan berturut-turut > params.consecutiveThreshold kali (consecutive loop)
+          // - Terdeteksi siklus N-gram berulang > params.cycleThreshold kali (cycle loop)
+          // - Tool signature dipanggil ulang melebihi repeat cap (> params.loopThreshold)
           if (
-            this.consecutiveRepeatCount > 2 ||
-            (cycle && cycle.count > 2) ||
-            (this.callCounts.get(sig) ?? 0) > LOOP_REPEAT_LIMIT
+            this.consecutiveRepeatCount > loopParams.consecutiveThreshold ||
+            (cycle && cycle.count > loopParams.cycleThreshold) ||
+            (this.callCounts.get(sig) ?? 0) > loopParams.loopThreshold
           ) {
             if (tree.isTreeActive) {
               tree.finish('Dihentikan karena deteksi loop');
             }
-            const cycleInfo = (cycle && cycle.count > 2)
+            const cycleInfo = (cycle && cycle.count > loopParams.cycleThreshold)
               ? `siklus pemanggilan ${cycle.cycleLength} tool berulang ${cycle.count}×`
-              : `tool "${call.tool}" dengan argumen sama sudah dipanggil > ${LOOP_REPEAT_LIMIT}×`;
+              : `tool "${call.tool}" dengan argumen sama sudah dipanggil > ${loopParams.loopThreshold}×`;
             return (
               `[deteksi loop] ${cycleInfo} — eksekusi dihentikan. Silakan simpulkan atau lanjutkan ke respons akhir berdasarkan data yang sudah ada di riwayat.`
             );
@@ -544,7 +687,10 @@ export class Agent {
 
           // 2. Jika perintah terdeteksi identik berturut-turut atau duplikat dalam batch yang sama,
           // cegah eksekusi ulang I/O dan kirim warning terstandarisasi.
-          if (this.consecutiveRepeatCount === 2 || isBatchDuplicate) {
+          if (
+            this.consecutiveRepeatCount === loopParams.softWarningThreshold ||
+            (isBatchDuplicate && !loopParams.readOnlyRelaxed)
+          ) {
             const warn = 'Perintah identik terdeteksi berulang, dilewati';
             tree.log(yellow(`⚠ ${warn}`));
             messages.push({
@@ -592,7 +738,17 @@ export class Agent {
             result = await runToolCall(call, {
               confirm: this.confirm,
               config: this.config,
-              onLog: (line) => tree.log(line),
+              onLog: (line) => {
+                // Fase 4: baris mutasi berkas (marker \f) — buffer untuk
+                // re-render Ctrl+D, dan hanya RINGKASAN yang masuk UI tree
+                // (diff legacy di belakang baris tidak ditampilkan saat
+                // collapsed; tersedia via toggle Ctrl+D dari payload JSON).
+                if (isFileMutationLogLine(line)) {
+                  const summaryOnly = line.split('\n')[0];
+                  if (this.mutationSummaryBuffer) this.mutationSummaryBuffer.push(summaryOnly);
+                }
+                tree.log(line);
+              },
               planMode: this.planMode,
               signal,
               llmProvider: this.llmProvider,
@@ -640,6 +796,7 @@ export class Agent {
 
       return '[agent] reached max tool iterations without a final answer; stopping.';
     } finally {
+      this.reasoningPanel = null;
       if (usage.promptChars > 0 || usage.completionChars > 0) {
         const pTok = Math.round(usage.promptChars / 4);
         const cTok = Math.round(usage.completionChars / 4);
