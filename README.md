@@ -1,22 +1,24 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-1.8.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.9.0-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-901%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-1018%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Security](https://img.shields.io/badge/security-CodeQL%20%7C%20Secret%20Scanning%20%7C%20Dependabot-success.svg)](.github/SECURITY.md)
 
 **Ruko** adalah AI Coding Agent CLI yang cepat, minimalis, dan *security-hardened*. Dibangun murni di atas **Node.js (ESM) + TypeScript tanpa runtime dependencies**, Ruko menghadirkan pair-programming yang andal langsung dari terminal.
 
-### Install Cepat
+### Install Cepat (macOS / Linux / WSL / Termux)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh | bash
 cd /proyek-anda
 ruko
 ```
+
+> Installer mem-pin tag release immutable `v1.9.0`, build dari source, memasang `ruko` global, dan otomatis mem-backup instalasi lama. Windows & Jupyter/Colab: lihat bagian [Instalasi per Platform](#-instalasi--memulai-cepat).
 
 ---
 
@@ -51,23 +53,70 @@ ruko
 
 ## 🚀 Instalasi & Memulai Cepat
 
-**Kebutuhan**: Node.js >=18, Linux/macOS/WSL (termasuk Termux Android)
+**Kebutuhan**: Node.js >=18 — Linux, macOS, WSL, Termux Android, Windows, serta Jupyter Notebook / Google Colab (deteksi lingkungan otomatis sejak v1.9.0).
 
-### 1. Kloning & Build Lokal
+### 1. macOS / Linux (termasuk WSL & Termux) — curl
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh | bash
+cd /proyek-anda
+ruko
+```
+
+Opsi lanjutan (supply-chain strict mode):
+
+```bash
+# Tag versi lain
+RUKO_VERSION=v1.9.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh)"
+# Pin commit SHA spesifik
+RUKO_COMMIT_SHA=<sha> bash -c "$(curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh)"
+```
+
+> Installer otomatis mengenali Termux (memperbaiki izin biner `$PREFIX/bin/ruko`) dan WSL.
+
+### 2. Windows
+
+Butuh Node.js >= 18 dan Git. Jalankan di PowerShell:
+
+```powershell
+git clone https://github.com/Iky969/Ruko-agent.git
+cd Ruko-agent
+npm install
+npm run build
+npm install -g .
+ruko
+```
+
+Alternatif: jalankan installer curl di atas melalui **WSL** atau **Git Bash**. Sejak v1.9.0, Ruko mendeteksi shell Windows (cmd/PowerShell) dari `envProfile.shellFamily` — saat memanggil `powershell.exe` digunakan flag process-scoped `-NoProfile -NonInteractive -ExecutionPolicy Bypass` (execution policy sistem tidak diubah).
+
+### 3. Jupyter Notebook / Google Colab
+
+Di cell notebook:
+
+```python
+!git clone https://github.com/Iky969/Ruko-agent.git
+%cd Ruko-agent
+!npm install && npm run build && npm install -g .
+```
+
+Lalu jalankan (Colab: `%cd /content` dulu):
+
+```python
+!ruko --exec "jelaskan isi folder ini"
+```
+
+Catatan lingkungan notebook (v1.9.0):
+- Flavor `colab`/`jupyter` terdeteksi otomatis dari env var resmi (`COLAB_GPU`, `COLAB_RELEASE_TAG`, `DATALAB_ENV`, `JPY_PARENT_PID`, `JPY_SESSION_NAME`) dan tampil di banner/status bar.
+- Tanpa TTY interaktif, splash menampilkan satu baris teks polos dan prompt approval otomatis **menolak** aksi berisiko (gunakan `RUKO_YOLO_MODE=1` + `RUKO_TRUST_FOLDER=1` dengan hati-hati).
+
+### 4. Build Lokal (semua platform)
 
 ```bash
 git clone https://github.com/Iky969/Ruko-agent.git
 cd Ruko-agent
 npm install
 npm run build
-```
-
-### 2. Global Install
-
-```bash
-npm install -g .
-# atau untuk dev:
-npm link
+npm install -g .   # atau untuk dev: npm link
 ```
 
 Lalu di proyek mana pun:
@@ -79,7 +128,7 @@ ruko
 
 Data terisolasi di `./.ruko/` (config, sessions, undo, memory).
 
-### 3. Workspace Trust
+### 5. Workspace Trust
 
 Saat pertama kali di folder baru:
 
@@ -91,7 +140,7 @@ Apakah kamu mempercayai folder ini? (y/n):
 
 Gunakan `--trust-folder` atau `RUKO_TRUST_FOLDER=1` untuk CI.
 
-### 4. Wizard Konfigurasi
+### 6. Wizard Konfigurasi
 
 Jika tanpa kredensial, Ruko memandu:
 
@@ -262,8 +311,8 @@ Config di `./.ruko/config.json` mode `0o600`:
 
 ```bash
 npm run typecheck   # static type check
-npm test            # 817 unit tests
-npm run test:e2e    # 1 E2E test
+npm test            # 1018 tests
+npm run test:e2e    # E2E test
 ```
 
 Test mencakup: approval regex & Guardian adversarial, multi-format tool parser (markdown fence, DSML, XML), Immutable Security Core, sandbox traversal, SSRF + IP-pinning, SSE multi-provider, TUI rewinding, context compression, undo journal, memory/skills/delegation.

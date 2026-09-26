@@ -466,6 +466,12 @@ export interface StatusBarInput {
   mode?: string;
   /** Fase 5: level reasoning aktif — indikator `reasoning:<level>` di bar. */
   reasoning?: string;
+  /**
+   * Fase B (v1.9.0): flavor lingkungan runtime (`wsl`/`colab`/`jupyter`/`termux`/`ci`).
+   * Opsional — kosong/undefined berarti tidak dirender (perilaku lama utuh).
+   * Flavor 'none' sengaja tidak ditampilkan (bukan informasi).
+   */
+  flavor?: string;
 }
 
 /**
@@ -515,6 +521,9 @@ export function buildStatusBar(input: StatusBarInput): string {
     // Fase 5: indikator mode + reasoning ditempel setelah badge mode lain.
     const modeInd = input.mode ? `mode:${input.mode} · ` : '';
     const reasoningInd = input.reasoning ? `reasoning:${input.reasoning} · ` : '';
+    // Fase B (v1.9.0): indikator flavor lingkungan (opsional, '' bila tidak ada).
+    // Flavor 'none' sengaja tidak dirender (bukan informasi yang berguna).
+    const flavorInd = input.flavor && input.flavor !== 'none' ? `${input.flavor} · ` : '';
     const turn = input.turn
       ? ` · ↑${formatK(input.turn.promptChars)} ↓${formatK(input.turn.completionChars)}${input.turn.durationMs ? ` · ${formatDuration(input.turn.durationMs)}` : ''}`
       : '';
@@ -529,22 +538,22 @@ export function buildStatusBar(input: StatusBarInput): string {
     }
 
     // Try full string first
-    const full = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}${modeInd}${reasoningInd}ctx ${pct}%${detailCtx}${turn}${hint}${waiting}`;
+    const full = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}${modeInd}${reasoningInd}${flavorInd}ctx ${pct}%${detailCtx}${turn}${hint}${waiting}`;
     if (visibleLength(full) <= targetWidth) {
       return onDarkGreen(full);
     }
     // Drop hint
-    const noHint = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}${modeInd}${reasoningInd}ctx ${pct}%${detailCtx}${turn}${waiting ? waiting : ' '}`;
+    const noHint = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}${modeInd}${reasoningInd}${flavorInd}ctx ${pct}%${detailCtx}${turn}${waiting ? waiting : ' '}`;
     if (visibleLength(noHint) <= targetWidth) {
       return onDarkGreen(noHint);
     }
     // Drop turn stats
-    const noTurn = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}${modeInd}${reasoningInd}ctx ${pct}%${detailCtx}${waiting ? waiting : ' '}`;
+    const noTurn = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}${modeInd}${reasoningInd}${flavorInd}ctx ${pct}%${detailCtx}${waiting ? waiting : ' '}`;
     if (visibleLength(noTurn) <= targetWidth) {
       return onDarkGreen(noTurn);
     }
     // Drop detailCtx
-    const noDetail = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}${modeInd}${reasoningInd}ctx ${pct}%${waiting ? waiting : ' '}`;
+    const noDetail = ` ⚡ [${input.model}${role}]${procStr} | ${busy}${plan}${yolo}${modeInd}${reasoningInd}${flavorInd}ctx ${pct}%${waiting ? waiting : ' '}`;
     if (visibleLength(noDetail) <= targetWidth) {
       return onDarkGreen(noDetail);
     }
@@ -554,11 +563,14 @@ export function buildStatusBar(input: StatusBarInput): string {
   const busyNarrow = input.busy ? (isVeryNarrow ? '⏳ ' : '⏳ AI bekerja · ') : '';
   const planNarrow = input.planMode ? (isVeryNarrow ? '⏸ ' : '⏸ PLAN · ') : '';
   const yoloNarrow = input.yoloMode ? (isVeryNarrow ? '[YOLO] ' : '[YOLO] · ') : '';
+  // Fase B (v1.9.0): flavor hanya pada layar narrow yang cukup lega (>=48) agar
+  // layout very-narrow (Termux 40 cols) tidak berubah sama sekali.
+  const flavorNarrow = input.flavor && input.flavor !== 'none' && w >= 48 ? `${input.flavor} · ` : '';
   const waitNarrow = input.pending && input.pending > 0
     ? (isVeryNarrow ? ` ⏳${input.pending}` : ` · ⏳ ${input.pending} menunggu `)
     : '';
 
-  const right = `${busyNarrow}${planNarrow}${yoloNarrow}ctx ${pct}%${waitNarrow ? waitNarrow : ' '}`;
+  const right = `${busyNarrow}${planNarrow}${yoloNarrow}${flavorNarrow}ctx ${pct}%${waitNarrow ? waitNarrow : ' '}`;
 
   let proc = '';
   if (procCount > 0) {
@@ -667,6 +679,11 @@ export interface StatusPanelInput {
   mode?: string;
   /** Fase 5: level reasoning aktif (high/xhigh/max/extreme) — indikator status bar. */
   reasoning?: string;
+  /**
+   * Fase B (v1.9.0): flavor lingkungan runtime — badge dim di panel status.
+   * Opsional; 'none'/undefined tidak dirender (perilaku lama utuh).
+   */
+  flavor?: string;
 }
 
 /**
@@ -707,6 +724,10 @@ export function buildStatusPanel(input: StatusPanelInput): string[] {
   }
   if (input.reasoning) {
     badges.push(dim(`reasoning:${input.reasoning}`));
+  }
+  // Fase B (v1.9.0): badge flavor lingkungan (opsional, dim — panel tetap tenang).
+  if (input.flavor && input.flavor !== 'none') {
+    badges.push(dim(input.flavor));
   }
   const badgeCell = badges.join(' ');
 

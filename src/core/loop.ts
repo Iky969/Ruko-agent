@@ -32,6 +32,8 @@ import { checkMemoryWarning, initMemoryFile } from './memory.js';
 import { appendHistory, defaultHistoryPath, loadHistory } from './history.js';
 import { getWorkspaceRoot } from '../agent/tools.js';
 import { defaultProcessManager } from '../agent/processManager.js';
+// Fase B (v1.9.0): EnvProfile singleton (deteksi murni, Fase A).
+import { getEnvProfile } from './env.js';
 
 /** Prompt line shown under the status bar (placeholder until the user types). */
 const PROMPT_HINT = '/? untuk bantuan, tanya apa saja...';
@@ -83,6 +85,12 @@ export class SystemLoop {
   }
 
   private async startAsync(): Promise<void> {
+    // Fase B: injeksi EnvProfile ke runtime context existing (agent.sessionState)
+    // sebelum cabang TTY/non-TTY. Additive — tidak mengubah algoritma apa pun.
+    if (!this.agent.sessionState.envProfile) {
+      this.agent.sessionState.envProfile = getEnvProfile();
+    }
+
     const model = this.agent.llm.model || '(belum diatur — /login)';
     const provider = this.agent.llm.name;
     const info: SplashInfo = {
@@ -181,6 +189,23 @@ export class SystemLoop {
 
   /** Non-TTY path: classic readline over piped stdin (smoke tests, CI). */
   private startPipeLoop(): void {
+    // Fase B (v1.9.0): fallback non-interaktif via cabang pipe EXISTING.
+    // isInteractiveTTY === false di sini (stdin bukan TTY), jadi:
+    //  - raw mode / kursor / keypress listener memang TIDAK pernah diaktifkan
+    //    di jalur ini (LineEditor hanya dibuat di cabang `process.stdin.isTTY`),
+    //  - animasi ticker diredam (RUKO_NO_ANIM) agar output murni line-by-line
+    //    deterministik untuk pipe/smoke-test,
+    //  - status panel & tray tidak dirender (jalur pipe memang tidak memanggilnya).
+    // TIDAK ada sistem input paralel baru — hanya konfigurasi env pada cabang yang ada.
+    if (this.agent.sessionState.envProfile && !this.agent.sessionState.envProfile.isInteractiveTTY) {
+      process.env.RUKO_NO_ANIM = process.env.RUKO_NO_ANIM ?? '1';
+      const env = this.agent.sessionState.envProfile;
+      console.log(
+        dim(
+          `[env] os=${env.os} · shell=${env.shellFamily} · flavor=${env.flavor} · tty=${env.isInteractiveTTY}`,
+        ),
+      );
+    }
     this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     this.rl.setPrompt(this.composePrompt());
     this.rl.prompt();
@@ -220,6 +245,9 @@ export class SystemLoop {
       // Fase 5: indikator mode + reasoning di status bar.
       mode: this.agent.sessionState.mode,
       reasoning: this.agent.sessionState.reasoningLevel,
+      // Fase B (v1.9.0): flavor lingkungan di status bar (opsional, kosong bila
+      // envProfile belum ter-inject → tidak mengubah rendering existing).
+      flavor: this.agent.sessionState.envProfile?.flavor,
     });
   }
 
@@ -252,6 +280,8 @@ export class SystemLoop {
       // Fase 5: indikator mode + reasoning di panel status.
       mode: this.agent.sessionState.mode,
       reasoning: this.agent.sessionState.reasoningLevel,
+      // Fase B (v1.9.0): flavor lingkungan di panel status.
+      flavor: this.agent.sessionState.envProfile?.flavor,
     });
   }
 

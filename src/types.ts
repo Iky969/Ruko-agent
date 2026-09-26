@@ -2,6 +2,11 @@
  * Shared type definitions for the AI Coding Agent CLI.
  */
 
+// Fase B (v1.9.0): re-export EnvProfile agar konsumen types.ts tidak perlu
+// import dari core/env.js secara langsung (tipe deteksi lingkungan).
+export type { EnvProfile, EnvOs, EnvShellFamily, EnvFlavor } from './core/env.js';
+import type { EnvProfile } from './core/env.js';
+
 /** Role of a message inside the agent's conversation context. */
 export type ContextRole = 'system' | 'user' | 'assistant' | 'tool' | 'tool_call';
 
@@ -62,6 +67,13 @@ export interface SessionState {
   buildPhase?: BuildPhase;
   /** Level reasoning per-sesi in-memory (Fase 2). Default sesi baru: 'xhigh'. */
   reasoningLevel: ReasoningLevel;
+  /**
+   * Fase B (v1.9.0): profil lingkungan runtime (os/shellFamily/flavor/TTY).
+   * Opsional & default undefined — ketersediaan tidak pernah jadi syarat
+   * jalur eksekusi mana pun (infrastruktur informatif, bukan gate).
+   * Sumber kebenaran: getEnvProfile() singleton di src/core/env.ts.
+   */
+  envProfile?: EnvProfile;
 }
 
 export function createDefaultSessionState(): SessionState {
@@ -69,6 +81,8 @@ export function createDefaultSessionState(): SessionState {
     mode: 'default',
     buildPhase: 'explore',
     reasoningLevel: 'xhigh',
+    // Fase B: default kosong — loop memutakhirkan via getEnvProfile() saat start.
+    envProfile: undefined,
   };
 }
 
