@@ -524,7 +524,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     this.lastFinishReason = null;
 
     const reasoningLevel = options?.reasoning ?? null;
-    let useNativeReasoning = Boolean(reasoningLevel) && !this.reasoningParamUnsupported;
+    const useNativeReasoning = Boolean(reasoningLevel) && !this.reasoningParamUnsupported;
 
     // Normalisasi & Validasi Skema Tool Result: Pastikan payload pesan balik setelah tool execution
     // sesuai dengan skema standar provider (role: "tool" dengan tool_call_id yang valid)
@@ -583,7 +583,6 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       const errBody = await response.text();
       if (/reasoning/i.test(errBody)) {
         this.reasoningParamUnsupported = true;
-        useNativeReasoning = false;
         this.reasoningFallbackLog.note('reasoning_effort');
         response = await this.requestWithRetry(`${this.baseUrl}/chat/completions`, {
           method: 'POST',
@@ -910,7 +909,7 @@ export class AnthropicProvider implements LLMProvider {
     }
 
     const reasoningLevel = options?.reasoning ?? null;
-    let useNativeReasoning = Boolean(reasoningLevel) && !this.reasoningParamUnsupported;
+    const useNativeReasoning = Boolean(reasoningLevel) && !this.reasoningParamUnsupported;
 
     const buildPayload = (withNative: boolean): Record<string, unknown> => {
       // Fallback prompt injection: dipakai saat parameter native `thinking` tidak didukung.
@@ -976,7 +975,6 @@ export class AnthropicProvider implements LLMProvider {
         const errBody = await response.text();
         if (/thinking|budget_tokens/i.test(errBody)) {
           this.reasoningParamUnsupported = true;
-          useNativeReasoning = false;
           this.reasoningFallbackLog.note('thinking.budget_tokens');
           response = await this.requestWithRetry(url, {
             method: 'POST',
@@ -1215,7 +1213,7 @@ export class GeminiProvider implements LLMProvider {
     }
 
     const reasoningLevel = options?.reasoning ?? null;
-    let useNativeReasoning = Boolean(reasoningLevel) && !this.reasoningParamUnsupported;
+    const useNativeReasoning = Boolean(reasoningLevel) && !this.reasoningParamUnsupported;
 
     const buildPayload = (withNative: boolean): Record<string, unknown> => {
       // Fallback prompt injection: dipakai saat parameter native `thinkingConfig` tidak didukung.
@@ -1279,7 +1277,6 @@ export class GeminiProvider implements LLMProvider {
         const errBody = await response.text();
         if (/thinking/i.test(errBody)) {
           this.reasoningParamUnsupported = true;
-          useNativeReasoning = false;
           this.reasoningFallbackLog.note('thinkingConfig.thinkingBudget');
           response = await this.requestWithRetry(url, {
             method: 'POST',
