@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
@@ -11,9 +12,12 @@ const execAsync = promisify(exec);
 test('YOLO Hardening', async (t) => {
   const tmpWs = mkdtempSync(join(tmpdir(), 'ruko-yolo-hardening-'));
   
-  // Create an absolute file URL for importing the compiled CLI
+  // Create an absolute file URL for importing the compiled CLI.
+  // pathToFileURL() wajib: konstruksi manual 'file://' + path Windows
+  // menghasilkan URL malformed (host "C:", backslash hilang sebagai escape
+  // di template literal test_tty.mjs) → ERR_INVALID_URL saat import.
   const distIndexPath = join(process.cwd(), 'dist', 'index.js');
-  const distIndexUrl = 'file://' + distIndexPath;
+  const distIndexUrl = pathToFileURL(distIndexPath).href;
 
   const mockScriptPath = join(tmpWs, 'test_tty.mjs');
   
