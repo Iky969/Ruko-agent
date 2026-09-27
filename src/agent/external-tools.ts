@@ -15,6 +15,8 @@ import { spawn } from 'node:child_process';
 import { readFile, readdir, access } from 'node:fs/promises';
 import { join, resolve, basename } from 'node:path';
 import { constants } from 'node:fs';
+// Tree kill lintas platform: POSIX `kill(-pid)`/`child.kill()`, Windows `taskkill /T /F`.
+import { killProcessTree } from '../core/treeKill.js';
 
 /** Shape of a tool.json manifest file. */
 export interface ToolManifest {
@@ -168,14 +170,18 @@ export async function executeExternalTool(
       stderr += chunk.toString();
     });
 
+    // Timeout/abort tree-aware: pada Windows `child.kill()` hanya membunuh child
+    // langsung dan meninggalkan grandchild, jadi tree kill dipakai. Tool di sini
+    // di-spawn tanpa `detached`, sehingga non-win32 tetap `child.kill('SIGTERM')`
+    // (perilaku lama bit-identik) sedangkan Windows memakai `taskkill /T /F`.
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
+      void killProcessTree(child.pid ?? -1, { force: false, processGroup: false, child });
     }, timeout);
 
     if (options?.signal) {
       options.signal.addEventListener('abort', () => {
-        child.kill('SIGTERM');
+        void killProcessTree(child.pid ?? -1, { force: false, processGroup: false, child });
       }, { once: true });
     }
 

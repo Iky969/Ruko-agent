@@ -5,6 +5,8 @@ import { summarizeLog } from './summarizer.js';
 import { sanitizeTerminalOutput } from './ui.js';
 // Fase D (v1.9.0): satu sumber kebenaran pemilihan shell (envProfile.shellFamily).
 import { getEnvProfile, type EnvProfile } from './env.js';
+// Tree kill lintas platform (fix zombie grandchild Windows).
+import { killProcessTree } from './treeKill.js';
 
 export interface ExecOptions {
   timeoutMs?: number;
@@ -151,17 +153,26 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
     const shellBinary = shellSelection.binary;
     const shellArgs = [...shellSelection.argsPrefix, command];
 
+    // Timeout di-OWN sendiri (bukan opsi `timeout` bawaan Node) supaya kill-nya
+    // bisa tree-aware. Opsi bawaan Node hanya mengirim sinyal ke child shell,
+    // sehingga grandchild-nya tertinggal hidup setelah timeout.
+    let killTimer: NodeJS.Timeout | null = null;
+    let timedOut = false;
+
     const child = execFile(
       shellBinary,
       shellArgs,
       {
         cwd: options.cwd,
         env: cleanEnv,
-        timeout: timeoutMs,
         maxBuffer: options.maxBuffer ?? DEFAULT_MAX_BUFFER,
         windowsHide: true,
       },
       (error, rawStdout, rawStderr) => {
+        if (killTimer) {
+          clearTimeout(killTimer);
+          killTimer = null;
+        }
         const durationMs = Date.now() - started;
         // `error.code` is the process exit code; `null` when killed by timeout.
         let code = error ? (typeof error.code === 'number' ? error.code : null) : 0;
@@ -171,10 +182,13 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
           ? sanitizeTerminalOutput(interleavedChunks.join(''))
           : [stdout, stderr].filter(Boolean).join('\n');
 
-        // Check if process was killed by timeout
-        const killedByTimeout = Boolean(
-          error && (error.killed || (error as any).signal === 'SIGTERM') && durationMs >= Math.max(0, timeoutMs - 1500),
-        );
+        // Check if process was killed by timeout (flag internal lebih akurat;
+        // heuristik lama dipertahankan sebagai jaring pengaman).
+        const killedByTimeout =
+          timedOut ||
+          Boolean(
+            error && (error.killed || (error as any).signal === 'SIGTERM') && durationMs >= Math.max(0, timeoutMs - 1500),
+          );
         // Standard timeout exit code is 124
         if (killedByTimeout && code === null) {
           code = 124;
@@ -226,15 +240,43 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
       interleavedChunks.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
     });
 
-    // v0.7: an interrupted turn kills its shell child (SIGKILL so grandchildren
-    // die too) — the callback above still resolves with what was captured.
-    // Fix: track abort listener and remove it when child exits to prevent leak.
+    // Timeout tree-aware: membunuh grandchild, bukan hanya child shell.
+    if (timeoutMs > 0) {
+      killTimer = setTimeout(() => {
+        timedOut = true;
+        // execFile TIDAK detached → shell bukan pemimpin process group, jadi
+        // `processGroup: false` menjaga perilaku non-win32 tetap `child.kill()`
+        // (bit-identik dengan sebelumnya), sementara Windows memakai
+        // `taskkill /PID <pid> /T /F` yang memang membunuh seluruh tree.
+        void killProcessTree(child.pid ?? -1, { force: true, processGroup: false, child });
+        // PENTING: callback execFile baru dipanggil setelah SEMUA pipe tertutup.
+        // Di POSIX grandchild (mis. `sleep 5` di balik `/bin/sh -c`) bisa masih
+        // memegang pipe itu, sehingga hasil timeout tertahan sampai proses itu
+        // selesai sendiri. Opsi `timeout` bawaan Node dulu menutup pipe ini,
+        // jadi penutupan eksplisit diperlukan agar semantik timeout tidak berubah
+        // (durasi tetap ~timeoutMs, bukan durasi proses grandchild).
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      }, timeoutMs);
+    }
+
+    // v0.7: an interrupted turn kills its shell work instead of leaving it
+    // running behind the REPL — the callback above still resolves with what was
+    // captured. Track abort listener and remove it on child exit to prevent leak.
+    //
+    // KOREKSI KOMENTAR LAMA ("SIGKILL so grandchildren die too"): itu TIDAK
+    // akurat — `child.kill()` hanya mengirim sinyal ke PID child, sehingga
+    // grandchild TETAP hidup. Grandchild ikut mati lewat tree kill di Windows
+    // (`taskkill /T /F`) di bawah; pada POSIX di sini perilaku lama dipertahankan
+    // karena shell bukan group leader (execFile non-detached).
     let abortHandler: (() => void) | null = null;
     if (options.signal) {
       if (options.signal.aborted) {
-        child.kill('SIGKILL');
+        void killProcessTree(child.pid ?? -1, { force: true, processGroup: false, child });
       } else {
-        abortHandler = () => child.kill('SIGKILL');
+        abortHandler = () => {
+          void killProcessTree(child.pid ?? -1, { force: true, processGroup: false, child });
+        };
         options.signal.addEventListener('abort', abortHandler, { once: true });
       }
     }
