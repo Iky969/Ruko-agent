@@ -1,4 +1,4 @@
-import { constants as fsConstants, promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs, realpathSync } from 'node:fs';
 import { Buffer } from 'node:buffer';
 import * as path from 'node:path';
 import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isPathInsideWorkspace, isSensitivePath } from './tools.js';
@@ -298,7 +298,7 @@ export async function walkDirectory(
 ): Promise<WalkEntry[]> {
   const absRoot = path.resolve(cwd, dirPath);
   try {
-    const realRoot = await fs.realpath(absRoot);
+    const realRoot = realpathSync(absRoot);
     if (visitedDirs.has(realRoot)) return [];
     visitedDirs.add(realRoot);
   } catch {
@@ -326,7 +326,12 @@ export async function walkDirectory(
       if (entry.isDirectory()) {
         if (IGNORED_DIRS.has(entry.name) || isSensitivePath(fullPath, cwd)) continue;
         try {
-          const real = await fs.realpath(fullPath);
+          // PERBAIKAN (CI Windows): fs.realpath ASYNC terbukti bisa gagal di
+          // runner Windows (probe ci-diagnostics menunjukkan realpathSync
+          // konsisten; cluster kegagalan glob/code_search berasal dari jalur
+          // async ini yang catch-nya diam-diam membuang subdirektori).
+          // realpathSync apple-to-apple dengan isPathInsideWorkspace.
+          const real = realpathSync(fullPath);
           if (!isPathInsideWorkspace(real, cwd)) continue;
           if (visitedDirs.has(real) || isSensitivePath(real, cwd)) continue;
           visitedDirs.add(real);
@@ -337,7 +342,7 @@ export async function walkDirectory(
         }
       } else if (entry.isSymbolicLink()) {
         try {
-          const real = await fs.realpath(fullPath);
+          const real = realpathSync(fullPath);
           if (!isPathInsideWorkspace(real, cwd)) continue;
           const stat = await fs.stat(real);
           if (stat.isDirectory()) {

@@ -186,6 +186,10 @@ export class ProcessManager {
 
     const id = `proc_${++this.idCounter}`;
 
+    // CATATAN (Windows): `spawn(cmd, { shell: true })` di Windows dijalankan
+    // libuv sebagai `cmd.exe /d /s /c "cmd"` — libuv SUDAH menambah sepasang
+    // kutip luar (beda dengan execFile yang tidak). Jangan tambah kutip lagi
+    // di sini: kutip ganda justru menghasilkan `""cmd""` → argumen salah.
     const child = spawn(command, {
       shell: true,
       detached: true,
