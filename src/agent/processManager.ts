@@ -190,9 +190,17 @@ export class ProcessManager {
     // libuv sebagai `cmd.exe /d /s /c "cmd"` — libuv SUDAH menambah sepasang
     // kutip luar (beda dengan execFile yang tidak). Jangan tambah kutip lagi
     // di sini: kutip ganda justru menghasilkan `""cmd""` → argumen salah.
+    //
+    // PERBAIKAN (CI Windows): `detached: true` hanya untuk POSIX (process-group
+    // kill via `kill(-pid)`). Di Windows, detached+unref dengan stdio pipe
+    // membuat data stdout TIDAK PERNAH sampai ke parent (event exit 0 diterima,
+    // logs=[] permanen — diagnostik ring buffer CI). Tree-kill Windows memakai
+    // `taskkill /PID <pid> /T /F` yang TIDAK butuh detachment, jadi aman.
+    // windowsHide mencegah console window orphan (conhost) di runner.
     const child = spawn(command, {
       shell: true,
-      detached: true,
+      detached: process.platform !== 'win32',
+      windowsHide: true,
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

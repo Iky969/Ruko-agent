@@ -309,8 +309,11 @@ test('execute captures interleaved stdout and stderr sequentially', async () => 
   // sehingga `node -e "..."` dikirim sebagai argumen terpotong. Cara aman
   // lintas platform: kirim skrip via STDIN (`node` tanpa -e) — tidak ada kutip
   // sama sekali, dan assertion identik di semua OS.
+  // Jeda 60ms (bukan 20ms): di runner CI lambat, gap 20ms bisa tertelan
+  // scheduler sehingga B (stderr) tiba bersamaan C (stdout) — urutan antar-
+  // pipe jadi tidak deterministik ('ACB'). 60ms menjaga urutan kedatangan.
   const script =
-    'process.stdout.write("A"); setTimeout(() => { process.stderr.write("B"); setTimeout(() => { process.stdout.write("C"); }, 20); }, 20);';
+    'process.stdout.write("A"); setTimeout(() => { process.stderr.write("B"); setTimeout(() => { process.stdout.write("C"); }, 60); }, 60);';
   let res;
   if (process.platform === 'win32') {
     const { execFile } = await import('node:child_process');
