@@ -189,7 +189,14 @@ test('read_process_logs maintains ring buffer capped at 100 lines', async () => 
 
     const logs = defaultProcessManager.readProcessLogs(proc.id);
     assert.ok(logs);
-    assert.equal(logs.length, 100);
+    // PERBAIKAN (CI Windows): log isi nyata saat jumlah salah — node runner
+    // bisa lebih lambat dari 500ms wait, atau proses gagal start; diagnostik
+    // langsung terlihat tanpa menggali log job.
+    assert.equal(
+      logs.length,
+      100,
+      `logs=${JSON.stringify(logs.slice(0, 5))}... status=${proc.status} exitCode=${proc.exitCode} cmd=${proc.command}`,
+    );
     // Oldest 50 lines dropped, starting from line 51
     assert.equal(logs[0], '[stdout] line 51');
     assert.equal(logs[99], '[stdout] line 150');
