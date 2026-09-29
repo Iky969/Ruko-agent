@@ -19,7 +19,23 @@ function inTempWorkspace<T>(fn: (ws: string) => Promise<T> | T): Promise<T> {
     defaultProcessManager.reset();
     setWorkspaceRoot(null);
     process.chdir(prev);
-    rmSync(ws, { recursive: true, force: true });
+    // PERBAIKAN (Windows): cleanup best-effort — rmdir bisa EBUSY karena
+    // handle OS dari proses yang baru di-taskkill belum lepas. Retry + skip
+    // (folder orphan di Temp) daripada menggagalkan test.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        rmSync(ws, { recursive: true, force: true });
+        break;
+      } catch (err: any) {
+        const retryable =
+          err?.code === 'EBUSY' || err?.code === 'ENOTEMPTY' || err?.code === 'EPERM' || err?.code === 'EACCES';
+        if (!retryable || attempt === 9) {
+          if (retryable) break;
+          throw err;
+        }
+        await new Promise((r) => setTimeout(r, 200 + attempt * 150));
+      }
+    }
   });
 }
 
@@ -184,10 +200,15 @@ test('read_process_logs maintains ring buffer capped at 100 lines', async () => 
     const cmd = `node ${loopScript}`;
     const proc = defaultProcessManager.startProcess(cmd, ws);
 
-    // Wait for output to complete
-    await new Promise((r) => setTimeout(r, 500));
-
-    const logs = defaultProcessManager.readProcessLogs(proc.id);
+    // PERBAIKAN (CI Windows): event 'exit' child bisa mendahului pengiriman
+    // data pipe (IOCP) — fixed 500ms membuat logs=[] walau proses sukses
+    // (exit 0). Poll sampai 100 baris terkumpul (maks 5 dtk).
+    let logs: string[] | null = null;
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      logs = defaultProcessManager.readProcessLogs(proc.id);
+      if (logs && logs.length >= 100) break;
+    }
     assert.ok(logs);
     // PERBAIKAN (CI Windows): log isi nyata saat jumlah salah — node runner
     // bisa lebih lambat dari 500ms wait, atau proses gagal start; diagnostik
@@ -226,12 +247,17 @@ test('read_process_logs redacts credentials with baseline regex pattern', async 
     const cmd = `node ${scriptPath}`;
     const proc = defaultProcessManager.startProcess(cmd, ws);
 
-    await new Promise((r) => setTimeout(r, 400));
-
-    const resRaw = await runToolCall(
-      { tool: 'read_process_logs', process_id: proc.id },
-      { workspaceRoot: ws },
-    );
+    // PERBAIKAN (CI Windows): poll hingga 6 baris terkumpul (maks 5 dtk) —
+    // pengiriman data pipe di Windows bisa terlambat dari event exit.
+    let resRaw = '';
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      resRaw = await runToolCall(
+        { tool: 'read_process_logs', process_id: proc.id },
+        { workspaceRoot: ws },
+      );
+      if (JSON.parse(resRaw).lines >= 6) break;
+    }
     const res = JSON.parse(resRaw);
     assert.equal(res.ok, true);
     assert.equal(res.lines, 6);

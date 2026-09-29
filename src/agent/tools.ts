@@ -953,7 +953,19 @@ function workspacePathForms(workspaceRoot: string): string[] {
   try {
     if (existsSync(cwd)) add(realpathSync(cwd));
   } catch {
-    // realpath gagal (8.3/permission/EIO) → cukup bentuk lexical
+    // realpath gagal (permission/EIO) → cukup bentuk lexical
+  }
+  try {
+    // PERBAIKAN (CI Windows, dari diagnostik TASK-05): di runner Windows,
+    // fs.realpath ASYNC mengembalikan LONG-NAME (`runneradmin`) sementara
+    // realpathSync mempertahankan bentuk 8.3 (`RUNNER~1`). Tanpa bentuk
+    // long-name di sini, path hasil realpath async DI DALAM workspace justru
+    // ditolak 'di luar working directory'. realpathSync.native() (dan hasil
+    // async) memakai GetFinalPathNameByHandle → long-name + prefix \\?\.
+    const native = realpathSync.native(cwd);
+    add(native.startsWith('\\\\?\\') ? native.slice(4) : native);
+  } catch {
+    // native tidak tersedia (Node < 18.15 fallback) → abaikan
   }
   return [...forms];
 }
