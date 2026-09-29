@@ -344,7 +344,7 @@ test('Finding 1: isSensitivePath and containsSensitiveFilePattern block shell st
 
 test('Finding 2: write_file and writeWithDiff reject payloads exceeding MAX_FILE_WRITE_BYTES (5MB)', async () => {
   const { MAX_FILE_WRITE_BYTES, runToolCall } = await import('../agent/tools.js');
-  const { join } = await import('node:path');
+  const { join, relative } = await import('node:path');
   const { mkdtempSync, rmSync } = await import('node:fs');
 
   assert.equal(MAX_FILE_WRITE_BYTES, 5 * 1024 * 1024);
@@ -352,7 +352,9 @@ test('Finding 2: write_file and writeWithDiff reject payloads exceeding MAX_FILE
   const testDir = mkdtempSync(join(process.cwd(), '.tmp-write-limit-'));
   try {
     const hugeContent = 'x'.repeat(MAX_FILE_WRITE_BYTES + 10);
-    const relFile = join(testDir.replace(process.cwd() + '/', ''), 'huge.txt');
+    // `relative()` (bukan replace string) supaya pemisah path Windows
+    // (backslash) tetap benar — assertion tidak berubah.
+    const relFile = join(relative(process.cwd(), testDir), 'huge.txt');
     const res = await runToolCall(
       { tool: 'write_file', path: relFile, content: hugeContent },
       {},
