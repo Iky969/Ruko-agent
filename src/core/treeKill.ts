@@ -167,11 +167,16 @@ export function resolveTreeKill(pid: number, options: TreeKillOptions = {}): Tre
  * PERBAIKAN (Windows CI hang): taskkill bisa TIDAK PERnah exit — ia meng-close
  * koneksi RPC ke Win32 API saat mematikan process yang tree-nya sedang sibuk
  * (proses anak yang di-spawn test), atau menggantung di konsol yang ter-inherit.
- * `await` tanpa guard = seluruh rantai stopProcess/cleanup terkunci. Diberi
- * guard 3 detik: lewat waktu → dianggap terkirim (proses target hampir pasti
- * sudah mati; tree kill bersifat best-effort) tanpa memblokir pemanggil.
+ * `await` tanpa guard = seluruh rantai stopProcess/cleanup terkunci.
+ *
+ * PENTING (pelajaran batch CI ke-4): guard TIDAK BOLEH membunuh taskkill di
+ * tengah enumerasi tree — kill parsial menyisakan grandchild yatim yang
+ * mengunci direktori kerja (EBUSY di rmdir cleanup test selamanya). Guard kini
+ * hanya meLEPAS pemanggil: promise selesai lebih awal, proses taskkill dibiarkan
+ * berjalan sampai tuntas (tree kill tetap selesai di background), tanpa
+ * memblokir stopProcess.
  */
-const TASKKILL_GUARD_MS = 3_000;
+const TASKKILL_GUARD_MS = 5_000;
 
 function defaultRunTaskkill(binary: string, args: string[]): Promise<number | null> {
   return new Promise<number | null>((resolve, reject) => {
@@ -183,17 +188,14 @@ function defaultRunTaskkill(binary: string, args: string[]): Promise<number | nu
       return;
     }
     let settled = false;
-    const guard = setTimeout(() => {
+    const settle = (code: number | null): void => {
       if (!settled) {
         settled = true;
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          // ignore — proses mungkin sudah mati
-        }
-        resolve(0); // asumsikan kill tree terkirim; jangan blokir pemanggil
+        clearTimeout(guard);
+        resolve(code);
       }
-    }, TASKKILL_GUARD_MS);
+    };
+    const guard = setTimeout(() => settle(0), TASKKILL_GUARD_MS);
     // `error` (ENOENT/EACCES) → reject agar pemanggil memakai fallback.
     child.once('error', (err) => {
       if (!settled) {
@@ -202,13 +204,7 @@ function defaultRunTaskkill(binary: string, args: string[]): Promise<number | nu
         reject(err);
       }
     });
-    child.once('close', (code) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(guard);
-        resolve(code);
-      }
-    });
+    child.once('close', (code) => settle(code));
   });
 }
 

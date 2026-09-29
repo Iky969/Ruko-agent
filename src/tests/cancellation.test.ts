@@ -209,8 +209,15 @@ test('ESC saat tool exec durasi lama aktif → aborted', async () => {
 
     const turnPromise = agent.handleInstruction('jalankan perintah lama', ac.signal);
 
-    // Beri waktu hingga tool exec mulai berjalan, lalu kirim ESC
-    await new Promise((r) => setTimeout(r, 200));
+    // Beri waktu hingga tool exec mulai berjalan, lalu kirim ESC.
+    // PERBAIKAN (Windows runner lambat): fixed 200ms terlalu cepat — exec
+    // kadang belum mulai sehingga ESC tidak meng-abort apapun dan giliran
+    // selesai normal ('Selesai.'). Poll ActivityTray agent (terisi saat tool
+    // mulai dieksekusi) maks 3 dtk sebelum mengirim ESC.
+    for (let i = 0; i < 30; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      if (agent.activityTray.size() > 0) break;
+    }
     input.send('\u001b');
 
     const { result, out } = await captureStdout(() => turnPromise);

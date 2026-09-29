@@ -805,6 +805,35 @@ async function writeWithDiff(
   workspaceRoot: string = getWorkspaceRoot(),
   toolName: string = 'edit_file',
 ): Promise<string> {
+  // PERBAIKAN (Windows — temuan CI): O_NOFOLLOW DIABAIKAN libuv di Windows
+  // (open tetap mengikuti symlink), sehingga edit_file lewat symlink file yang
+  // menunjuk DI LUAR workspace BERHASIL MENULIS di luar sandbox (test keamanan
+  // v17 gagal dengan 'Cannot read properties of undefined' = tidak ada error).
+  // Guard eksplisit dua arah:
+  //  1. lstat symlink + realpath keluar workspace → tolak dengan pesan escape
+  //     'symlink di luar working directory' (assertInsideWorkspace);
+  //  2. symlink internal apa pun → tetap ditolak ala O_NOFOLLOW (anti-TOCTOU).
+  try {
+    const lst = lstatSync(abs);
+    if (lst.isSymbolicLink()) {
+      let real: string;
+      try {
+        real = realpathSync(abs);
+      } catch {
+        const target = readlinkSync(abs);
+        real = path.isAbsolute(target) ? path.resolve(target) : path.resolve(path.dirname(abs), target);
+      }
+      assertInsideWorkspace(real, workspaceRoot);
+      throw new Error(
+        `Akses ditolak: "${fileLabel}" adalah symbolic link. Menulis atau mengubah file melalui symbolic link dilarang demi keamanan sandbox.`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof Error && (err.message.includes('symlink di luar working directory') || err.message.includes('symbolic link'))) {
+      throw err;
+    }
+  }
+
   // Reject mutating immutable security core files
   assertNotSecurityCore(fileLabel, workspaceRoot);
   assertNotSecurityCore(abs, workspaceRoot);

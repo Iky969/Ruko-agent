@@ -138,18 +138,16 @@ export async function readFileTool(
   try {
     const lst = await fs.lstat(abs);
     if (lst.isSymbolicLink()) {
+      // TASK-05 deny-by-default: lstat menyatakan symlink → TOLAK, tanpa
+      // kecuali bentuk path (8.3/long-name) dan tanpa bergantung O_NOFOLLOW
+      // yang diabaikan libuv di Windows.
+      //  1. real DI LUAR workspace → assertInsideWorkspace melempar error
+      //     'mengarah ke symlink di luar working directory' (pesan escape
+      //     eksplisit, dipakai test keamanan v17);
+      //  2. real DI DALAM workspace → pesan 'symbolic link' (O_NOFOLLOW).
       const real = await fs.realpath(abs);
-      if (path.resolve(real) !== path.resolve(abs)) {
-        // Symlink menuju file yang sama via bentuk path lain (8.3 vs long-name,
-        // casing) → bukan symlink logis, lanjut. Selain itu:
-        //  1. real DI LUAR workspace → assertInsideWorkspace melempar error
-        //     'mengarah ke symlink di luar working directory' (ditangkap di
-        //     bawah → pesan escape eksplisit, dipakai test keamanan);
-        //  2. real DI DALAM workspace → deny-by-default ala O_NOFOLLOW
-        //     (Windows tidak menandai ELOOP konsolen, jadi dicek eksplisit).
-        assertInsideWorkspace(real, cwd);
-        return { ok: false, text: `read_file: '${filePath}' adalah symbolic link — ditolak demi keamanan (O_NOFOLLOW).` };
-      }
+      assertInsideWorkspace(real, cwd);
+      return { ok: false, text: `read_file: '${filePath}' adalah symbolic link — ditolak demi keamanan (O_NOFOLLOW).` };
     }
   } catch (err) {
     if (err instanceof Error && (err.message.includes('working directory') || err.message.includes('file sensitif'))) {
