@@ -305,10 +305,12 @@ test('containsSensitiveFilePattern detects id_ecdsa, id_dsa, .pem, and .key in s
 
 test('execute captures interleaved stdout and stderr sequentially', async () => {
   const { execute } = await import('../core/executor.js');
-  const res = await execute(
-    `node -e 'process.stdout.write("A"); setTimeout(() => { process.stderr.write("B"); setTimeout(() => { process.stdout.write("C"); }, 20); }, 20);'`,
-    { summarize: false },
-  );
+  // Kutip tunggal hanya dikenali shell POSIX; cmd.exe hanya mengerti kutip ganda,
+  // sehingga skrip yang sama harus dikutip berbeda di Windows (assertion sama).
+  const script =
+    'process.stdout.write("A"); setTimeout(() => { process.stderr.write("B"); setTimeout(() => { process.stdout.write("C"); }, 20); }, 20);';
+  const command = process.platform === 'win32' ? `node -e "${script}"` : `node -e '${script}'`;
+  const res = await execute(command, { summarize: false });
 
   assert.equal(res.stdout, 'AC');
   assert.equal(res.stderr, 'B');

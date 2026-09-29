@@ -13,6 +13,21 @@ import {
 import { AgentConfig, ContextMessage, DEFAULT_CONFIG } from '../types.js';
 import type { LLMProvider, ChatOptions, ConnectionResult } from '../agent/llm.js';
 
+/**
+ * Perintah yang benar-benar DIEKSEKUSI di test ini (bukan sekadar dinilai regex),
+ * dipilih per platform. Runner Windows tidak punya `python3` maupun `ls`, sehingga
+ * test yang meng-assert `result.code === 0` gagal di sana — padahal yang diuji
+ * adalah jalur approval/guardian, bukan ketersediaan tool POSIX. Padanan Node/`dir`
+ * menjaga assertion dan jalur kode tetap identik (perintah inline interpreter
+ * dinilai dengan aturan regex yang sama di semua OS).
+ */
+const IS_WINDOWS = process.platform === 'win32';
+const CMD_INLINE_PRINT_42 = IS_WINDOWS ? 'node -e "console.log(42)"' : 'python3 -c "print(42)"';
+const CMD_INLINE_PRINT_1 = IS_WINDOWS ? 'node -e "console.log(1)"' : 'python3 -c "print(1)"';
+const CMD_INLINE_SUM = IS_WINDOWS ? 'node -e "console.log(1+1)"' : 'python3 -c "print(1+1)"';
+const CMD_NONE_RISK_LIST = IS_WINDOWS ? 'dir' : 'ls -la';
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -194,7 +209,7 @@ test('assessWithGuardian: uses small max_tokens and temperature 0', async () => 
 test('guardedExecute + guardian: DANGEROUS + guardian safe → auto-execute', async () => {
   // python3 -c is DANGEROUS by regex. Guardian says safe → should run.
   const result = await guardedExecute(
-    'python3 -c "print(42)"',
+    CMD_INLINE_PRINT_42,
     {
       confirm: async () => { throw new Error('Should not be called'); },
       llmProvider: verdictProvider('safe', 'Simple print.'),
@@ -255,7 +270,7 @@ test('guardedExecute + guardian: NONE commands bypass guardian entirely', async 
     return '{"verdict":"blocked","reasoning":"Should not happen"}';
   });
   const result = await guardedExecute(
-    'ls -la',
+    CMD_NONE_RISK_LIST,
     { llmProvider: spyProvider },
     config(),
   );
@@ -300,7 +315,7 @@ test('guardedExecute + guardian: guardianEnabled=false skips guardian', async ()
 test('guardedExecute + guardian: onGuardianStatus callback is called', async () => {
   const statuses: Array<string | null> = [];
   await guardedExecute(
-    'python3 -c "print(1)"',
+    CMD_INLINE_PRINT_1,
     {
       confirm: async () => true,
       llmProvider: verdictProvider('safe', 'ok'),
@@ -337,7 +352,7 @@ test('guardian scenario: python3 -c safe payload → regex DANGEROUS, guardian s
   // python3 -c "print(1+1)" is DANGEROUS by regex but actually safe.
   // Guardian should say safe, command should auto-execute.
   const result = await guardedExecute(
-    'python3 -c "print(1+1)"',
+    CMD_INLINE_SUM,
     {
       confirm: async () => { throw new Error('Should not reach user'); },
       llmProvider: verdictProvider('safe', 'Simple arithmetic print.'),
@@ -431,7 +446,7 @@ test('GAP-03: writes verdict to guardian audit log file with 0600 mode', async (
   const auditFile = join(dir, 'guardian-audit.log');
 
   const result = await guardedExecute(
-    'python3 -c "print(42)"',
+    CMD_INLINE_PRINT_42,
     {
       confirm: async () => true,
       llmProvider: verdictProvider('safe', 'Kalkulasi matematika sederhana'),
