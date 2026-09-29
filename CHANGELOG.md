@@ -2,6 +2,26 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### ⚠️ TEMUAN KEAMANAN PENTING — Bypass Sandbox Tulis via Symlink di Windows: libuv Mengabaikan `O_NOFOLLOW` (29 September 2026) — Hasil Review PR #22
+
+#### Temuan C1 (severity tertinggi review; diperbaiki & terverifikasi CI hijau)
+- **Akar**: `writeWithDiff()` (`src/agent/tools.ts`) mengandalkan flag `O_NOFOLLOW` saat membuka file untuk tulis (anti-TOCTOU). **Di Windows, libuv MENGABAIKAN flag ini** — `open()` tetap mengikuti symlink tanpa error `ELOOP`. Akibatnya `edit_file` melalui symlink FILE yang menunjuk **keluar workspace BERHASIL MENULIS di luar sandbox** — guard workspace lexical/canonical lolos karena target dievaluasi lewat nama link (di dalam workspace), sedangkan penulisan aktual terjadi pada tujuan link (di luar).
+- **Cara terdeteksi**: test keamanan `security_hardening_v17` ("file tools resist symlink traversal") gagal di CI Windows bukan karena test salah, melainkan `JSON.parse(res).error === undefined` — **tidak ada error sama sekali** = penulisan tembus sukses. Ini contoh nyata nilai CI matriks multi-OS: kelas bug yang tak terlihat di Linux (di sana `O_NOFOLLOW` bekerja) langsung tertangkap di runner Windows.
+- **Perbaikan (commit `134888d`)**:
+  * `writeWithDiff()` kini melakukan guard **eksplisit dua arah sebelum menulis**: (1) `lstatSync` symlink → `assertInsideWorkspace(realpathSync(abs))` — bila realpath keluar workspace, ditolak dengan pesan escape `'mengarah ke symlink di luar working directory'` (semantik sandbox asli); (2) symlink internal apa pun tetap ditolak ala O_NOFOLLOW (deny-by-default anti-TOCTOU).
+  * `readFileTool()` (`src/agent/filetools.ts`): symlink ditolak deny-by-default murni via `lstat` — tanpa bergantung `O_NOFOLLOW` maupun pengecualian bentuk path; symlink keluar workspace memakai pesan escape eksplisit yang di-assert test.
+  * Pesan pesan error guard deterministik lintas OS (`assertNotSensitivePath`, prompt `move_file` memakai separator `/`).
+- **Pelajaran arsitektural**: flag `O_NOFOLLOW` TIDAK boleh dijadikan satu-satunya lapisan anti-symlink pada kode lintas platform — selalu pasangkan dengan `lstat` + `realpath` + assert containment eksplisit. Pola ini sekarang berlaku di semua jalur tulis (edit/write/patch via `writeWithDiff`) dan baca (`readFileTool`).
+- **Status**: diperbaiki; test keamanan v17 hijau di kedua job Windows CI; **tidak ada regresi** (1064 test — 1063 pass / 0 fail / 1 skip di lokal & CI).
+
+#### Rekap remediasi kritis lainnya di sesi review yang sama (CI Windows: hang 20 menit → hijau 9/9)
+- **C2** — Deteksi shell salah: `PSModulePath` ter-set machine-wide di Windows (bukan sinyal sesi PowerShell) → executor memilih `powershell.exe` + `windowsVerbatimArguments` (memecah quoting PS) → puluhan test gagal output kosong; ditambah rantai `cmd /d /s /c` yang melepas kutip luar → `node -e "..."` masuk mode REPL (proses tak pernah exit = **sumber hang 20 menit**). Fix: sinyal PowerShell hanya ComSpec eksplisit (`src/core/env.ts`), verbatim hanya cmd, kutip luar eksplisit untuk command ber-quote, timeout selalu exit 124.
+- **C3** — `taskkill` bisa tak pernah close (RPC Win32) → `stopProcess` deadlock; guard pertama justru membunuh taskkill di tengah enumerasi tree (kill parsial → `EBUSY` rmdir permanen). Fix final: guard hanya melepas pemanggil, taskkill dibiarkan tuntas; watchdog idle 60 dtk + `--test-timeout` di `scripts/run-tests.mjs`.
+- **C4** — `spawn(detached:true, unref())` + pipe di Windows: data stdout TIDAK PERNAH sampai ke parent (`read_process_logs` kosong walau exit 0). Fix: `detached` hanya POSIX; Windows + `windowsHide`.
+- **C5** — `fs.realpath` **async** → long-name (`runneradmin`) vs `realpathSync` → tetap 8.3 (`RUNNER~1`) di runner Windows; containment menolak path dalam-workspace sendiri (glob/code_search `files: 0`). Fix: `workspacePathForms()` mencakup bentuk lexical + `realpathSync` + `realpathSync.native()` (long-name, prefix `\\?\` dibersihkan); `walkDirectory` memakai `realpathSync`. Sandbox TIDAK melemah — symlink escape tetap ditolak.
+- **Diagnostik permanen**: `scripts/ci-diagnostics.mjs` kini mem-print probe bentuk path tmpdir/cwd (8.3 vs long-name, `cwd === realpath(cwd)`) saat job gagal — kelas bug containment Windows terbaca langsung dari log tanpa reproduksi lokal.
+
+---
 ### Fix macOS: Workspace Ber-symlink Salah Dianggap "Di Luar Workspace" (29 September 2026) — Temuan Matriks CI macOS
 
 #### Diperbaiki (bug produk, ketangkap job `macos-latest` di CI — bukan bug test)

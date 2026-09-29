@@ -3,6 +3,16 @@
 > Ringkasan status pengerjaan & checkpoint handoff untuk AI berikutnya.  
 > Histori lengkap dipindahkan ke [CHANGELOG.md](CHANGELOG.md).
 
+## ⚠️ Keamanan — Temuan Penting dari Review PR #22 (29 Sep 2026)
+
+1. **Bypass sandbox tulis via symlink di Windows (C1, TERTUTUP)**: libuv **mengabaikan `O_NOFOLLOW`** — `edit_file` lewat symlink file yang menunjuk keluar workspace BERHASIL MENULIS di luar sandbox. Fix di `writeWithDiff()`/`readFileTool()`: guard eksplisit `lstat` symlink → `assertInsideWorkspace(realpath)` + deny-by-default internal (commit `134888d`). Detail lengkap di CHANGELOG.md. **Pelajaran: jadikan `O_NOFOLLOW` satu-satunya lapisan anti-symlink lintas platform.**
+2. **Perilaku libuv Windows yang wajib diingat (semua telah difix, CI hijau 9/9)**:
+   - `PSModulePath` ter-set machine-wide → jangan dipakai sebagai sinyal sesi PowerShell (`env.ts` kini hanya percaya ComSpec eksplisit).
+   - `cmd /d /s /c` melepas kutip luar → command ber-quote wajib dibungkus kutip luar tambahan (executor runtime), jika tidak node masuk mode REPL (hang).
+   - `spawn detached+unref` + pipe → data stdout tak pernah sampai ke parent; `detached` hanya untuk POSIX (taskkill /T tidak butuh detachment).
+   - `fs.realpath` async → long-name (`runneradmin`) vs `realpathSync` → 8.3 (`RUNNER~1`): containment membandingkan ke SEMUA bentuk workspace via `workspacePathForms()` (lexical + realpath + realpath.native). Sandbox tetap menolak symlink escape.
+3. **Follow-up keamanan terbuka (non-blocking)**: `workspaceRoot` di system prompt layer (`roles.ts`) belum disanitasi dari newline/control chars — permukaan prompt-injection kecil; sanjung saat refactor prompt berikutnya.
+
 ## Status Saat Ini — v1.9.0 (29 Sep 2026)
 
 - **Versi**: 1.9.0 (stable)
