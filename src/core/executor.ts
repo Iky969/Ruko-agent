@@ -151,8 +151,27 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
     // Non-win32 hasilnya bit-identik dengan perilaku lama: /bin/sh + ['-c', command].
     const envProfile = getEnvProfile();
     const shellSelection = resolveShellSelection(envProfile);
-    const shellBinary = shellSelection.binary;
-    const shellArgs = [...shellSelection.argsPrefix, command];
+    let shellBinary = shellSelection.binary;
+    let shellArgs = [...shellSelection.argsPrefix, command];
+
+    // PERBAIKAN (Windows): cmd.exe dengan /S melepas SEPASANG kutip luar dari
+    // command. Untuk perintah yang mengandung kutip (mis. `node -e "log('x')"`),
+    // aturan strip kutip membuat `node` menerima argumen terpotong — tanpa
+    // argumen skrip yang valid ia masuk mode REPL interaktif: menunggu stdin,
+    // output kosong, proses TIDAK PERNAH exit (di CI = hang sampai timeout;
+    // sumber hang 20 menit + 31 test gagal pada log job Windows).
+    // Solusi standar Windows: tambahkan sepasang kutip luar EKSKLUSIF untuk
+    // dikonsumsi aturan /S — command dalam sampai ke node utuh:
+    //   cmd /d /s /c "node -e "log('x')""  →  node -e "log('x')"
+    // Hanya diterapkan pada jalur runtime cmd; helper pure
+    // `buildShellInvocation()` tidak berubah (test paritas tetap valid).
+    if (
+      process.platform === 'win32' &&
+      envProfile.shellFamily === 'cmd' &&
+      command.includes('"')
+    ) {
+      shellArgs = [...shellSelection.argsPrefix, `"${command}"`];
+    }
 
     // Timeout di-OWN sendiri (bukan opsi `timeout` bawaan Node) supaya kill-nya
     // bisa tree-aware. Opsi bawaan Node hanya mengirim sinyal ke child shell,

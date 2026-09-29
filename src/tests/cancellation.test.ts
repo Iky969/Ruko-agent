@@ -69,7 +69,17 @@ function inTempWorkspace<T>(fn: (ws: string) => Promise<T> | T): Promise<T> {
     defaultProcessManager.reset();
     setWorkspaceRoot(null);
     process.chdir(prev);
-    rmSync(ws, { recursive: true, force: true });
+    // PERBAIKAN (Windows): rmdir bisa EBUSY sesaat setelah taskkill mematikan
+    // tree proses — handle dir belum dilepas OS. Beri 3 kali retry dengan jeda.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        rmSync(ws, { recursive: true, force: true });
+        break;
+      } catch (err: any) {
+        if (attempt === 2 || (err?.code !== 'EBUSY' && err?.code !== 'ENOTEMPTY' && err?.code !== 'EPERM')) throw err;
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
   });
 }
 
