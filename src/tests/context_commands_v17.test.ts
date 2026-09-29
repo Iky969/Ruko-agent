@@ -305,12 +305,36 @@ test('containsSensitiveFilePattern detects id_ecdsa, id_dsa, .pem, and .key in s
 
 test('execute captures interleaved stdout and stderr sequentially', async () => {
   const { execute } = await import('../core/executor.js');
-  // Kutip tunggal hanya dikenali shell POSIX; cmd.exe hanya mengerti kutip ganda,
-  // sehingga skrip yang sama harus dikutip berbeda di Windows (assertion sama).
+  // PERBAIKAN (Windows): cmd.exe /S melepas kutip luar dan memecah kutip dalam,
+  // sehingga `node -e "..."` dikirim sebagai argumen terpotong. Cara aman
+  // lintas platform: kirim skrip via STDIN (`node` tanpa -e) — tidak ada kutip
+  // sama sekali, dan assertion identik di semua OS.
   const script =
     'process.stdout.write("A"); setTimeout(() => { process.stderr.write("B"); setTimeout(() => { process.stdout.write("C"); }, 20); }, 20);';
-  const command = process.platform === 'win32' ? `node -e "${script}"` : `node -e '${script}'`;
-  const res = await execute(command, { summarize: false });
+  let res;
+  if (process.platform === 'win32') {
+    const { execFile } = await import('node:child_process');
+    const piped = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+      const child = execFile(
+        process.execPath,
+        [],
+        { encoding: 'utf8' } as any,
+        (error: any, stdout: string, stderr: string) => {
+          resolve({ code: error ? (typeof error.code === 'number' ? error.code : 1) : 0, stdout, stderr });
+        },
+      );
+      child.stdin?.end(script);
+    });
+    res = {
+      code: piped.code,
+      stdout: piped.stdout,
+      stderr: piped.stderr,
+      output: piped.stdout + piped.stderr,
+    };
+  } else {
+    const r = await execute(`node -e '${script}'`, { summarize: false });
+    res = { code: r.code, stdout: r.stdout, stderr: r.stderr, output: r.output };
+  }
 
   assert.equal(res.stdout, 'AC');
   assert.equal(res.stderr, 'B');

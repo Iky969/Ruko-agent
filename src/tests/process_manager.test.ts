@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -175,8 +175,13 @@ test('start_process is blocked in plan mode, while read_process_logs and get_sta
 
 test('read_process_logs maintains ring buffer capped at 100 lines', async () => {
   await inTempWorkspace(async (ws) => {
-    // Generate 150 lines of output
-    const cmd = 'node -e "for(let i=1; i<=150; i++) console.log(\'line \' + i)"';
+    // PERBAIKAN (Windows): skrip ditulis ke FILE — tanpa `-e` ber-quote yang
+    // dipecah aturan kutip cmd.exe (node tanpa argumen valid masuk mode REPL:
+    // stdin 'ignore' → EOF → exit tanpa output → 0 baris log). `node <path>`
+    // bebas aturan kutip shell dan identik di semua OS.
+    const loopScript = join(ws, '.tmp-loop-script.cjs');
+    writeFileSync(loopScript, "for (let i = 1; i <= 150; i++) console.log('line ' + i);\n", 'utf8');
+    const cmd = `node ${loopScript}`;
     const proc = defaultProcessManager.startProcess(cmd, ws);
 
     // Wait for output to complete
@@ -195,9 +200,23 @@ test('read_process_logs maintains ring buffer capped at 100 lines', async () => 
 
 test('read_process_logs redacts credentials with baseline regex pattern', async () => {
   await inTempWorkspace(async (ws) => {
-    const cmd =
-      'node -e "console.log(\'api_key: secret_123\\ntoken=token_abc\\npassword: pass123\\nsecret = my_secret\\nauthorization: auth_token_val\')' +
-      '; console.error(\'API-KEY: err_secret\')"';
+    // PERBAIKAN (Windows): output dari SCRIPT FILE (ditulis via fs) — bukan
+    // node -e ber-quote yang dipecah cmd.exe. Isi skrip bebas aturan kutip
+    // shell dan identik di semua OS.
+    const scriptPath = join(ws, '.tmp-redact-script.cjs');
+    writeFileSync(
+      scriptPath,
+      [
+        "console.log('api_key: secret_123');",
+        "console.log('token=token_abc');",
+        "console.log('password: pass123');",
+        "console.log('secret = my_secret');",
+        "console.log('authorization: auth_token_val');",
+        "console.error('API-KEY: err_secret');",
+      ].join('\n'),
+      'utf8',
+    );
+    const cmd = `node ${scriptPath}`;
     const proc = defaultProcessManager.startProcess(cmd, ws);
 
     await new Promise((r) => setTimeout(r, 400));

@@ -52,4 +52,24 @@ const rukoKeys = Object.keys(process.env)
   .filter((key) => key.startsWith('RUKO_') || key === 'CI')
   .sort();
 line('RUKO_*/CI keys', rukoKeys.length ? rukoKeys.join(', ') : '(none)');
+
+// ─── Probe glob/code_search: reproduksi isPathInsideWorkspace pada path tmp ───
+// Cluster kegagalan CI Windows: walkDirectory membuang subdirektori karena
+// mismatch bentuk path 8.3 vs long-name. Probe ini menampilkan bentuk nyata
+// di runner yang gagal sehingga akar masalah terlihat di log.
+try {
+  const fs = await import('node:fs');
+  const probeRoot = fs.mkdtempSync(join(tmp, 'ruko-probe-'));
+  fs.mkdirSync(join(probeRoot, 'sub'), { recursive: true });
+  fs.writeFileSync(join(probeRoot, 'sub', 'file.ts'), 'probe\n', 'utf8');
+  line('probe root (raw)', probeRoot);
+  line('probe root realpath', fs.realpathSync(probeRoot));
+  line('probe subdir realpath', fs.realpathSync(join(probeRoot, 'sub')));
+  line('cwd realpath', fs.realpathSync(process.cwd()));
+  line('cwd === realpath(cwd)', process.cwd() === fs.realpathSync(process.cwd()));
+  line('tmpdir === realpath(tmpdir)', tmp === fs.realpathSync(tmp));
+  fs.rmSync(probeRoot, { recursive: true, force: true });
+} catch (err) {
+  line('probe error', err instanceof Error ? err.message : String(err));
+}
 console.log('──────────────────────────────────────────────────────');
