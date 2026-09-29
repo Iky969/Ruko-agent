@@ -120,18 +120,28 @@ function containsPowerShellToken(value: string): boolean {
     v.includes('pwsh.exe');
 }
 
-/** Deteksi family shell. Di luar Windows selalu posix. */
+/**
+ * Deteksi family shell. Di luar Windows selalu posix.
+ *
+ * PERBAIKAN (CI Windows hang/fail massal): `PSModulePath` TER-SET secara
+ * machine-wide pada mesin Windows umum (termasuk runner GitHub Actions) —
+ * variabel ini ada bahkan saat shell aktif adalah cmd.exe, jadi bukan sinyal
+ * "sesi PowerShell". Dampaknya executor memilih powershell.exe lalu (bersama
+ * windowsVerbatimArguments) memecah quoting `node -e "..."` → output kosong /
+ * exit code salah di puluhan test. Sinyal yang BENAR adalah ComSpec yang
+ * SECARA EKSPLISIT menunjuk powershell/pwsh; PSModulePath kini dihapus dari
+ * deteksi. Invarian lama tetap dijaga:
+ *  - hanya relevan ketika os === 'win32' (di luar Windows selalu posix);
+ *  - fail-closed: tanpa sinyal eksplisit apa pun → 'cmd' (ComSpec bawaan).
+ */
 function detectShellFamily(osName: EnvOs, env: NodeJS.ProcessEnv): EnvShellFamily {
   if (osName !== 'win32') return 'posix';
 
-  // Di Windows: powershell bila ComSpec/PSModulePath menunjuk PowerShell.
-  // - PSModulePath hanya ada di sesi PowerShell (sinyal kuat)
-  // - ComSpec biasanya cmd.exe; kalau ditimpa menunjuk powershell.exe → powershell
-  // Sisanya (ComSpec cmd.exe, tidak ada sinyal PS) → cmd.
+  // Di Windows: powershell hanya bila ComSpec SECARA EKSPLISIT menunjuk
+  // powershell.exe/pwsh.exe (user menimpa shell default-nya). PSModulePath
+  // SENGAJA tidak dipakai lagi — lihat komentar di atas.
   const comspec = envStr(env, 'ComSpec');
-  const psModulePath = envStr(env, 'PSModulePath');
   if (comspec && containsPowerShellToken(comspec)) return 'powershell';
-  if (psModulePath) return 'powershell';
   return 'cmd';
 }
 

@@ -5,12 +5,13 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { Buffer } from 'node:buffer';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
  * File-change undo safety net (feedback §6 "undo sebelum tiap perubahan").
@@ -77,18 +78,63 @@ export interface UndoResult {
 }
 
 /**
+ * Bentuk FISIK sebuah path: symlink di-resolve sedemikian rupa sehingga segmen
+ * yang belum ada pun tetap ikut (memakai ancestor terdekat yang ada).
+ *
+ * KENAPA PERLU (bug nyata di macOS, ketangkap oleh matriks CI):
+ * `os.tmpdir()` di macOS mengembalikan `/var/folders/..` yang merupakan symlink
+ * ke `/private/var/folders/..`, dan `process.cwd()` selalu mengembalikan bentuk
+ * FISIK (kernel me-resolve symlink). Jadi workspace root bisa tiba sebagai
+ * `/private/var/...` sementara path snapshot tersimpan sebagai `/var/...`;
+ * perbandingan LEXICAL murni lalu salah menyimpulkan "di luar workspace" dan
+ * `/undo` menolak memulihkan berkas miliknya sendiri. Pola sama juga terjadi
+ * pada workspace/home yang di-symlink (mis. `/home/u -> /mnt/data/u`).
+ */
+function canonicalize(candidate: string): string {
+  const abs = resolve(candidate);
+  let current = abs;
+  const remainder: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync(current);
+      return remainder.length > 0 ? join(real, ...remainder) : real;
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return abs; // sudah di root filesystem
+      remainder.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
+/** True bila `candidate` berada di dalam (atau sama dengan) `root`. */
+function isInside(root: string, candidate: string): boolean {
+  if (candidate === root) return true;
+  const prefix = root.endsWith(sep) ? root : root + sep;
+  return candidate.startsWith(prefix);
+}
+
+/**
  * Validates that a snapshot target path is strictly inside the workspace
  * and does not point to sensitive or protected files/directories.
+ *
+ * Containment dinilai pada bentuk FISIK kedua sisi (bukan lexical), sehingga:
+ *  - workspace yang diakses lewat symlink tetap dikenali sebagai "di dalam";
+ *  - escape lewat DIRECTORY symlink di dalam workspace (mis. `ws/link/etc`
+ *    dengan `link -> /etc`) justru sekarang ikut ditolak — perilaku lama yang
+ *    hanya lexical melewatkan kasus ini.
  */
 export function validateSnapshotPath(targetAbs: string, workspaceRoot: string = process.cwd()): void {
   const normWs = resolve(workspaceRoot);
   const normTarget = resolve(targetAbs);
-  const rel = relative(normWs, normTarget);
+  const realWs = canonicalize(workspaceRoot);
+  const realTarget = canonicalize(targetAbs);
 
-  if (rel.startsWith('..') || isAbsolute(rel)) {
+  if (!isInside(realWs, realTarget)) {
     throw new Error(`Akses dibatalkan: Target snapshot "${targetAbs}" berada di luar workspace ("${normWs}").`);
   }
 
+  const rel = relative(realWs, realTarget);
   const relNorm = rel.split('\\').join('/').toLowerCase();
   if (
     relNorm === '.ruko/config.json' ||
@@ -202,7 +248,10 @@ export function revertFileSnapshot(abs: string, dir = defaultUndoDir(), workspac
  */
 export function revertFileGit(abs: string, workspaceRoot: string = process.cwd()): { ok: boolean; error?: string } {
   try {
-    const rel = relative(workspaceRoot, abs);
+    // Bentuk fisik di kedua sisi: `git checkout -- <rel>` menerima path relatif
+    // terhadap repo, dan bentuk lexical bisa berbeda dari fisik di macOS
+    // (/var/folders vs /private/var/folders) maupun workspace yang di-symlink.
+    const rel = relative(canonicalize(workspaceRoot), canonicalize(abs));
     execFileSync('git', ['checkout', '--', rel], {
       cwd: workspaceRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -231,7 +280,7 @@ export function revertFile(targetPath: string, options: RevertOptions = {}): Rev
     };
   }
   const mode = options.mode ?? 'auto';
-  const rel = relative(ws, abs) || targetPath;
+  const rel = relative(canonicalize(ws), canonicalize(abs)) || targetPath;
 
   if (mode === 'snapshot' || mode === 'auto') {
     const snapshotRes = revertFileSnapshot(abs, dir, ws);

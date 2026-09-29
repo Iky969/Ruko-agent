@@ -1,3 +1,4 @@
+import { sep } from 'node:path';
 import { Confirmer, guardedExecute } from '../core/approval.js';
 import { Context } from '../core/context.js';
 import { ActivityTray } from '../core/activity.js';
@@ -18,7 +19,14 @@ import {
 } from '../core/ui.js';
 import { AgentConfig, ContextMessage, createDefaultSessionState, SessionState } from '../types.js';
 import { LLMProvider } from './llm.js';
-import { allRoles, buildSystemPrompt, getBuiltInRole, readProjectAgentDoc, RoleDef } from './roles.js';
+import {
+  allRoles,
+  buildSystemPrompt,
+  formatEnvironmentContext,
+  getBuiltInRole,
+  readProjectAgentDoc,
+  RoleDef,
+} from './roles.js';
 import {
   detectSensitiveFileAccessInExec,
   getWorkspaceRoot,
@@ -28,6 +36,7 @@ import {
   stripToolBlocks,
   ToolCall,
 } from './tools.js';
+import { getEnvProfile } from '../core/env.js';
 import { readMemorySafe } from '../core/memory.js';
 import { formatSkillsForPrompt, initDefaultSkills, loadSkillsContext, scanSkills } from '../core/skills.js';
 
@@ -283,7 +292,15 @@ export class Agent {
     );
   }
 
-  /** Layered system prompt: identity + tools + role + AGENT.md + mode (§4) + memory + skills. */
+  /**
+   * Layered system prompt: identity + tools + role + environment (OS/shell) +
+   * AGENT.md + mode (§4) + memory + skills.
+   *
+   * Konteks lingkungan dirakit DI SINI (bukan di roles.ts) karena hanya agent
+   * yang punya akses ke workspace root + envProfile aktif. `getEnvProfile()`
+   * adalah sumber kebenaran yang sama dipakai `executor.ts` untuk memilih shell,
+   * sehingga prompt dan eksekusi tidak pernah berbeda pendapat soal OS/shell.
+   */
   systemPrompt(): string {
     const ws = this.workspaceRoot ?? getWorkspaceRoot();
     initDefaultSkills(ws);
@@ -291,6 +308,7 @@ export class Agent {
     const availableSkillsXml = formatSkillsForPrompt(skills);
     const skillsInstructions = loadSkillsContext(skills);
     const combinedSkills = [availableSkillsXml, skillsInstructions].filter(Boolean).join('\n\n');
+    const envProfile = getEnvProfile();
 
     return buildSystemPrompt({
       role: this.activeRole(),
@@ -299,6 +317,15 @@ export class Agent {
       agentDoc: readAgentDocSafe(),
       memory: readMemorySafe(ws),
       skills: combinedSkills,
+      environment: formatEnvironmentContext({
+        platform: process.platform,
+        arch: process.arch,
+        shellFamily: envProfile.shellFamily,
+        shellBinary: envProfile.defaultShell,
+        pathSeparator: sep,
+        workspaceRoot: ws,
+        flavor: envProfile.flavor,
+      }),
     });
   }
 

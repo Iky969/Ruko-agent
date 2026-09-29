@@ -1,4 +1,6 @@
 import { ChildProcess, spawn } from 'node:child_process';
+// Tree kill lintas platform: POSIX `kill(-pid)`, Windows `taskkill /PID /T /F`.
+import { killProcessTree } from '../core/treeKill.js';
 
 export type ProcessState = 'running' | 'exited' | 'stale';
 
@@ -184,9 +186,21 @@ export class ProcessManager {
 
     const id = `proc_${++this.idCounter}`;
 
+    // CATATAN (Windows): `spawn(cmd, { shell: true })` di Windows dijalankan
+    // libuv sebagai `cmd.exe /d /s /c "cmd"` — libuv SUDAH menambah sepasang
+    // kutip luar (beda dengan execFile yang tidak). Jangan tambah kutip lagi
+    // di sini: kutip ganda justru menghasilkan `""cmd""` → argumen salah.
+    //
+    // PERBAIKAN (CI Windows): `detached: true` hanya untuk POSIX (process-group
+    // kill via `kill(-pid)`). Di Windows, detached+unref dengan stdio pipe
+    // membuat data stdout TIDAK PERNAH sampai ke parent (event exit 0 diterima,
+    // logs=[] permanen — diagnostik ring buffer CI). Tree-kill Windows memakai
+    // `taskkill /PID <pid> /T /F` yang TIDAK butuh detachment, jadi aman.
+    // windowsHide mencegah console window orphan (conhost) di runner.
     const child = spawn(command, {
       shell: true,
-      detached: true,
+      detached: process.platform !== 'win32',
+      windowsHide: true,
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -356,17 +370,12 @@ export class ProcessManager {
       }
     };
 
-    // 1. Kirim SIGTERM
+    // 1. Kirim SIGTERM ke SELURUH tree.
+    // POSIX: `kill(-pid)` (child di-spawn detached → pemimpin process group).
+    // Windows: `taskkill /PID <pid> /T /F` — sebelumnya hanya `child.kill()`
+    // yang membunuh cmd.exe dan meninggalkan grandchild (node/npm) sebagai zombie.
     try {
-      if (process.platform !== 'win32') {
-        try {
-          process.kill(-proc.pid, 'SIGTERM');
-        } catch {
-          proc.child?.kill('SIGTERM');
-        }
-      } else {
-        proc.child?.kill('SIGTERM');
-      }
+      await killProcessTree(proc.pid, { force: false, child: proc.child });
     } catch {
       // Abaikan jika proses sudah mati sesaat sebelum sinyal terkirim
     }
@@ -384,18 +393,10 @@ export class ProcessManager {
       }
     }
 
-    // 3. Jika belum berhenti setelah timeout, kirim SIGKILL paksa
+    // 3. Jika belum berhenti setelah timeout, kill paksa ke seluruh tree
     if (!exited) {
       try {
-        if (process.platform !== 'win32') {
-          try {
-            process.kill(-proc.pid, 'SIGKILL');
-          } catch {
-            proc.child?.kill('SIGKILL');
-          }
-        } else {
-          proc.child?.kill('SIGKILL');
-        }
+        await killProcessTree(proc.pid, { force: true, child: proc.child });
       } catch {
         // Abaikan error sinyal kill
       }
@@ -409,6 +410,17 @@ export class ProcessManager {
       }
     }
 
+    // PERBAIKAN (Windows CI hang): taskkill bisa tak pernah close (RPC ke
+    // Win32 API menggantung saat mematikan tree test runner). `await` di atas
+    // kini ber-guard (defaultRunTaskkill), tapi sebagai jaring pengaman terakhir
+    // stopProcess menjanjikan diri selesai dalam ~timeoutMs + 6s — apa pun
+    // yang terjadi. stop_process adalah tool agen: harus SELALU kembali.
+    const totalDeadline = Date.now() + timeoutMs + 6_000;
+    while (!exited && Date.now() < totalDeadline) {
+      await new Promise((r) => setTimeout(r, 100));
+      exited = (proc.status as ProcessState) === 'exited' || isProcessDead(proc.pid);
+    }
+
     proc.status = 'exited';
     return {
       ok: true,
@@ -419,34 +431,30 @@ export class ProcessManager {
   }
 
   /**
-   * Sinkron: Menghentikan seluruh proses aktif seketika (SIGTERM + SIGKILL)
+   * Sinkron: Menghentikan seluruh proses aktif seketika (tree kill + SIGKILL)
    * untuk Anti-Zombie Lifecycle Hooks saat Ruko keluar.
+   *
+   * PERUBAHAN (fix zombie grandchild): jalur ini sebelumnya pada Windows hanya memanggil
+   * `proc.child?.kill('SIGKILL')`, sehingga grandchild di balik cmd.exe tetap
+   * hidup. Kini tree kill dipakai (POSIX `kill(-pid)`, Windows `taskkill /T /F`).
+   * SIGTERM dihapus karena pada jalur ini SIGTERM dan SIGKILL selalu dikirim
+   * tanpa jeda (SIGKILL-lah yang efektif), jadi perilaku efektifnya sama.
    */
   public cleanupAllSync(): void {
     for (const proc of this.processes.values()) {
       if (proc.status === 'running') {
         try {
-          if (process.platform !== 'win32') {
-            try {
-              process.kill(-proc.pid, 'SIGTERM');
-            } catch {}
-            try {
-              process.kill(proc.pid, 'SIGTERM');
-            } catch {}
-            try {
-              process.kill(-proc.pid, 'SIGKILL');
-            } catch {}
-            try {
-              process.kill(proc.pid, 'SIGKILL');
-            } catch {}
-          } else {
-            try {
-              proc.child?.kill('SIGKILL');
-            } catch {}
-            try {
-              process.kill(proc.pid, 'SIGKILL');
-            } catch {}
-          }
+          // Fire-and-forget: jalur ini sinkron (handler exit/SIGINT/SIGTERM) dan
+          // killProcessTree mengirim sinyal/men-spawn taskkill sebelum `await`
+          // pertama, jadi efeknya sudah terjadi saat fungsi ini kembali.
+          void killProcessTree(proc.pid, { force: true, child: proc.child }).catch(() => {
+            // killProcessTree tidak pernah reject; guard ini murni keamanan
+            // agar tidak ada unhandled rejection di jalur exit.
+          });
+          // Belt-and-braces (perilaku lama dipertahankan): sinyal langsung ke PID.
+          try {
+            process.kill(proc.pid, 'SIGKILL');
+          } catch {}
         } catch {
           // ignore cleanup errors
         }

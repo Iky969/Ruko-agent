@@ -424,19 +424,12 @@ export function getWorkspaceRoot(): string {
  */
 export function assertInsideWorkspace(abs: string, workspaceRoot: string = getWorkspaceRoot()): void {
   const cwd = path.resolve(workspaceRoot);
-  // Normalise both to trailing-sep for prefix comparison so that
-  // /project-foo doesn't match /project as a valid workspace.
-  const cwdPrefix = cwd.endsWith(path.sep) ? cwd : cwd + path.sep;
-  let canonicalCwd = cwd;
-  try {
-    if (existsSync(cwd)) canonicalCwd = realpathSync(cwd);
-  } catch {
-    // ignore
-  }
-  const canonicalCwdPrefix = canonicalCwd.endsWith(path.sep) ? canonicalCwd : canonicalCwd + path.sep;
+  const forms = workspacePathForms(cwd);
 
-  const isLexicalInside =
-    abs === cwd || abs.startsWith(cwdPrefix) || abs === canonicalCwd || abs.startsWith(canonicalCwdPrefix);
+  // Normalise both to their resolved forms for prefix comparison so that
+  // /project-foo doesn't match /project as a valid workspace, dan beda bentuk
+  // path (8.3 vs long-name, /var vs /private/var) tidak salah menolak.
+  const isLexicalInside = isInsideAnyForm(abs, forms);
   if (!isLexicalInside) {
     throw new Error(
       `Path "${abs}" di luar working directory — akses file di luar project tidak diizinkan. ` +
@@ -460,8 +453,7 @@ export function assertInsideWorkspace(abs: string, workspaceRoot: string = getWo
         const target = readlinkSync(abs);
         real = path.isAbsolute(target) ? path.resolve(target) : path.resolve(path.dirname(abs), target);
       }
-      const isRealInside =
-        real === cwd || real.startsWith(cwdPrefix) || real === canonicalCwd || real.startsWith(canonicalCwdPrefix);
+      const isRealInside = isInsideAnyForm(real, forms);
       if (!isRealInside) {
         throw new Error(
           `Path "${abs}" mengarah ke symlink di luar working directory / workspace ("${real}"). Akses ditolak demi keamanan sandbox. ` +
@@ -474,8 +466,7 @@ export function assertInsideWorkspace(abs: string, workspaceRoot: string = getWo
       while (cur && cur !== path.dirname(cur)) {
         if (existsSync(cur)) {
           const realCur = realpathSync(cur);
-          const isCurInside =
-            realCur === cwd || realCur.startsWith(cwdPrefix) || realCur === canonicalCwd || realCur.startsWith(canonicalCwdPrefix);
+          const isCurInside = isInsideAnyForm(realCur, forms);
           if (!isCurInside) {
             throw new Error(
               `Direktori induk "${cur}" mengarah ke symlink di luar working directory / workspace ("${realCur}"). Akses ditolak demi keamanan sandbox. ` +
@@ -733,8 +724,12 @@ export function isSensitivePath(targetPath: string, workspaceRoot: string = getW
  */
 export function assertNotSensitivePath(targetPath: string, workspaceRoot: string = getWorkspaceRoot()): void {
   if (isSensitivePath(targetPath, workspaceRoot)) {
+    // PERBAIKAN (Windows): tampilkan path dengan separator '/' agar pesan
+    // deterministik lintas OS (test meng-assert '.ruko/trusted', bukan bentuk
+    // backslash temporer dari `path.resolve` di cmd Windows).
+    const display = String(targetPath).replace(/\\/g, '/');
     throw new Error(
-      `Akses ke file sensitif "${targetPath}" ditolak demi keamanan kredensial/data sensitif.`,
+      `Akses ke file sensitif "${display}" ditolak demi keamanan kredensial/data sensitif.`,
     );
   }
   // Also check canonical destination if file exists (guards against symlinks pointing to sensitive files)
@@ -810,6 +805,35 @@ async function writeWithDiff(
   workspaceRoot: string = getWorkspaceRoot(),
   toolName: string = 'edit_file',
 ): Promise<string> {
+  // PERBAIKAN (Windows — temuan CI): O_NOFOLLOW DIABAIKAN libuv di Windows
+  // (open tetap mengikuti symlink), sehingga edit_file lewat symlink file yang
+  // menunjuk DI LUAR workspace BERHASIL MENULIS di luar sandbox (test keamanan
+  // v17 gagal dengan 'Cannot read properties of undefined' = tidak ada error).
+  // Guard eksplisit dua arah:
+  //  1. lstat symlink + realpath keluar workspace → tolak dengan pesan escape
+  //     'symlink di luar working directory' (assertInsideWorkspace);
+  //  2. symlink internal apa pun → tetap ditolak ala O_NOFOLLOW (anti-TOCTOU).
+  try {
+    const lst = lstatSync(abs);
+    if (lst.isSymbolicLink()) {
+      let real: string;
+      try {
+        real = realpathSync(abs);
+      } catch {
+        const target = readlinkSync(abs);
+        real = path.isAbsolute(target) ? path.resolve(target) : path.resolve(path.dirname(abs), target);
+      }
+      assertInsideWorkspace(real, workspaceRoot);
+      throw new Error(
+        `Akses ditolak: "${fileLabel}" adalah symbolic link. Menulis atau mengubah file melalui symbolic link dilarang demi keamanan sandbox.`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof Error && (err.message.includes('symlink di luar working directory') || err.message.includes('symbolic link'))) {
+      throw err;
+    }
+  }
+
   // Reject mutating immutable security core files
   assertNotSecurityCore(fileLabel, workspaceRoot);
   assertNotSecurityCore(abs, workspaceRoot);
@@ -900,6 +924,57 @@ export interface WorkspaceMutationCheck {
 }
 
 /**
+ * PERBAIKAN (Windows CI + macOS): perbandingan prefix tahan beda bentuk path.
+ *
+ * Bentuk string workspace BISA berbeda dari bentuk realpath-nya:
+ *  - Windows: `os.tmpdir()` bisa berbentuk 8.3 (`C:\Users\RUNNER~1\...`)
+ *    sementara realpath anak-direktori mengembalikan long-name
+ *    (`C:\Users\runneradmin\...`).
+ *  - macOS: `/var/folders/...` vs realpath `/private/var/folders/...`.
+ *  - Bila `realpathSync(workspace)` GAGAL (mis. komponen 8.3 di beberapa
+ *    versi Windows), canonical tidak tersedia → perbandingan lama yang hanya
+ *    memakai satu bentuk canonical membuat SEMUA anak-direktori dianggap di
+ *    luar workspace (glob/code_search kehilangan seluruh file di subdirektori).
+ *
+ * Fungsi ini mengembalikan SEMUA bentuk absolut workspace (lexical + canonical)
+ * sebagai kandidat prefix. Kekuatan sandbox TIDAK berkurang: pemanggil tetap
+ * mewajibkan (a) bentuk lexical target di dalam SALAH SATU bentuk workspace,
+ * dan (b) bila target ada di disk, realpath-nya juga di dalam SALAH SATU
+ * bentuk workspace — symlink escape tetap ditolak.
+ */
+function workspacePathForms(workspaceRoot: string): string[] {
+  const cwd = path.resolve(workspaceRoot);
+  const forms = new Set<string>();
+  const add = (p: string): void => {
+    forms.add(p);
+    forms.add(p.endsWith(path.sep) ? p : p + path.sep);
+  };
+  add(cwd);
+  try {
+    if (existsSync(cwd)) add(realpathSync(cwd));
+  } catch {
+    // realpath gagal (permission/EIO) → cukup bentuk lexical
+  }
+  try {
+    // PERBAIKAN (CI Windows, dari diagnostik TASK-05): di runner Windows,
+    // fs.realpath ASYNC mengembalikan LONG-NAME (`runneradmin`) sementara
+    // realpathSync mempertahankan bentuk 8.3 (`RUNNER~1`). Tanpa bentuk
+    // long-name di sini, path hasil realpath async DI DALAM workspace justru
+    // ditolak 'di luar working directory'. realpathSync.native() (dan hasil
+    // async) memakai GetFinalPathNameByHandle → long-name + prefix \\?\.
+    const native = realpathSync.native(cwd);
+    add(native.startsWith('\\\\?\\') ? native.slice(4) : native);
+  } catch {
+    // native tidak tersedia (Node < 18.15 fallback) → abaikan
+  }
+  return [...forms];
+}
+
+function isInsideAnyForm(candidate: string, forms: string[]): boolean {
+  return forms.some((f) => candidate === f || candidate.startsWith(f));
+}
+
+/**
  * Checks if a target path is located inside the workspace boundary.
  */
 export function isPathInsideWorkspace(targetPath: string, workspaceRoot: string = getWorkspaceRoot()): boolean {
@@ -908,20 +983,16 @@ export function isPathInsideWorkspace(targetPath: string, workspaceRoot: string 
     const clean = targetPath.replace(/^['"]|['"]$/g, '').trim();
     if (!clean) return false;
     const abs = path.isAbsolute(clean) ? path.resolve(clean) : path.resolve(cwd, clean);
-    const cwdPrefix = cwd.endsWith(path.sep) ? cwd : cwd + path.sep;
-    let canonicalCwd = cwd;
-    try {
-      if (existsSync(cwd)) canonicalCwd = realpathSync(cwd);
-    } catch {}
-    const canonicalCwdPrefix = canonicalCwd.endsWith(path.sep) ? canonicalCwd : canonicalCwd + path.sep;
+    const forms = workspacePathForms(cwd);
 
-    const isLexical =
-      abs === cwd || abs.startsWith(cwdPrefix) || abs === canonicalCwd || abs.startsWith(canonicalCwdPrefix);
-    if (!isLexical) return false;
+    // Lexical: bentuk string target harus di dalam salah satu bentuk workspace.
+    if (!isInsideAnyForm(abs, forms)) return false;
 
     if (existsSync(abs)) {
       const real = realpathSync(abs);
-      return real === cwd || real.startsWith(cwdPrefix) || real === canonicalCwd || real.startsWith(canonicalCwdPrefix);
+      // Canonical: realpath target juga harus di dalam salah satu bentuk
+      // workspace (tetap menolak symlink yang keluar dari sandbox).
+      return isInsideAnyForm(real, forms);
     }
     return true;
   } catch {
@@ -1800,7 +1871,9 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         assertNotSecurityCore(source, ws);
         sourceAbs = resolveToolPath(source, ws);
         assertNotSecurityCore(sourceAbs, ws);
-        sourceRel = path.relative(ws, sourceAbs) || source;
+        // PERBAIKAN (Windows): rel path prompt/log memakai separator '/' agar
+        // deterministik lintas OS (assertion test: 'sub/dst.txt').
+        sourceRel = (path.relative(ws, sourceAbs) || source).replace(/\\/g, '/');
       } catch (err) {
         return JSON.stringify({
           error: `move_file: ${err instanceof Error ? err.message : String(err)}`,
@@ -1810,7 +1883,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         assertNotSecurityCore(target, ws);
         targetAbs = resolveToolPath(target, ws);
         assertNotSecurityCore(targetAbs, ws);
-        targetRel = path.relative(ws, targetAbs) || target;
+        targetRel = (path.relative(ws, targetAbs) || target).replace(/\\/g, '/');
       } catch (err) {
         return JSON.stringify({
           error: `move_file: ${err instanceof Error ? err.message : String(err)}`,

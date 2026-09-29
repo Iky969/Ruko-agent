@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -19,7 +19,23 @@ function inTempWorkspace<T>(fn: (ws: string) => Promise<T> | T): Promise<T> {
     defaultProcessManager.reset();
     setWorkspaceRoot(null);
     process.chdir(prev);
-    rmSync(ws, { recursive: true, force: true });
+    // PERBAIKAN (Windows): cleanup best-effort — rmdir bisa EBUSY karena
+    // handle OS dari proses yang baru di-taskkill belum lepas. Retry + skip
+    // (folder orphan di Temp) daripada menggagalkan test.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        rmSync(ws, { recursive: true, force: true });
+        break;
+      } catch (err: any) {
+        const retryable =
+          err?.code === 'EBUSY' || err?.code === 'ENOTEMPTY' || err?.code === 'EPERM' || err?.code === 'EACCES';
+        if (!retryable || attempt === 9) {
+          if (retryable) break;
+          throw err;
+        }
+        await new Promise((r) => setTimeout(r, 200 + attempt * 150));
+      }
+    }
   });
 }
 
@@ -175,16 +191,33 @@ test('start_process is blocked in plan mode, while read_process_logs and get_sta
 
 test('read_process_logs maintains ring buffer capped at 100 lines', async () => {
   await inTempWorkspace(async (ws) => {
-    // Generate 150 lines of output
-    const cmd = 'node -e "for(let i=1; i<=150; i++) console.log(\'line \' + i)"';
+    // PERBAIKAN (Windows): skrip ditulis ke FILE — tanpa `-e` ber-quote yang
+    // dipecah aturan kutip cmd.exe (node tanpa argumen valid masuk mode REPL:
+    // stdin 'ignore' → EOF → exit tanpa output → 0 baris log). `node <path>`
+    // bebas aturan kutip shell dan identik di semua OS.
+    const loopScript = join(ws, '.tmp-loop-script.cjs');
+    writeFileSync(loopScript, "for (let i = 1; i <= 150; i++) console.log('line ' + i);\n", 'utf8');
+    const cmd = `node ${loopScript}`;
     const proc = defaultProcessManager.startProcess(cmd, ws);
 
-    // Wait for output to complete
-    await new Promise((r) => setTimeout(r, 500));
-
-    const logs = defaultProcessManager.readProcessLogs(proc.id);
+    // PERBAIKAN (CI Windows): event 'exit' child bisa mendahului pengiriman
+    // data pipe (IOCP) — fixed 500ms membuat logs=[] walau proses sukses
+    // (exit 0). Poll sampai 100 baris terkumpul (maks 5 dtk).
+    let logs: string[] | null = null;
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      logs = defaultProcessManager.readProcessLogs(proc.id);
+      if (logs && logs.length >= 100) break;
+    }
     assert.ok(logs);
-    assert.equal(logs.length, 100);
+    // PERBAIKAN (CI Windows): log isi nyata saat jumlah salah — node runner
+    // bisa lebih lambat dari 500ms wait, atau proses gagal start; diagnostik
+    // langsung terlihat tanpa menggali log job.
+    assert.equal(
+      logs.length,
+      100,
+      `logs=${JSON.stringify(logs.slice(0, 5))}... status=${proc.status} exitCode=${proc.exitCode} cmd=${proc.command}`,
+    );
     // Oldest 50 lines dropped, starting from line 51
     assert.equal(logs[0], '[stdout] line 51');
     assert.equal(logs[99], '[stdout] line 150');
@@ -195,17 +228,36 @@ test('read_process_logs maintains ring buffer capped at 100 lines', async () => 
 
 test('read_process_logs redacts credentials with baseline regex pattern', async () => {
   await inTempWorkspace(async (ws) => {
-    const cmd =
-      'node -e "console.log(\'api_key: secret_123\\ntoken=token_abc\\npassword: pass123\\nsecret = my_secret\\nauthorization: auth_token_val\')' +
-      '; console.error(\'API-KEY: err_secret\')"';
+    // PERBAIKAN (Windows): output dari SCRIPT FILE (ditulis via fs) — bukan
+    // node -e ber-quote yang dipecah cmd.exe. Isi skrip bebas aturan kutip
+    // shell dan identik di semua OS.
+    const scriptPath = join(ws, '.tmp-redact-script.cjs');
+    writeFileSync(
+      scriptPath,
+      [
+        "console.log('api_key: secret_123');",
+        "console.log('token=token_abc');",
+        "console.log('password: pass123');",
+        "console.log('secret = my_secret');",
+        "console.log('authorization: auth_token_val');",
+        "console.error('API-KEY: err_secret');",
+      ].join('\n'),
+      'utf8',
+    );
+    const cmd = `node ${scriptPath}`;
     const proc = defaultProcessManager.startProcess(cmd, ws);
 
-    await new Promise((r) => setTimeout(r, 400));
-
-    const resRaw = await runToolCall(
-      { tool: 'read_process_logs', process_id: proc.id },
-      { workspaceRoot: ws },
-    );
+    // PERBAIKAN (CI Windows): poll hingga 6 baris terkumpul (maks 5 dtk) —
+    // pengiriman data pipe di Windows bisa terlambat dari event exit.
+    let resRaw = '';
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      resRaw = await runToolCall(
+        { tool: 'read_process_logs', process_id: proc.id },
+        { workspaceRoot: ws },
+      );
+      if (JSON.parse(resRaw).lines >= 6) break;
+    }
     const res = JSON.parse(resRaw);
     assert.equal(res.ok, true);
     assert.equal(res.lines, 6);

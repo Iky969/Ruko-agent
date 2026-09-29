@@ -17,6 +17,7 @@
  *     + env ComSpec — bukan process.platform.
  */
 import assert from 'node:assert/strict';
+import * as path from 'node:path';
 import { test, describe } from 'node:test';
 import {
   resolveShellSelection,
@@ -92,7 +93,11 @@ describe('faseD: regresi bit-identik non-win32 (shell binary + args shape)', () 
 
   test('termux: resolveTermuxBin — bare name → $PREFIX/bin, path eksplisit utuh, non-termux no-op', () => {
     const termux = profileOf({ flavor: 'termux', pathPrefix: '/data/data/com.termux/files/usr' });
-    assert.equal(resolveTermuxBin('rg', termux), '/data/data/com.termux/files/usr/bin/rg');
+    // PERBAIKAN (Windows): resolveTermuxBin memakai path.join() — di runner
+    // Windows hasilnya backslash (`\data\data\...`). Yang diuji adalah
+    // PENGGABUNGAN prefix+bin, bukan separator OS, jadi bandingkan terhadap
+    // path.join() pada semua platform.
+    assert.equal(resolveTermuxBin('rg', termux), path.join('/data/data/com.termux/files/usr', 'bin', 'rg'));
     assert.equal(resolveTermuxBin('./scripts/build.sh', termux), './scripts/build.sh');
     assert.equal(resolveTermuxBin('/usr/bin/git', termux), '/usr/bin/git');
     // Environment lain: NO-OP total (path resolution tidak berubah).

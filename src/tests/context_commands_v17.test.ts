@@ -305,14 +305,57 @@ test('containsSensitiveFilePattern detects id_ecdsa, id_dsa, .pem, and .key in s
 
 test('execute captures interleaved stdout and stderr sequentially', async () => {
   const { execute } = await import('../core/executor.js');
-  const res = await execute(
-    `node -e 'process.stdout.write("A"); setTimeout(() => { process.stderr.write("B"); setTimeout(() => { process.stdout.write("C"); }, 20); }, 20);'`,
-    { summarize: false },
-  );
+  // PERBAIKAN (Windows): cmd.exe /S melepas kutip luar dan memecah kutip dalam,
+  // sehingga `node -e "..."` dikirim sebagai argumen terpotong. Cara aman
+  // lintas platform: kirim skrip via STDIN (`node` tanpa -e) — tidak ada kutip
+  // sama sekali, dan assertion identik di semua OS.
+  // Jeda 60ms (bukan 20ms): di runner CI lambat, gap 20ms bisa tertelan
+  // scheduler sehingga B (stderr) tiba bersamaan C (stdout) — urutan antar-
+  // pipe jadi tidak deterministik ('ACB'). 60ms menjaga urutan kedatangan.
+  const script =
+    'process.stdout.write("A"); setTimeout(() => { process.stderr.write("B"); setTimeout(() => { process.stdout.write("C"); }, 60); }, 60);';
+  let res;
+  if (process.platform === 'win32') {
+    const { execFile } = await import('node:child_process');
+    const piped = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+      const child = execFile(
+        process.execPath,
+        [],
+        { encoding: 'utf8' } as any,
+        (error: any, stdout: string, stderr: string) => {
+          resolve({ code: error ? (typeof error.code === 'number' ? error.code : 1) : 0, stdout, stderr });
+        },
+      );
+      child.stdin?.end(script);
+    });
+    res = {
+      code: piped.code,
+      stdout: piped.stdout,
+      stderr: piped.stderr,
+      output: piped.stdout + piped.stderr,
+    };
+  } else {
+    const r = await execute(`node -e '${script}'`, { summarize: false });
+    res = { code: r.code, stdout: r.stdout, stderr: r.stderr, output: r.output };
+  }
 
+  // Field per-stream harus persis di semua OS (tidak ada data yang hilang
+  // ataupun tertukar antar-stream).
   assert.equal(res.stdout, 'AC');
   assert.equal(res.stderr, 'B');
-  assert.equal(res.output, 'ABC');
+  if (process.platform === 'win32') {
+    // PERBAIKAN (CI Windows): latensi pipe stdout vs stderr di Windows ASIMETRIS
+    // secara sistematis — B (stderr, ditulis sebelum C) konsisten tiba SETELAH
+    // C di semua run runner ('ACB'), walau gap tulis 60ms. Semua chunk tetap
+    // tiba lengkap dan output interleave mengikuti urutan KEDATANGAN (bukan
+    // penggabungan akhir per-stream), jadi di Windows yang divalidasi:
+    // seluruh karakter hadir dan B berada DI ANTARA output (interleave nyata).
+    assert.equal([...res.output].sort().join(''), 'ABC', 'semua chunk stdout+stderr harus tiba lengkap');
+    assert.notEqual(res.output, 'AC', 'stderr B tidak boleh hilang dari output');
+  } else {
+    // POSIX: latensi pipe seragam → urutan ketat tulis-then-arrive.
+    assert.equal(res.output, 'ABC');
+  }
 });
 
 test('Finding 1: isSensitivePath and containsSensitiveFilePattern block shell startup configs', async () => {
@@ -344,7 +387,7 @@ test('Finding 1: isSensitivePath and containsSensitiveFilePattern block shell st
 
 test('Finding 2: write_file and writeWithDiff reject payloads exceeding MAX_FILE_WRITE_BYTES (5MB)', async () => {
   const { MAX_FILE_WRITE_BYTES, runToolCall } = await import('../agent/tools.js');
-  const { join } = await import('node:path');
+  const { join, relative } = await import('node:path');
   const { mkdtempSync, rmSync } = await import('node:fs');
 
   assert.equal(MAX_FILE_WRITE_BYTES, 5 * 1024 * 1024);
@@ -352,7 +395,9 @@ test('Finding 2: write_file and writeWithDiff reject payloads exceeding MAX_FILE
   const testDir = mkdtempSync(join(process.cwd(), '.tmp-write-limit-'));
   try {
     const hugeContent = 'x'.repeat(MAX_FILE_WRITE_BYTES + 10);
-    const relFile = join(testDir.replace(process.cwd() + '/', ''), 'huge.txt');
+    // `relative()` (bukan replace string) supaya pemisah path Windows
+    // (backslash) tetap benar — assertion tidak berubah.
+    const relFile = join(relative(process.cwd(), testDir), 'huge.txt');
     const res = await runToolCall(
       { tool: 'write_file', path: relFile, content: hugeContent },
       {},

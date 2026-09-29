@@ -2,6 +2,108 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### ⚠️ TEMUAN KEAMANAN PENTING — Bypass Sandbox Tulis via Symlink di Windows: libuv Mengabaikan `O_NOFOLLOW` (29 September 2026) — Hasil Review PR #22
+
+#### Temuan C1 (severity tertinggi review; diperbaiki & terverifikasi CI hijau)
+- **Akar**: `writeWithDiff()` (`src/agent/tools.ts`) mengandalkan flag `O_NOFOLLOW` saat membuka file untuk tulis (anti-TOCTOU). **Di Windows, libuv MENGABAIKAN flag ini** — `open()` tetap mengikuti symlink tanpa error `ELOOP`. Akibatnya `edit_file` melalui symlink FILE yang menunjuk **keluar workspace BERHASIL MENULIS di luar sandbox** — guard workspace lexical/canonical lolos karena target dievaluasi lewat nama link (di dalam workspace), sedangkan penulisan aktual terjadi pada tujuan link (di luar).
+- **Cara terdeteksi**: test keamanan `security_hardening_v17` ("file tools resist symlink traversal") gagal di CI Windows bukan karena test salah, melainkan `JSON.parse(res).error === undefined` — **tidak ada error sama sekali** = penulisan tembus sukses. Ini contoh nyata nilai CI matriks multi-OS: kelas bug yang tak terlihat di Linux (di sana `O_NOFOLLOW` bekerja) langsung tertangkap di runner Windows.
+- **Perbaikan (commit `134888d`)**:
+  * `writeWithDiff()` kini melakukan guard **eksplisit dua arah sebelum menulis**: (1) `lstatSync` symlink → `assertInsideWorkspace(realpathSync(abs))` — bila realpath keluar workspace, ditolak dengan pesan escape `'mengarah ke symlink di luar working directory'` (semantik sandbox asli); (2) symlink internal apa pun tetap ditolak ala O_NOFOLLOW (deny-by-default anti-TOCTOU).
+  * `readFileTool()` (`src/agent/filetools.ts`): symlink ditolak deny-by-default murni via `lstat` — tanpa bergantung `O_NOFOLLOW` maupun pengecualian bentuk path; symlink keluar workspace memakai pesan escape eksplisit yang di-assert test.
+  * Pesan pesan error guard deterministik lintas OS (`assertNotSensitivePath`, prompt `move_file` memakai separator `/`).
+- **Pelajaran arsitektural**: flag `O_NOFOLLOW` TIDAK boleh dijadikan satu-satunya lapisan anti-symlink pada kode lintas platform — selalu pasangkan dengan `lstat` + `realpath` + assert containment eksplisit. Pola ini sekarang berlaku di semua jalur tulis (edit/write/patch via `writeWithDiff`) dan baca (`readFileTool`).
+- **Status**: diperbaiki; test keamanan v17 hijau di kedua job Windows CI; **tidak ada regresi** (1064 test — 1063 pass / 0 fail / 1 skip di lokal & CI).
+
+#### Rekap remediasi kritis lainnya di sesi review yang sama (CI Windows: hang 20 menit → hijau 9/9)
+- **C2** — Deteksi shell salah: `PSModulePath` ter-set machine-wide di Windows (bukan sinyal sesi PowerShell) → executor memilih `powershell.exe` + `windowsVerbatimArguments` (memecah quoting PS) → puluhan test gagal output kosong; ditambah rantai `cmd /d /s /c` yang melepas kutip luar → `node -e "..."` masuk mode REPL (proses tak pernah exit = **sumber hang 20 menit**). Fix: sinyal PowerShell hanya ComSpec eksplisit (`src/core/env.ts`), verbatim hanya cmd, kutip luar eksplisit untuk command ber-quote, timeout selalu exit 124.
+- **C3** — `taskkill` bisa tak pernah close (RPC Win32) → `stopProcess` deadlock; guard pertama justru membunuh taskkill di tengah enumerasi tree (kill parsial → `EBUSY` rmdir permanen). Fix final: guard hanya melepas pemanggil, taskkill dibiarkan tuntas; watchdog idle 60 dtk + `--test-timeout` di `scripts/run-tests.mjs`.
+- **C4** — `spawn(detached:true, unref())` + pipe di Windows: data stdout TIDAK PERNAH sampai ke parent (`read_process_logs` kosong walau exit 0). Fix: `detached` hanya POSIX; Windows + `windowsHide`.
+- **C5** — `fs.realpath` **async** → long-name (`runneradmin`) vs `realpathSync` → tetap 8.3 (`RUNNER~1`) di runner Windows; containment menolak path dalam-workspace sendiri (glob/code_search `files: 0`). Fix: `workspacePathForms()` mencakup bentuk lexical + `realpathSync` + `realpathSync.native()` (long-name, prefix `\\?\` dibersihkan); `walkDirectory` memakai `realpathSync`. Sandbox TIDAK melemah — symlink escape tetap ditolak.
+- **Diagnostik permanen**: `scripts/ci-diagnostics.mjs` kini mem-print probe bentuk path tmpdir/cwd (8.3 vs long-name, `cwd === realpath(cwd)`) saat job gagal — kelas bug containment Windows terbaca langsung dari log tanpa reproduksi lokal.
+
+---
+### Fix macOS: Workspace Ber-symlink Salah Dianggap "Di Luar Workspace" (29 September 2026) — Temuan Matriks CI macOS
+
+#### Diperbaiki (bug produk, ketangkap job `macos-latest` di CI — bukan bug test)
+- **`src/core/undo.ts` — containment snapshot/undo kini dinilai pada bentuk FISIK (symlink di-resolve), bukan lexical.**
+  * Gejala: `/undo`, `delete_file`/`move_file` restore, dan `revertFile` gagal dengan `Akses dibatalkan: Target snapshot "..." berada di luar workspace ("...")` untuk berkas milik workspace sendiri.
+  * Akar masalah: `os.tmpdir()` di macOS mengembalikan `/var/folders/..` (symlink ke `/private/var/folders/..`) sedangkan **`process.cwd()` selalu bentuk fisik** (kernel me-resolve symlink, sama seperti perilaku `getcwd()` POSIX). Snapshot menyimpan path bentuk symlink, `undoLast()` memakai `process.cwd()` bentuk fisik → `relative()` lexical menghasilkan `../../..` → ditolak. Pola sama menimpa workspace/home yang di-symlink (mis. `/home/u -> /mnt/data/u`).
+  * Perbaikan: helper `canonicalize()` (resolve symlink pada ancestor terdekat yang ada, sehingga segmen yang belum dibuat pun ikut) + `isInside()`; dipakai oleh `validateSnapshotPath()` (dan konsisten dengan `assertInsideWorkspace()` yang sudah lebih dulu memakai `realpathSync`).
+  * **Bonus keamanan**: pemeriksaan lama yang murni lexical justru **melewatkan** escape lewat *directory symlink* di dalam workspace (`ws/link-out/secret.txt` dengan `link-out -> /etc`); dengan bentuk fisik, kasus itu kini **ditolak**. Tidak ada regresi: `file_security`/`audit_fixes`/`sensitive_protection` tetap hijau.
+  * `revertFileGit()` dan `revertFile()` juga memakai bentuk fisik untuk menghitung path relatif (`git checkout -- <rel>` dan pesan pengguna), agar rollback git tidak gagal di macOS.
+- **Test regresi baru (`src/tests/undo.test.ts`, +2 test)**: (1) workspace diakses lewat symlink tetap "di dalam" — `validateSnapshotPath`, `undoLast`, dan `revertFile`; (2) escape lewat directory symlink wajib tetap ditolak. Keduanya **terbukti gagal dengan kode lama** (3 pass/2 fail) dan lulus setelah perbaikan (5/5) — diverifikasi dengan `git stash` pada `src/core/undo.ts`.
+- **Verifikasi silang tanpa macOS**: suite penuh dijalankan dengan `TMPDIR` menunjuk direktori **symlink** (meniru `/var` → `/private/var` macOS) → sebelumnya 3 test gagal, sekarang **1064 test — 1063 pass, 0 fail, 1 skip** pada mode normal maupun symlink.
+
+#### Diperbaiki lanjutan (temuan job `windows-latest`, run berikutnya)
+- **Test yang mengeksekusi tool POSIX-only di Windows** (`src/tests/guardian.test.ts`): empat test meng-assert `result.code === 0` / output dari perintah yang benar-benar dijalankan — `python3 -c "print(42)"`, `python3 -c "print(1)"`, `python3 -c "print(1+1)"`, dan `ls -la`. Runner Windows tidak punya `python3` maupun `ls`, sehingga test gagal walau jalur approval/guardian yang diuji sehat. Kini perintah eksekusi dipilih per platform (padanan `node -e "console.log(...)"` dan `dir`) sementara jalur `detectRisk()`/`assessWithGuardian()` tetap memakai string POSIX yang sama (penilaian regex identik di semua OS). Assertion tidak berubah.
+- **Kutip tunggal di perintah yang dieksekusi** (`src/tests/context_commands_v17.test.ts`): `node -e '...'` hanya valid di shell POSIX — cmd.exe hanya mengenali kutip ganda, sehingga skrip rusak dan interleaving stdout/stderr tidak seperti yang di-assert. Kini quoting dipilih per platform (assertion sama).
+- **`scripts/run-tests.mjs` — pelaporan kegagalan yang bisa dibaca**: output test di-stream live sekaligus dikumpulkan; saat gagal, runner mencetak ringkasan nama test yang gagal dan (di GitHub Actions) memancarkan annotation `::error::`/`::notice::` — nama test langsung terlihat di UI PR tanpa menggali job log mentah. Implementasi memakai `spawn` **streaming**, bukan `spawnSync` yang dibatasi `maxBuffer` 1 MB (suite ini mencetak output TAP jauh lebih besar, sehingga `spawnSync` akan memotong/membunuh runner tanpa pesan jelas — tertangkap saat verifikasi lokal).
+
+#### Catatan
+- Satu kegagalan lain di run yang sama (`POSIX: killProcessTree ... process group`) **tidak** berkaitan dengan symlink: lulus saat dijalankan sendiri, gagal hanya di bawah beban suite penuh (race waktu tunggu PID grandchild) — flake, bukan regresi.
+
+---
+
+### Injeksi Konteks OS/Shell ke System Prompt (29 September 2026) — Anti "Perintah Bash di Windows"
+
+#### Ditambahkan
+- **`formatEnvironmentContext()` (`src/agent/roles.ts`)** — layer prompt baru (c2) berisi OS (`process.platform` + label), arsitektur, shell aktif (`envProfile.defaultShell` + `shellFamily`), pemisah path (`path.sep`), working directory, dan flavor lingkungan (termux/wsl/colab/ci), diikuti **ATURAN PERINTAH** yang berbeda per platform:
+  * Windows (platform `win32` ATAU `shellFamily` cmd/powershell — jadi WSL/pwsh lintas OS tetap terdeteksi): larangan eksplisit `grep`/`sed`/`awk`/`cat`/`ls -la`/`rm -rf`/`sleep`/`$VAR`/pemisah `;`, plus padanan benar (`dir`, `type`, `findstr`, `where`, `Remove-Item`, `%VAR%`, `&&`, `ping -n N 127.0.0.1 > NUL`, kutip ganda, PowerShell eksplisit dengan `-NoProfile -NonInteractive`).
+  * POSIX: utilitas Unix tersedia, larangan perintah khusus Windows (`dir`, `type`, `findstr`, `%VAR%`, `taskkill`, PowerShell).
+- **`Agent.systemPrompt()` menyuntikkan layer ini otomatis** (`src/agent/agent.ts`) memakai `getEnvProfile()` — sumber kebenaran yang SAMA dengan `executor.ts`, sehingga prompt dan eksekusi tidak pernah berbeda pendapat soal OS/shell. Layer diletakkan setelah role dan sebelum AGENT.md agar urutan cache-friendly lama tetap utuh.
+- **`src/tests/env_prompt_context.test.ts`** (8 test, murni/platform-agnostic): isi konteks (OS/arch/shell/pemisah/cwd), larangan+padanan Windows, aturan POSIX, deteksi `shellFamily` lintas platform, pelaporan flavor, urutan layer, skip saat layer kosong/null (tanpa regresi prompt lama), dan integrasi `Agent.systemPrompt()` vs `process.platform` nyata.
+
+#### Catatan
+- Isi layer sengaja stabil per mesin/sesi (tidak memuat tanggal/state per-turn) supaya prompt caching provider tetap efektif; `buildSystemPrompt()` tanpa field `environment` menghasilkan prompt bit-identik dengan sebelumnya.
+
+---
+
+### Cross-Platform Test & CI Rekonsiliasi (29 September 2026) — Fix `ERR_INVALID_URL` Windows, Runner Test Cross-Platform, Matriks CI Linux/Windows/macOS
+
+#### Ditambahkan
+- **`src/tests/helpers/platform.ts` — helper platform zero-dependency (hanya `node:*`)**:
+  * `toFileUrl()` / `fromFileUrl()` / `importLocalModule()` — satu-satunya cara membentuk file URL di suite (`pathToFileURL()` dari `node:url`, path selalu di-absolutkan lebih dulu).
+  * `runNodeSync()` / `runNodeAsync()` — spawn `process.execPath` dengan **array argv** via `execFile` (tanpa shell, tanpa lookup `'node'` di PATH, tanpa quoting cmd.exe/PowerShell); stdin eksplisit lewat `input` (EOF), `windowsHide`, timeout bawaan 30s, output ter-capture ikut dilampirkan saat gagal.
+  * `rukoEnv()` — sanitasi env anak: `NO_COLOR=1` + **semua `RUKO_*` warisan dihapus**, sehingga mesin dev/RDP dengan `RUKO_TRUST_FOLDER=1` tidak lagi mengubah perilaku test.
+  * `createTempWorkspace()` / `removeTempWorkspace()` / `inTempWorkspace()`, `writeLocalModule()`, `listFilesRecursive()`, `childOutput()`, konstanta `PROJECT_ROOT` (dari `import.meta.url`, bukan `process.cwd()`), `SRC_DIR`, `CLI_ENTRY`, `DIST_TESTS_DIR`, `NODE_BIN`.
+- **`src/tests/platform_paths.test.ts` — suite regresi file URL lintas platform (7 test)**:
+  * `toFileUrl()` round-trip untuk entry CLI; invariant `fileURLToPath(toFileUrl(p)) === p`.
+  * String malformed historis `file://C:UsersIkyRuko-agentdistindex.js` **wajib ditolak** parser (`ERR_INVALID_URL`) — versi test dari error Windows yang dilaporkan.
+  * Bukti `'file://' + path` korup untuk path ber-spasi/`#`/`%` (temp dir `ruko url#space test-`), sementara `pathToFileURL()` meng-encode `%20`/`%23`/`%25` dengan benar.
+  * Bukti interpolasi mentah path Windows ke template literal menghapus separator (`\U`, `\I`, `\T`, `\r` dimakan escape JS) sedangkan injeksi `JSON.stringify()` byte-exact.
+  * Import `.mjs` mock yang di-generate (pola `yolo_hardening`) sukses via URL di semua OS.
+  * Test khusus win32 (drive letter → `file:///C:/...` tanpa host + round-trip; UNC `\\server\share\...`) — di-skip otomatis di Linux/macOS.
+- **`src/tests/zero_dependency_guard.test.ts` — guard kontrak zero runtime dependency (4 test)**: `package.json` & `package-lock.json` tanpa `dependencies`/`optionalDependencies`/`peerDependencies`/`bundledDependencies`; seluruh specifier `src/**/*.ts` dan `dist/**/*.js` wajib `node:*` atau relatif (`stripCommentLines()` mencegah false positive dari komentar/dokumentasi).
+- **`scripts/run-tests.mjs` — runner test cross-platform zero-dep**: enumerasi rekursif `dist/tests/**/*.test.js` (deterministik, urut), dukungan `--filter <substr>`, flag tambahan diteruskan ke `node --test`, exit code diteruskan apa adanya, pesan jelas bila `dist/` belum di-build.
+- **`scripts/ci-diagnostics.mjs` — diagnostik kegagalan CI (zero-dep)**: platform, versi Node, `cwd`, shell, `os.tmpdir()` + file URL-nya, bentuk path/URL entry CLI, jumlah entri `dist/tests`, dan **daftar kunci** env `RUKO_*`/`CI` (tanpa nilai).
+- **`.github/workflows/ci.yml` — matriks multi-OS**: `os: [ubuntu-latest, windows-latest, macos-latest]` × `node: [18.x, 20.x]` (+ `22.x` di Linux, 7 job), `fail-fast: false`, `timeout-minutes: 20`, konkurensi batal-otomatis, `permissions: contents: read`, trigger `push` ke `main` & `feat/**`, `pull_request` ke `main`, serta `workflow_dispatch`; langkah: `npm ci` → info environment (shell default per-OS sehingga portabilitas script benar-benar teruji) → `typecheck` → `npm test` → `test:e2e` → `test:urls` → diagnostics saat gagal.
+- **Script npm baru**: `test:urls` (regresi file URL) dan `test`/`test:e2e` kini memakai `scripts/run-tests.mjs`.
+
+#### Diperbaiki
+- **`ERR_INVALID_URL` di Windows (akar masalah)**: `'file://' + path` diganti `pathToFileURL()` di seluruh suite, dan injeksi URL ke `.mjs` mock kini memakai `JSON.stringify()`. Rantai kegagalan lama: concat rusak → backslash `C:\Users\Iky\...` dimakan escape template literal → `file://C:UsersIkyRuko-agentdistindex.js` → `await import()` gagal (`Invalid URL`, host = `C:`).
+- **`npm test` tidak lagi bergantung shell**: `node --test dist/tests/*.test.js` (glob hanya di-expand bash/sh, **tidak** oleh cmd.exe/PowerShell) dan `node --test dist/tests` (directory-mode berubah di Node 24) diganti `node scripts/run-tests.mjs`.
+- **`src/tests/yolo_hardening.test.ts`**: mock TTY kini dijalankan via `runNodeAsync` (argv array, `execFile`) dengan stdin `'n\n'`/`'y\n'`/`''` menggantikan pipe shell `echo "n" | node ...`; prefix temp workspace sengaja memuat spasi dan `#` agar bentuk `%TEMP%` Windows ikut teruji; assertion lama dipertahankan apa adanya (+ guard URL absolut/bebas backslash).
+- **`src/tests/allow_unsafe.test.ts`, `api_key_security.test.ts`, `error_handling.test.ts`**: seluruh spawn CLI pindah ke helper (`process.execPath` + argv array); 5 pemanggilan `execSync('node -e "…"')` (multiline + quote bersarang, rapuh di cmd.exe) diganti `runNodeSync(['-e', script])`. Assertion tidak diubah.
+- **Determinisme**: env anak dibersihkan dari `RUKO_*` warisan; `PROJECT_ROOT` selalu dari `import.meta.url` (bukan `process.cwd()`), sehingga suite tidak lagi bergantung direktori pemanggilan.
+
+#### Diperbaiki (kelas kegagalan Windows lain yang tertangkap audit yang sama)
+- **`src/core/executor.ts` — `windowsVerbatimArguments: process.platform === 'win32'`**: `execFile(shellBinary, ['/d','/s','/c', command])` sebelumnya membiarkan Node meng-escape argumen dengan aturan C-runtime (`"` → `\"`) yang tidak dikenali cmd.exe, sehingga quote di dalam perintah (`node -e "..."`, `git commit -m "msg"`) rusak di Windows. Flag ini mengirim command **verbatim** — identik dengan `cmd /d /s /c <command>` yang diketik manual, konsisten dengan `spawn(command, { shell: true })` di `processManager`. Diabaikan di Linux/macOS (perilaku tidak berubah).
+- **Symlink lintas platform**: helper `tryCreateSymlink()` (`src/tests/helpers/platform.ts`) membuat **junction** untuk symlink direktori di Windows (tidak butuh Developer Mode, tetap terdeteksi `lstat().isSymbolicLink()` dan di-resolve `realpath()`), dan mengembalikan `false` bila platform menolak — test `security_hardening_v17.test.ts` (5 titik) kini melewati dirinya sendiri alih-alih gagal, mengikuti konvensi `filetools.test.ts`/`sensitive_protection.test.ts`.
+- **Bit permission POSIX**: assertion `0o600` di `history.test.ts` dan `security_hardening_v17.test.ts` kini dijaga `process.platform !== 'win32'` (Windows selalu melaporkan `0o666`) — pola yang sudah dipakai `session`/`guardian`/`config`/`memory`/`api_key_security`.
+- **Path relatif lintas platform**: `context_commands_v17.test.ts` menghitung path relatif dengan `path.relative()` (bukan `replace(process.cwd() + '/', '')` yang tidak pernah cocok dengan backslash Windows).
+- **Perintah POSIX-only di test executor**: `sleep 5` → `ping -n 6 127.0.0.1 > NUL` dan `printf "%s" "$VAR"` → `echo %VAR%` khusus Windows (tanpa tanda kutip, assertion sama); test M4 "shell-startup env vars" di-skip di Windows karena `BASH_ENV`/`ENV`/`PROMPT_COMMAND`/`CDPATH`/`BASH_RCFILE` memang konsep shell POSIX (logika sanitasi-nya murni JS dan tetap teruji di POSIX).
+
+#### Diverifikasi
+- `npm run typecheck`: 0 error.
+- `npm test`: **1054 test — 1053 pass, 0 fail, 1 skip** (test khusus win32 di Linux/macOS); `npm run test:e2e`: 1 pass; `npm run test:urls`: 7 test (6 pass + 1 skip).
+- Suite penuh dijalankan ulang dengan `TMPDIR="/tmp/ruko tmp#a%20b"` (spasi + `#` + `%`) → **tetap 1053 pass / 0 fail**, membuktikan pembentukan file URL aman untuk bentuk `%TEMP%` Windows.
+- Matriks CI divalidasi lewat parser YAML: 7 job terekspansi (`ubuntu/windows/macos × 18/20` + `ubuntu × 22`).
+
+#### Catatan Migrasi (BREAKING untuk branch protection)
+- Nama job CI berubah dari `Test on Node 18.x` / `Test on Node 20.x` menjadi `Test (<os>, Node <versi>)`. Di **Settings → Branches → Branch protection `main` → Require status checks**, ganti daftar check lama dengan 7 nama baru (lihat `.github/SECURITY.md` bagian Rekomendasi Konfigurasi Tambahan) sebelum merge, agar status "Expected" tidak menggantung.
+
+---
+
 ### v1.8.0 (26 September 2026) — UI Overhaul 6 Fase (/mode, /reasoning, Panel Thinking, Diff Ringkas, Status Bar, Placeholder) & Fix Loop Detector Non-Streaming
 
 #### Ditambahkan & Diperbarui

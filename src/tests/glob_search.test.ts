@@ -84,7 +84,12 @@ test('globToRegex matches simple extensions and wildcards', () => {
 test('globTool lists files matching pattern while skipping ignored directories', async () => {
   const r = await globTool('*.ts', {}, tmpDir);
   assert.equal(r.ok, true);
-  assert.ok(r.files.length >= 3);
+  // Pesan assertion memuat hasil nyata agar CI platform lain menunjukkan isi
+  // files (bukan sekadar angka) saat jumlahnya salah.
+  assert.ok(
+    r.files.length >= 3,
+    `glob files (${r.files.length}): ${JSON.stringify(r.files)} | text: ${r.text}`,
+  );
   assert.ok(r.files.some((f) => f.includes('src/index.ts')));
   assert.ok(r.files.some((f) => f.includes('src/utils/helper.ts')));
   assert.ok(r.files.some((f) => f.includes('src/agent/tools.ts')));
@@ -152,9 +157,13 @@ test('globTool and walkDirectory safely handle symlink loops without hanging', a
 
 // --- codeSearchTool tests ---
 test('codeSearchTool finds literal query with line numbers and context', async () => {
+  // (assertion di bawah memuat ringkasan hasil untuk diagnostik CI)
   const r = await codeSearchTool('helper', {}, tmpDir);
   assert.equal(r.ok, true);
-  assert.ok(r.totalMatches >= 3);
+  assert.ok(
+    r.totalMatches >= 3,
+    `code_search matches=${r.totalMatches} files=${r.totalFiles} text=${r.text.slice(0, 300)}`,
+  );
   assert.ok(r.totalFiles >= 2);
   assert.match(r.text, />\s*\d+\|\s*.*helper/);
   assert.match(r.text, /Menemukan \d+ kecocokan/);

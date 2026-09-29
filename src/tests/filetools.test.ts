@@ -119,7 +119,12 @@ test('TASK-05: readFileTool rejects symlinks with O_NOFOLLOW (deny-by-default)',
     // Symlink INTERNAL (target di dalam workspace) pun harus ditolak di level open.
     const result = await readFileTool(link, {}, dir);
     assert.equal(result.ok, false);
-    assert.ok(result.text.includes('symbolic link') || result.text.includes('ELOOP'));
+    // PERBAIKAN (CI Windows): tampilkan pesan aktual saat tidak menolak dengan
+    // alasan symbolic link (bisa pesan escape workspace atau error OS lain).
+    assert.ok(
+      result.text.includes('symbolic link') || result.text.includes('ELOOP'),
+      `pesan aktual: ${result.text}`,
+    );
 
     // File asli tetap terbaca bila diakses langsung (tanpa lewat symlink).
     const direct = await readFileTool(real, {}, dir);

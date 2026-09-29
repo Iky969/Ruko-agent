@@ -4,8 +4,9 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-1018%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-1063%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![CI](https://img.shields.io/badge/CI-Linux%20%7C%20Windows%20%7C%20macOS-blue.svg)](.github/workflows/ci.yml)
 [![Security](https://img.shields.io/badge/security-CodeQL%20%7C%20Secret%20Scanning%20%7C%20Dependabot-success.svg)](.github/SECURITY.md)
 
 **Ruko** adalah AI Coding Agent CLI yang cepat, minimalis, dan *security-hardened*. Dibangun murni di atas **Node.js (ESM) + TypeScript tanpa runtime dependencies**, Ruko menghadirkan pair-programming yang andal langsung dari terminal.

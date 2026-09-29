@@ -2,6 +2,17 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execute } from '../core/executor.js';
 
+/**
+ * Perintah POSIX-only (`sleep`, `printf`) tidak ada di cmd.exe. Padanan Windows
+ * di bawah sengaja TANPA tanda kutip supaya tidak bergantung pada aturan
+ * quoting shell mana pun; assertion tiap test tidak berubah.
+ *  - `ping -n 6 127.0.0.1` ≈ 5 detik (sleep 5).
+ *  - `echo %VAR%` mencetak nilai env var seperti `printf "$VAR"` di POSIX.
+ */
+const isWin = process.platform === 'win32';
+const LONG_RUNNING_COMMAND = isWin ? 'ping -n 6 127.0.0.1 > NUL' : 'sleep 5';
+const printEnvCommand = (name: string): string => (isWin ? `echo %${name}%` : `printf "%s" "$${name}"`);
+
 test('execute captures stdout and exit code', async () => {
   const result = await execute('echo hello-agent');
   assert.equal(result.code, 0);
@@ -14,7 +25,7 @@ test('execute reports a non-zero exit code', async () => {
 });
 
 test('execute times out long-running commands', async () => {
-  const result = await execute('sleep 5', { timeoutMs: 500 });
+  const result = await execute(LONG_RUNNING_COMMAND, { timeoutMs: 500 });
   assert.equal(result.code, 124);
   assert.ok(result.durationMs < 5000, 'should have stopped well before 5s');
 });
@@ -25,6 +36,10 @@ test('execute times out long-running commands', async () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('M4: execute() membuang env var shell-startup (BASH_ENV, ENV, PROMPT_COMMAND, CDPATH, BASH_RCFILE)', async () => {
+  // Var startup ini konsep shell POSIX; cmd.exe tidak punya padanannya. Sanitasi
+  // env-nya sendiri murni JavaScript (platform-agnostic) dan tetap teruji di POSIX.
+  if (isWin) return;
+
   const result = await execute(
     'printf "%s|%s|%s|%s|%s" "$BASH_ENV" "$ENV" "$PROMPT_COMMAND" "$CDPATH" "$BASH_RCFILE"',
     {
@@ -42,7 +57,7 @@ test('M4: execute() membuang env var shell-startup (BASH_ENV, ENV, PROMPT_COMMAN
 });
 
 test('M4: env var biasa tetap diteruskan ke child process', async () => {
-  const result = await execute('printf "%s" "$RUKO_TEST_KEEP"', { env: { RUKO_TEST_KEEP: 'kept' } });
+  const result = await execute(printEnvCommand('RUKO_TEST_KEEP'), { env: { RUKO_TEST_KEEP: 'kept' } });
   assert.equal(result.code, 0);
   assert.equal(result.stdout.trim(), 'kept');
 });

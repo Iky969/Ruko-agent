@@ -1,0 +1,11 @@
+# Normalisasi line ending: repo LF, checkout LF di semua OS.
+# Mencegah kelas bug CRLF-vs-LF pada test assertion dan skrip shell saat
+# repo di-clone di Windows (core.autocrlf=true pada beberapa setup).
+* text=auto eol=lf
+
+# Berkas biner — jangan pernah disentuh normalisasi.
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.gz binary

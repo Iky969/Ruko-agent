@@ -2,38 +2,68 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feat/**']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    name: Test on Node ${{ matrix.node-version }} (${{ matrix.os }})
+    # Nama check ini dipakai branch protection (lihat .github/SECURITY.md).
+    name: Test (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
+      # Jangan batalkan OS lain saat satu OS gagal — kita ingin matriks penuh terlihat.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
-        node-version: [18.x, 20.x]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ['18.x', '20.x']
+        include:
+          # Node 22 di Linux saja sebagai jaring kompatibilitas generasi berikutnya.
+          - os: ubuntu-latest
+            node: '22.x'
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js ${{ matrix.node-version }}
+      - name: Setup Node.js ${{ matrix.node }}
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: ${{ matrix.node }}
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit --no-fund
+
+      - name: Environment info
+        # Shell default per-OS (bash / pwsh) SENGAJA dipakai: script npm harus
+        # benar-benar portabel, bukan hanya jalan di bash.
+        run: |
+          node -v
+          npm -v
+          node -e "const {join}=require('node:path');const {pathToFileURL}=require('node:url');console.log('platform:', process.platform, process.arch);console.log('CLI entry URL:', pathToFileURL(join(process.cwd(),'dist','index.js')).href)"
 
       - name: Typecheck TypeScript
         run: npm run typecheck
 
-      - name: Run unit & integration tests
+      - name: Run unit & integration tests (all OS)
         run: npm test
 
       - name: Run end-to-end tests
         run: npm run test:e2e
+
+      - name: Cross-platform file URL regression (pathToFileURL)
+        run: npm run test:urls
+
+      - name: Diagnostics (only when something failed)
+        if: failure()
+        run: node scripts/ci-diagnostics.mjs

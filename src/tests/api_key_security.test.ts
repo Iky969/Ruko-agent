@@ -2,10 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { redactApiKey, saveConfig } from '../core/config.js';
 import { statSync, rmSync, writeFileSync, mkdtempSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { CLI_ENTRY, runNodeSync } from './helpers/platform.js';
 
 // H5 (audit v1.7.7): format lama membocorkan 3 char awal + 4 char akhir (~35%
 // dari key 21-22 char). Kontrak baru: key < 40 char TIDAK membocorkan karakter
@@ -92,15 +91,9 @@ test('saveConfig enforces 0o600 permissions', () => {
   }
 });
 
-const PROJECT_ROOT = fileURLToPath(new URL('../..', import.meta.url));
-const CLI_PATH = join(PROJECT_ROOT, 'dist', 'index.js');
-
 test('CLI blocks raw literal --api-key without --insecure-api-key', () => {
   try {
-    execFileSync('node', [CLI_PATH, '--api-key', 'sk-literal-secret', '--version'], {
-      encoding: 'utf8',
-      stdio: 'pipe',
-    });
+    runNodeSync([CLI_ENTRY, '--api-key', 'sk-literal-secret', '--version'], { timeoutMs: 10_000 });
     assert.fail('Should have exited with error code 1');
   } catch (err: any) {
     assert.strictEqual(err.status, 1);
@@ -110,9 +103,8 @@ test('CLI blocks raw literal --api-key without --insecure-api-key', () => {
 });
 
 test('CLI accepts literal --api-key when --insecure-api-key is supplied', () => {
-  const out = execFileSync('node', [CLI_PATH, '--api-key', 'sk-literal-secret', '--insecure-api-key', '--version'], {
-    encoding: 'utf8',
-    stdio: 'pipe',
+  const out = runNodeSync([CLI_ENTRY, '--api-key', 'sk-literal-secret', '--insecure-api-key', '--version'], {
+    timeoutMs: 10_000,
   });
   assert.ok(out.includes('1.7.7') || out.length > 0);
 });
@@ -122,10 +114,7 @@ test('CLI securely loads --api-key from @file', () => {
   const tmpKeyFile = join(tmpDir, 'key.txt');
   try {
     writeFileSync(tmpKeyFile, 'sk-from-file-secret\n');
-    const out = execFileSync('node', [CLI_PATH, '--api-key', `@${tmpKeyFile}`, '--version'], {
-      encoding: 'utf8',
-      stdio: 'pipe',
-    });
+    const out = runNodeSync([CLI_ENTRY, '--api-key', `@${tmpKeyFile}`, '--version'], { timeoutMs: 10_000 });
     assert.ok(out.includes('1.7.7') || out.length > 0);
   } finally {
     try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
@@ -133,10 +122,9 @@ test('CLI securely loads --api-key from @file', () => {
 });
 
 test('CLI securely loads --api-key from stdin (-)', () => {
-  const out = execFileSync('node', [CLI_PATH, '--api-key', '-', '--version'], {
-    encoding: 'utf8',
+  const out = runNodeSync([CLI_ENTRY, '--api-key', '-', '--version'], {
     input: 'sk-from-stdin-secret',
-    stdio: 'pipe',
+    timeoutMs: 10_000,
   });
   assert.ok(out.includes('1.7.7') || out.length > 0);
 });

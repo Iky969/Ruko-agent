@@ -20,8 +20,12 @@ test('appendHistory and loadHistory maintain order and mode 0600', () => {
     const loaded = loadHistory(histFile);
     assert.deepEqual(loaded, ['ls -la', 'git status', 'npm test']);
 
-    const stat = statSync(histFile);
-    assert.equal(stat.mode & 0o777, 0o600, 'history file must have 0600 mode');
+    // Windows tidak menegakkan bit permission POSIX (mode selalu 0o666) —
+    // assertion ini khusus POSIX, sama seperti session/guardian/config tests.
+    if (process.platform !== 'win32') {
+      const stat = statSync(histFile);
+      assert.equal(stat.mode & 0o777, 0o600, 'history file must have 0600 mode');
+    }
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

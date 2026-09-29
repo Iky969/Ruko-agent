@@ -69,7 +69,27 @@ function inTempWorkspace<T>(fn: (ws: string) => Promise<T> | T): Promise<T> {
     defaultProcessManager.reset();
     setWorkspaceRoot(null);
     process.chdir(prev);
-    rmSync(ws, { recursive: true, force: true });
+    // PERBAIKAN (Windows): rmdir bisa EBUSY/ENOTEMPTY saat conhost/cwd handle
+    // proses yang baru dibunuh taskkill belum benar-benar dilepas OS. Retry
+    // 10x dengan jeda naik; bila tetap gagal → cleanup bersifat best-effort:
+    // lewati (folder orphan di Temp) — JANGAN gagalkan test karena timing OS.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        rmSync(ws, { recursive: true, force: true });
+        break;
+      } catch (err: any) {
+        const retryable =
+          err?.code === 'EBUSY' || err?.code === 'ENOTEMPTY' || err?.code === 'EPERM' || err?.code === 'EACCES';
+        if (!retryable || attempt === 9) {
+          if (retryable) {
+            console.warn(`[cancellation.test] cleanup dilewati (OS handle belum lepas): ${ws}`);
+            break;
+          }
+          throw err;
+        }
+        await new Promise((r) => setTimeout(r, 200 + attempt * 150));
+      }
+    }
   });
 }
 
@@ -173,8 +193,15 @@ test('ESC saat streaming LLM aktif → aborted dan menampilkan feedback pembatal
 test('ESC saat tool exec durasi lama aktif → aborted', async () => {
   await inTempWorkspace(async () => {
     const { editor, input } = makeEditor();
+    // PERBAIKAN (Windows): prefix `exec` adalah builtin shell POSIX — tidak ada
+    // di cmd.exe (perintah gagal instan → ESC tidak meng-abort apa pun dan
+    // giliran selesai normal). Padanan Windows tanpa prefix, assertion sama.
+    const longCmd =
+      process.platform === 'win32'
+        ? 'node -e "setInterval(() => {}, 10000)"'
+        : 'exec node -e "setInterval(() => {}, 1000)"';
     const provider = new ScriptedProvider([
-      '```tool\n{"tool": "exec", "command": "exec node -e \\"setInterval(() => {}, 1000)\\""}\n```',
+      `\`\`\`tool\n{"tool": "exec", "command": "${longCmd.replace(/"/g, '\\"')}"}\n\`\`\``,
       'Selesai.',
     ]);
     const ctx = new Context(config);
@@ -192,8 +219,15 @@ test('ESC saat tool exec durasi lama aktif → aborted', async () => {
 
     const turnPromise = agent.handleInstruction('jalankan perintah lama', ac.signal);
 
-    // Beri waktu hingga tool exec mulai berjalan, lalu kirim ESC
-    await new Promise((r) => setTimeout(r, 200));
+    // Beri waktu hingga tool exec mulai berjalan, lalu kirim ESC.
+    // PERBAIKAN (Windows runner lambat): fixed 200ms terlalu cepat — exec
+    // kadang belum mulai sehingga ESC tidak meng-abort apapun dan giliran
+    // selesai normal ('Selesai.'). Poll ActivityTray agent (terisi saat tool
+    // mulai dieksekusi) maks 3 dtk sebelum mengirim ESC.
+    for (let i = 0; i < 30; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      if (agent.activityTray.size() > 0) break;
+    }
     input.send('\u001b');
 
     const { result, out } = await captureStdout(() => turnPromise);
@@ -210,10 +244,13 @@ test('ESC saat tool exec durasi lama aktif → aborted', async () => {
 test('ESC saat start_process baru saja dipanggil → proses child TETAP hidup, hanya giliran agent yang dibatalkan', async () => {
   await inTempWorkspace(async (ws) => {
     const { editor, input } = makeEditor();
-    // Agent memanggil start_process, lalu menunggu (step berikutnya)
+    // Agent memanggil start_process, lalu menunggu (step berikutnya).
+    // PERBAIKAN (Windows): tanpa prefix `exec` (builtin POSIX) pada step kedua.
+    const bgCmd = 'node -e "setInterval(() => {}, 10000)"';
+    const bgCmdEsc = bgCmd.replace(/"/g, '\\"');
     const provider = new ScriptedProvider([
-      '```tool\n{"tool": "start_process", "command": "node -e \\"setInterval(() => {}, 1000)\\""}\n```',
-      '```tool\n{"tool": "exec", "command": "exec node -e \\"setInterval(() => {}, 1000)\\""}\n```',
+      `\`\`\`tool\n{"tool": "start_process", "command": "${bgCmdEsc}"}\n\`\`\``,
+      `\`\`\`tool\n{"tool": "exec", "command": "${process.platform === 'win32' ? bgCmdEsc : 'exec ' + bgCmdEsc}"}\n\`\`\``,
     ]);
     const ctx = new Context(config);
     const agent = new Agent(ctx, provider, config);

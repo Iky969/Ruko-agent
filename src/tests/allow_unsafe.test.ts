@@ -1,20 +1,17 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { CLI_ENTRY, runNodeSync } from './helpers/platform.js';
 import { isHighRiskDangerousCommand, detectRisk } from '../core/approval.js';
 import { DEFAULT_CONFIG } from '../types.js';
 
-const PROJECT_ROOT = fileURLToPath(new URL('../..', import.meta.url));
-const CLI_PATH = join(PROJECT_ROOT, 'dist', 'index.js');
-
 function runCli(args: string[], env: Record<string, string> = {}): { stdout: string; stderr: string; code: number } {
   try {
-    const stdout = execFileSync('node', [CLI_PATH, ...args], {
-      encoding: 'utf8',
-      env: { ...process.env, ...env, NO_COLOR: '1' },
-      timeout: 10_000,
+    // `runNodeSync` spawns `process.execPath <CLI_ENTRY> <args...>` through
+    // `execFile` with an argv array — no shell, so Windows cmd/PowerShell
+    // quoting (backslashes, spaces in the project path) cannot corrupt args.
+    const stdout = runNodeSync([CLI_ENTRY, ...args], {
+      env,
+      timeoutMs: 10_000,
       input: '', // Simulates non-interactive piped stdin (!process.stdin.isTTY)
     });
     return { stdout, stderr: '', code: 0 };

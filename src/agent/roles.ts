@@ -231,6 +231,86 @@ export interface PromptLayers {
   agentDoc: string | null;
   memory?: string | null;
   skills?: string | null;
+  environment?: string | null;
+}
+
+/** Input for {@link formatEnvironmentContext} — pure data, mudah diuji tanpa mock OS. */
+export interface EnvironmentContextInput {
+  /** `process.platform` (mis. 'win32', 'linux', 'darwin'). */
+  platform: string;
+  /** `process.arch` (mis. 'x64', 'arm64') — opsional. */
+  arch?: string;
+  /** Keluarga shell yang benar-benar dipakai executor (`envProfile.shellFamily`). */
+  shellFamily: string;
+  /** Binary shell yang dipakai (`envProfile.defaultShell` / ComSpec / '/bin/sh'). */
+  shellBinary?: string;
+  /** Pemisah path efektif (`path.sep`). */
+  pathSeparator?: string;
+  /** Working directory absolut saat prompt dirakit. */
+  workspaceRoot?: string;
+  /** `envProfile.flavor` (termux/wsl/colab/jupyter/ci) — opsional. */
+  flavor?: string;
+}
+
+/**
+ * LAYER KONTEKS LINGKUNGAN (otomatis, dirakit dari `process` + `envProfile`).
+ *
+ * Mencegah kegagalan yang paling sering terjadi saat model "berpikir POSIX di
+ * mesin Windows": LLM mengirim `grep`/`sed`/`ls -la`/`rm -rf`/`$VAR`/`a; b`
+ * padahal executor memakai cmd.exe, sehingga perintah hanya menghasilkan
+ * `'grep' is not recognized as an internal or external command`.
+ *
+ * Isinya SENGAJA stabil per mesin/sesi (OS + shell + pemisah path) supaya tetap
+ * ramah prompt-caching provider; detail yang berubah tiap turn (mis. tanggal)
+ * tidak dimasukkan.
+ */
+export function formatEnvironmentContext(ctx: EnvironmentContextInput): string {
+  const separator = ctx.pathSeparator ?? (ctx.platform === 'win32' ? '\\' : '/');
+  const isWindows = ctx.platform === 'win32' || ctx.shellFamily === 'cmd' || ctx.shellFamily === 'powershell';
+  const osLabel =
+    ctx.platform === 'win32'
+      ? 'Windows'
+      : ctx.platform === 'darwin'
+        ? 'macOS'
+        : ctx.platform === 'linux'
+          ? 'Linux'
+          : ctx.platform;
+  const shellLabel = ctx.shellBinary ? `${ctx.shellBinary} (${ctx.shellFamily})` : ctx.shellFamily;
+
+  const lines: string[] = [
+    '## Konteks lingkungan (otomatis — disuntik oleh CLI, bukan dari pengguna)',
+    `- OS: ${osLabel} — platform id: ${ctx.platform}${ctx.arch ? ` (${ctx.arch})` : ''}`,
+    `- Shell aktif untuk tool exec: ${shellLabel}`,
+    `- Pemisah path: "${separator}" — contoh ${separator === '\\' ? 'C:\\proyek\\app' : '/home/user/app'}`,
+  ];
+  if (ctx.workspaceRoot) lines.push(`- Working directory: ${ctx.workspaceRoot}`);
+  if (ctx.flavor && ctx.flavor !== 'none') lines.push(`- Lingkungan terdeteksi: ${ctx.flavor}`);
+
+  lines.push('', 'ATURAN PERINTAH (WAJIB — sesuaikan dengan OS di atas):');
+
+  if (isWindows) {
+    lines.push(
+      '- Terminal adalah Windows, BUKAN POSIX. JANGAN memakai perintah/sintaks Unix: grep, sed, awk, cat, ls -la, rm -rf, cp, mv, sleep, `$VAR`, `${VAR}`, dan pemisah `;` antar perintah.',
+      '- Padanan Windows yang benar: dir, type, findstr, where, del/Remove-Item, copy, move, echo %VAR%, dan rantai perintah dengan `&&` (bukan `;`).',
+      '- Untuk tugas kompleks, pakai PowerShell eksplisit: powershell -NoProfile -NonInteractive -Command "..." (atau cmd /d /s /c "..." untuk sintaks cmd).',
+      '- Penundaan/loop aman tanpa `sleep`: ping -n <detik+1> 127.0.0.1 > NUL.',
+      '- Tanda kutip: pakai tanda kutip ganda untuk argumen berspasi; tanda kutip tunggal tidak dikenali cmd.exe.',
+      '- Node.js tersedia di OS ini — perintah yang portabel (mis. `node -e "..."`) lebih aman daripada utilitas shell tertentu.',
+    );
+  } else {
+    lines.push(
+      '- Terminal adalah POSIX (sh/bash). Utilitas Unix tersedia: grep, sed, awk, cat, ls, rm, cp, mv, sleep; gunakan `&&`/`;` sesuai kebutuhan.',
+      '- JANGAN memakai perintah khusus Windows (dir, type, findstr, %VAR%, taskkill) atau PowerShell — tidak tersedia di shell ini.',
+      '- Tanda kutip tunggal dan ganda sama-sama valid; pakai tanda kutip untuk path berspasi.',
+    );
+  }
+
+  lines.push(
+    '- Tool exec sudah memilih shell yang benar dari konfigurasi CLI; jangan mengawali perintah dengan `bash -c`/`cmd /c` kecuali memang diperlukan.',
+    '- Selalu gunakan pemisah path yang sesuai OS di atas; jangan mencampur "/" dan "\\" dalam satu perintah.',
+  );
+
+  return lines.join('\n');
 }
 
 /** Plan-mode guard as prose — the hard enforcement lives in the CLI code (§4). */
@@ -256,6 +336,9 @@ export function modeAddendum(mode: UiMode): string | null {
 /** Assembles the final system prompt in fixed, cache-friendly layer order. */
 export function buildSystemPrompt(layers: PromptLayers): string {
   const parts = [CORE_IDENTITY, TOOL_RULES, layers.role.prompt];
+  // (c2) Konteks lingkungan (OS/shell) — stabil per mesin, jadi aman untuk
+  // prompt caching dan selalu berada setelah role agar urutan lama tetap utuh.
+  if (layers.environment && layers.environment.trim()) parts.push(layers.environment.trim());
   if (layers.skills && layers.skills.trim()) parts.push(layers.skills);
   if (layers.agentDoc) parts.push(layers.agentDoc);
   const addenda = [layers.planMode ? planModeAddendum() : null, modeAddendum(layers.mode)];
