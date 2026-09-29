@@ -167,6 +167,13 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
         env: cleanEnv,
         maxBuffer: options.maxBuffer ?? DEFAULT_MAX_BUFFER,
         windowsHide: true,
+        // Windows: kirim command VERBATIM ke cmd.exe/powershell.exe — persis
+        // seperti `cmd /d /s /c <command>` yang diketik manual. Tanpa flag ini
+        // Node meng-escape argumen dengan aturan C-runtime (mis. `"` → `\"`)
+        // yang tidak dikenali cmd.exe, sehingga quote di dalam perintah
+        // (`node -e "..."`, `git commit -m "msg"`) rusak/terpotong saat
+        // eksekusi di Windows. Diabaikan sepenuhnya di Linux/macOS.
+        windowsVerbatimArguments: process.platform === 'win32',
       },
       (error, rawStdout, rawStderr) => {
         if (killTimer) {

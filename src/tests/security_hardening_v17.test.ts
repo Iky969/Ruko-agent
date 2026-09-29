@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdirSync, symlinkSync, writeFileSync, rmSync, statSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, statSync, mkdtempSync } from 'node:fs';
+import { tryCreateSymlink } from './helpers/platform.js';
 import http from 'node:http';
 import path from 'node:path';
 import os from 'node:os';
@@ -91,9 +92,10 @@ test('assertInsideWorkspace blocks symlinked directories and non-existent files 
   writeFileSync(outsideFile, 'secret outside');
 
   const evilDirLink = path.join(ws, 'evil_dir');
-  symlinkSync(outsideDir, evilDirLink);
+  const linkOk = tryCreateSymlink(outsideDir, evilDirLink);
 
   try {
+    if (!linkOk) return; // Platform tanpa hak symlink (Windows non-developer-mode) → lewati.
     // 1. Existing file accessed through symlinked directory is rejected
     const existingFileThroughLink = path.join(evilDirLink, 'secret.txt');
     assert.throws(
@@ -127,9 +129,10 @@ test('assertNotSensitivePath detects symlinks pointing to sensitive files and .g
   writeFileSync(envFile, 'API_KEY=123');
 
   const symlinkToEnv = path.join(ws, 'innocent_name.txt');
-  symlinkSync(envFile, symlinkToEnv);
+  const linkOk = tryCreateSymlink(envFile, symlinkToEnv);
 
   try {
+    if (!linkOk) return; // Platform tanpa hak symlink → lewati.
     // Symlink pointing to .env is caught
     assert.throws(
       () => assertNotSensitivePath(symlinkToEnv, ws),
@@ -156,12 +159,13 @@ test('file tools (read, write, edit, glob, code_search) resist symlink traversal
   writeFileSync(outsideSecret, 'SUPER_SECRET_TOKEN_XYZ_123');
 
   const leakLink = path.join(ws, 'leak.txt');
-  symlinkSync(outsideSecret, leakLink);
+  const leakLinkOk = tryCreateSymlink(outsideSecret, leakLink);
 
   const evilDirLink = path.join(ws, 'evil_dir');
-  symlinkSync(outsideDir, evilDirLink);
+  const evilDirLinkOk = tryCreateSymlink(outsideDir, evilDirLink);
 
   try {
+    if (!leakLinkOk || !evilDirLinkOk) return; // Platform tanpa hak symlink → lewati.
     // 1. readFileTool refuses to read through escaping symlink file
     const readRes = await readFileTool('leak.txt', {}, ws);
     assert.equal(readRes.ok, false);
@@ -195,7 +199,7 @@ test('file tools (read, write, edit, glob, code_search) resist symlink traversal
     const innerTarget = path.join(ws, 'inner_target.txt');
     writeFileSync(innerTarget, 'initial inner');
     const innerLink = path.join(ws, 'inner_link.txt');
-    symlinkSync(innerTarget, innerLink);
+    if (!tryCreateSymlink(innerTarget, innerLink)) return; // Platform tanpa hak symlink → lewati.
 
     const writeInternalRes = await runToolCall(
       { tool: 'edit_file', path: 'inner_link.txt', content: 'modified inner' },
@@ -476,9 +480,13 @@ test('takeSnapshot sets mode 0600 on snapshot content and meta files', () => {
     const statContent = statSync(contentFile);
     const statMeta = statSync(metaFile);
 
-    // Check mode permissions (0o600 -> 0o100600)
-    assert.equal(statContent.mode & 0o777, 0o600);
-    assert.equal(statMeta.mode & 0o777, 0o600);
+    // Check mode permissions (0o600 -> 0o100600). Windows tidak menegakkan
+    // bit permission POSIX (mode selalu 0o666), jadi assertion ini khusus POSIX —
+    // pola yang sama dipakai di session/guardian/config/memory tests.
+    if (process.platform !== 'win32') {
+      assert.equal(statContent.mode & 0o777, 0o600);
+      assert.equal(statMeta.mode & 0o777, 0o600);
+    }
   } finally {
     rmSync(ws, { recursive: true, force: true });
   }

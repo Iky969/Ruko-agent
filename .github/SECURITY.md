@@ -65,12 +65,15 @@ Kami menghargai laporan keamanan komunitas.
 | **Dependabot Alerts** | ✅ Enabled | Weekly scan npm & GitHub Actions |
 | **Dependabot Security Updates** | ✅ Enabled | Auto-PR untuk CVE |
 | **CodeQL Analysis** | ✅ Enabled | Workflow `.github/workflows/codeql.yml`, queries `security-extended,security-and-quality` |
-| **Branch Protection (main)** | ✅ Enabled | Require PR, require status checks (Node 18.x, 20.x, CodeQL), no bypass |
-| **CI Multi-Version** | ✅ Enabled | `.github/workflows/ci.yml` — Node 18.x & 20.x, typecheck, unit, e2e |
+| **Branch Protection (main)** | ✅ Enabled | Require PR, require status checks (CI matrix + CodeQL), no bypass |
+| **CI Multi-OS** | ✅ Enabled | `.github/workflows/ci.yml` — Linux + Windows + macOS × Node 18.x/20.x (+22.x di Linux), typecheck, unit, e2e |
 
 ### Workflow Details
 
-- **CI**: `actions/checkout@v4`, `actions/setup-node@v4`, `npm ci`, `npm run typecheck`, `npm test` (817 tests), `npm run test:e2e`
+- **CI** (`.github/workflows/ci.yml`): matriks `os: [ubuntu-latest, windows-latest, macos-latest]` × `node: [18.x, 20.x]` (+ `22.x` di Linux), `fail-fast: false`, `actions/checkout@v4`, `actions/setup-node@v4` (cache npm), `npm ci`, `npm run typecheck`, `npm test`, `npm run test:e2e`, `npm run test:urls`
+  - Runner test cross-platform `scripts/run-tests.mjs` (zero-dep, enumerasi berkas lalu `node --test <argv…>`) — tidak bergantung ekspansi glob shell (cmd.exe/PowerShell tidak meng-expand glob) maupun directory-mode `node --test` yang berubah antar generasi Node.
+  - Step `Diagnostics` (`if: failure()` → `scripts/ci-diagnostics.mjs`) mencetak platform, `os.tmpdir()`, bentuk file URL CLI, dan daftar kunci env (bukan nilainya) untuk melokalisasi kegagalan khas Windows.
+  - Guard `src/tests/zero_dependency_guard.test.ts` menegakkan kontrak zero runtime dependency di setiap OS (package.json, lockfile, seluruh import `src/**` dan `dist/**`).
 - **CodeQL**: `github/codeql-action/init@v3` & `analyze@v3`, config `.github/codeql/codeql-config.yml` (exclude `dist/**`, `src/tests/**`, `js/file-access-to-http`, `js/file-system-race`)
 - **Dependabot**: `.github/dependabot.yml` — npm weekly, github-actions weekly, limit 10 PRs
 
@@ -78,8 +81,9 @@ Kami menghargai laporan keamanan komunitas.
 
 ```bash
 npm run typecheck   # 0 error
-npm test            # 817 passed
+npm test            # 1054 tests — 1053 passed, 1 skipped (khusus Windows)
 npm run test:e2e    # 1 passed
+npm run test:urls   # regresi file URL lintas platform
 ```
 
 ---
@@ -95,7 +99,7 @@ Untuk fork atau self-hosted runner, aktifkan di **Settings > Code security and a
 5. CodeQL → Default setup atau workflow custom
 6. Branch Protection `main`:
    - Require PR before merging
-   - Require status checks: `Test on Node 18.x`, `Test on Node 20.x`, `Analyze (JavaScript/TypeScript)`
+   - Require status checks (nama job matriks CI): `Test (ubuntu-latest, Node 18.x)`, `Test (ubuntu-latest, Node 20.x)`, `Test (ubuntu-latest, Node 22.x)`, `Test (windows-latest, Node 18.x)`, `Test (windows-latest, Node 20.x)`, `Test (macos-latest, Node 18.x)`, `Test (macos-latest, Node 20.x)`, `Analyze (JavaScript/TypeScript)`
    - Do not allow bypass
 
 ---

@@ -2,6 +2,51 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### Cross-Platform Test & CI Rekonsiliasi (29 September 2026) — Fix `ERR_INVALID_URL` Windows, Runner Test Cross-Platform, Matriks CI Linux/Windows/macOS
+
+#### Ditambahkan
+- **`src/tests/helpers/platform.ts` — helper platform zero-dependency (hanya `node:*`)**:
+  * `toFileUrl()` / `fromFileUrl()` / `importLocalModule()` — satu-satunya cara membentuk file URL di suite (`pathToFileURL()` dari `node:url`, path selalu di-absolutkan lebih dulu).
+  * `runNodeSync()` / `runNodeAsync()` — spawn `process.execPath` dengan **array argv** via `execFile` (tanpa shell, tanpa lookup `'node'` di PATH, tanpa quoting cmd.exe/PowerShell); stdin eksplisit lewat `input` (EOF), `windowsHide`, timeout bawaan 30s, output ter-capture ikut dilampirkan saat gagal.
+  * `rukoEnv()` — sanitasi env anak: `NO_COLOR=1` + **semua `RUKO_*` warisan dihapus**, sehingga mesin dev/RDP dengan `RUKO_TRUST_FOLDER=1` tidak lagi mengubah perilaku test.
+  * `createTempWorkspace()` / `removeTempWorkspace()` / `inTempWorkspace()`, `writeLocalModule()`, `listFilesRecursive()`, `childOutput()`, konstanta `PROJECT_ROOT` (dari `import.meta.url`, bukan `process.cwd()`), `SRC_DIR`, `CLI_ENTRY`, `DIST_TESTS_DIR`, `NODE_BIN`.
+- **`src/tests/platform_paths.test.ts` — suite regresi file URL lintas platform (7 test)**:
+  * `toFileUrl()` round-trip untuk entry CLI; invariant `fileURLToPath(toFileUrl(p)) === p`.
+  * String malformed historis `file://C:UsersIkyRuko-agentdistindex.js` **wajib ditolak** parser (`ERR_INVALID_URL`) — versi test dari error Windows yang dilaporkan.
+  * Bukti `'file://' + path` korup untuk path ber-spasi/`#`/`%` (temp dir `ruko url#space test-`), sementara `pathToFileURL()` meng-encode `%20`/`%23`/`%25` dengan benar.
+  * Bukti interpolasi mentah path Windows ke template literal menghapus separator (`\U`, `\I`, `\T`, `\r` dimakan escape JS) sedangkan injeksi `JSON.stringify()` byte-exact.
+  * Import `.mjs` mock yang di-generate (pola `yolo_hardening`) sukses via URL di semua OS.
+  * Test khusus win32 (drive letter → `file:///C:/...` tanpa host + round-trip; UNC `\\server\share\...`) — di-skip otomatis di Linux/macOS.
+- **`src/tests/zero_dependency_guard.test.ts` — guard kontrak zero runtime dependency (4 test)**: `package.json` & `package-lock.json` tanpa `dependencies`/`optionalDependencies`/`peerDependencies`/`bundledDependencies`; seluruh specifier `src/**/*.ts` dan `dist/**/*.js` wajib `node:*` atau relatif (`stripCommentLines()` mencegah false positive dari komentar/dokumentasi).
+- **`scripts/run-tests.mjs` — runner test cross-platform zero-dep**: enumerasi rekursif `dist/tests/**/*.test.js` (deterministik, urut), dukungan `--filter <substr>`, flag tambahan diteruskan ke `node --test`, exit code diteruskan apa adanya, pesan jelas bila `dist/` belum di-build.
+- **`scripts/ci-diagnostics.mjs` — diagnostik kegagalan CI (zero-dep)**: platform, versi Node, `cwd`, shell, `os.tmpdir()` + file URL-nya, bentuk path/URL entry CLI, jumlah entri `dist/tests`, dan **daftar kunci** env `RUKO_*`/`CI` (tanpa nilai).
+- **`.github/workflows/ci.yml` — matriks multi-OS**: `os: [ubuntu-latest, windows-latest, macos-latest]` × `node: [18.x, 20.x]` (+ `22.x` di Linux, 7 job), `fail-fast: false`, `timeout-minutes: 20`, konkurensi batal-otomatis, `permissions: contents: read`, trigger `push` ke `main` & `feat/**`, `pull_request` ke `main`, serta `workflow_dispatch`; langkah: `npm ci` → info environment (shell default per-OS sehingga portabilitas script benar-benar teruji) → `typecheck` → `npm test` → `test:e2e` → `test:urls` → diagnostics saat gagal.
+- **Script npm baru**: `test:urls` (regresi file URL) dan `test`/`test:e2e` kini memakai `scripts/run-tests.mjs`.
+
+#### Diperbaiki
+- **`ERR_INVALID_URL` di Windows (akar masalah)**: `'file://' + path` diganti `pathToFileURL()` di seluruh suite, dan injeksi URL ke `.mjs` mock kini memakai `JSON.stringify()`. Rantai kegagalan lama: concat rusak → backslash `C:\Users\Iky\...` dimakan escape template literal → `file://C:UsersIkyRuko-agentdistindex.js` → `await import()` gagal (`Invalid URL`, host = `C:`).
+- **`npm test` tidak lagi bergantung shell**: `node --test dist/tests/*.test.js` (glob hanya di-expand bash/sh, **tidak** oleh cmd.exe/PowerShell) dan `node --test dist/tests` (directory-mode berubah di Node 24) diganti `node scripts/run-tests.mjs`.
+- **`src/tests/yolo_hardening.test.ts`**: mock TTY kini dijalankan via `runNodeAsync` (argv array, `execFile`) dengan stdin `'n\n'`/`'y\n'`/`''` menggantikan pipe shell `echo "n" | node ...`; prefix temp workspace sengaja memuat spasi dan `#` agar bentuk `%TEMP%` Windows ikut teruji; assertion lama dipertahankan apa adanya (+ guard URL absolut/bebas backslash).
+- **`src/tests/allow_unsafe.test.ts`, `api_key_security.test.ts`, `error_handling.test.ts`**: seluruh spawn CLI pindah ke helper (`process.execPath` + argv array); 5 pemanggilan `execSync('node -e "…"')` (multiline + quote bersarang, rapuh di cmd.exe) diganti `runNodeSync(['-e', script])`. Assertion tidak diubah.
+- **Determinisme**: env anak dibersihkan dari `RUKO_*` warisan; `PROJECT_ROOT` selalu dari `import.meta.url` (bukan `process.cwd()`), sehingga suite tidak lagi bergantung direktori pemanggilan.
+
+#### Diperbaiki (kelas kegagalan Windows lain yang tertangkap audit yang sama)
+- **`src/core/executor.ts` — `windowsVerbatimArguments: process.platform === 'win32'`**: `execFile(shellBinary, ['/d','/s','/c', command])` sebelumnya membiarkan Node meng-escape argumen dengan aturan C-runtime (`"` → `\"`) yang tidak dikenali cmd.exe, sehingga quote di dalam perintah (`node -e "..."`, `git commit -m "msg"`) rusak di Windows. Flag ini mengirim command **verbatim** — identik dengan `cmd /d /s /c <command>` yang diketik manual, konsisten dengan `spawn(command, { shell: true })` di `processManager`. Diabaikan di Linux/macOS (perilaku tidak berubah).
+- **Symlink lintas platform**: helper `tryCreateSymlink()` (`src/tests/helpers/platform.ts`) membuat **junction** untuk symlink direktori di Windows (tidak butuh Developer Mode, tetap terdeteksi `lstat().isSymbolicLink()` dan di-resolve `realpath()`), dan mengembalikan `false` bila platform menolak — test `security_hardening_v17.test.ts` (5 titik) kini melewati dirinya sendiri alih-alih gagal, mengikuti konvensi `filetools.test.ts`/`sensitive_protection.test.ts`.
+- **Bit permission POSIX**: assertion `0o600` di `history.test.ts` dan `security_hardening_v17.test.ts` kini dijaga `process.platform !== 'win32'` (Windows selalu melaporkan `0o666`) — pola yang sudah dipakai `session`/`guardian`/`config`/`memory`/`api_key_security`.
+- **Perintah POSIX-only di test executor**: `sleep 5` → `ping -n 6 127.0.0.1 > NUL` dan `printf "%s" "$VAR"` → `echo %VAR%` khusus Windows (tanpa tanda kutip, assertion sama); test M4 "shell-startup env vars" di-skip di Windows karena `BASH_ENV`/`ENV`/`PROMPT_COMMAND`/`CDPATH`/`BASH_RCFILE` memang konsep shell POSIX (logika sanitasi-nya murni JS dan tetap teruji di POSIX).
+
+#### Diverifikasi
+- `npm run typecheck`: 0 error.
+- `npm test`: **1054 test — 1053 pass, 0 fail, 1 skip** (test khusus win32 di Linux/macOS); `npm run test:e2e`: 1 pass; `npm run test:urls`: 7 test (6 pass + 1 skip).
+- Suite penuh dijalankan ulang dengan `TMPDIR="/tmp/ruko tmp#a%20b"` (spasi + `#` + `%`) → **tetap 1053 pass / 0 fail**, membuktikan pembentukan file URL aman untuk bentuk `%TEMP%` Windows.
+- Matriks CI divalidasi lewat parser YAML: 7 job terekspansi (`ubuntu/windows/macos × 18/20` + `ubuntu × 22`).
+
+#### Catatan Migrasi (BREAKING untuk branch protection)
+- Nama job CI berubah dari `Test on Node 18.x` / `Test on Node 20.x` menjadi `Test (<os>, Node <versi>)`. Di **Settings → Branches → Branch protection `main` → Require status checks**, ganti daftar check lama dengan 7 nama baru (lihat `.github/SECURITY.md` bagian Rekomendasi Konfigurasi Tambahan) sebelum merge, agar status "Expected" tidak menggantung.
+
+---
+
 ### v1.8.0 (26 September 2026) — UI Overhaul 6 Fase (/mode, /reasoning, Panel Thinking, Diff Ringkas, Status Bar, Placeholder) & Fix Loop Detector Non-Streaming
 
 #### Ditambahkan & Diperbarui
