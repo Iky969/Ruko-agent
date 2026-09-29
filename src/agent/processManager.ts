@@ -398,6 +398,17 @@ export class ProcessManager {
       }
     }
 
+    // PERBAIKAN (Windows CI hang): taskkill bisa tak pernah close (RPC ke
+    // Win32 API menggantung saat mematikan tree test runner). `await` di atas
+    // kini ber-guard (defaultRunTaskkill), tapi sebagai jaring pengaman terakhir
+    // stopProcess menjanjikan diri selesai dalam ~timeoutMs + 6s — apa pun
+    // yang terjadi. stop_process adalah tool agen: harus SELALU kembali.
+    const totalDeadline = Date.now() + timeoutMs + 6_000;
+    while (!exited && Date.now() < totalDeadline) {
+      await new Promise((r) => setTimeout(r, 100));
+      exited = (proc.status as ProcessState) === 'exited' || isProcessDead(proc.pid);
+    }
+
     proc.status = 'exited';
     return {
       ok: true,

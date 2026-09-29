@@ -149,7 +149,8 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
 
     // Fase D: shell dipilih dari SATU sumber kebenaran (envProfile.shellFamily).
     // Non-win32 hasilnya bit-identik dengan perilaku lama: /bin/sh + ['-c', command].
-    const shellSelection = resolveShellSelection(getEnvProfile());
+    const envProfile = getEnvProfile();
+    const shellSelection = resolveShellSelection(envProfile);
     const shellBinary = shellSelection.binary;
     const shellArgs = [...shellSelection.argsPrefix, command];
 
@@ -167,13 +168,19 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
         env: cleanEnv,
         maxBuffer: options.maxBuffer ?? DEFAULT_MAX_BUFFER,
         windowsHide: true,
-        // Windows: kirim command VERBATIM ke cmd.exe/powershell.exe — persis
-        // seperti `cmd /d /s /c <command>` yang diketik manual. Tanpa flag ini
-        // Node meng-escape argumen dengan aturan C-runtime (mis. `"` → `\"`)
+        // Windows: kirim command VERBATIM ke cmd.exe — persis seperti
+        // `cmd /d /s /c <command>` yang diketik manual. Tanpa flag ini Node
+        // meng-escape argumen dengan aturan C-runtime (mis. `"` → `\"`)
         // yang tidak dikenali cmd.exe, sehingga quote di dalam perintah
         // (`node -e "..."`, `git commit -m "msg"`) rusak/terpotong saat
-        // eksekusi di Windows. Diabaikan sepenuhnya di Linux/macOS.
-        windowsVerbatimArguments: process.platform === 'win32',
+        // eksekusi di Windows.
+        //
+        // PERBAIKAN: flag ini HANYA untuk cmd.exe. powershell.exe justru
+        // PECAH dengan windowsVerbatimArguments (melanggar aturan quoting
+        // C-runtime-nya sendiri: inner quote hilang → `node -e "..."` gagal
+        // dengan output kosong), dan flag ini diabaikan penuh di Linux/macOS.
+        windowsVerbatimArguments:
+          process.platform === 'win32' && envProfile.shellFamily === 'cmd',
       },
       (error, rawStdout, rawStderr) => {
         if (killTimer) {
@@ -196,8 +203,15 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
           Boolean(
             error && (error.killed || (error as any).signal === 'SIGTERM') && durationMs >= Math.max(0, timeoutMs - 1500),
           );
-        // Standard timeout exit code is 124
-        if (killedByTimeout && code === null) {
+        // Standard timeout exit code is 124.
+        //
+        // PERBAIKAN (Windows): `code` TIDAK selalu null saat timeout.
+        //  1) taskkill (/F) mematikan shell secara paksa — di cmd.exe/some
+        //     shell exit code proses yang di-terminate bisa 1 (bukan null);
+        //  2) windowsVerbatimArguments cmd.exe bisa salah mengurai command
+        //     kompleks (exit 1) — tanpa flag timedOut, kondisi race halus.
+        // Tandai timeout bila timedOut ATAU (heuristik sinyal SIGTERM + durasi).
+        if (killedByTimeout) {
           code = 124;
         }
         if (killedByTimeout) {

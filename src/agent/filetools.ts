@@ -138,9 +138,15 @@ export async function readFileTool(
   try {
     const lst = await fs.lstat(abs);
     if (lst.isSymbolicLink()) {
+      // TASK-05 deny-by-default: symlink apa pun ditolak di sini, TANPA
+      // bergantung pada perilaku O_NOFOLLOW per platform (Windows mengabaikan
+      // flag itu di beberapa versi libuv sehingga open gagal dengan kode lain).
+      // Pengecualian satu-satunya: bentuk path yang berbeda (8.3 short-name vs
+      // long-name, casing) menuju FILE YANG SAMA dianggap bukan symlink.
       const real = await fs.realpath(abs);
-      assertInsideWorkspace(real, cwd);
-      assertNotSensitivePath(real, cwd);
+      if (path.resolve(real) !== path.resolve(abs)) {
+        return { ok: false, text: `read_file: '${filePath}' adalah symbolic link — ditolak demi keamanan (O_NOFOLLOW).` };
+      }
     }
   } catch (err) {
     if (err instanceof Error && (err.message.includes('working directory') || err.message.includes('file sensitif'))) {

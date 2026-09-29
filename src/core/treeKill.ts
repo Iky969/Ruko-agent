@@ -161,7 +161,18 @@ export function resolveTreeKill(pid: number, options: TreeKillOptions = {}): Tre
   };
 }
 
-/** Eksekusi default taskkill (dipakai produksi; diganti di test). */
+/**
+ * Eksekusi default taskkill (dipakai produksi; diganti di test).
+ *
+ * PERBAIKAN (Windows CI hang): taskkill bisa TIDAK PERnah exit — ia meng-close
+ * koneksi RPC ke Win32 API saat mematikan process yang tree-nya sedang sibuk
+ * (proses anak yang di-spawn test), atau menggantung di konsol yang ter-inherit.
+ * `await` tanpa guard = seluruh rantai stopProcess/cleanup terkunci. Diberi
+ * guard 3 detik: lewat waktu → dianggap terkirim (proses target hampir pasti
+ * sudah mati; tree kill bersifat best-effort) tanpa memblokir pemanggil.
+ */
+const TASKKILL_GUARD_MS = 3_000;
+
 function defaultRunTaskkill(binary: string, args: string[]): Promise<number | null> {
   return new Promise<number | null>((resolve, reject) => {
     let child;
@@ -171,9 +182,33 @@ function defaultRunTaskkill(binary: string, args: string[]): Promise<number | nu
       reject(err);
       return;
     }
+    let settled = false;
+    const guard = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // ignore — proses mungkin sudah mati
+        }
+        resolve(0); // asumsikan kill tree terkirim; jangan blokir pemanggil
+      }
+    }, TASKKILL_GUARD_MS);
     // `error` (ENOENT/EACCES) → reject agar pemanggil memakai fallback.
-    child.once('error', (err) => reject(err));
-    child.once('close', (code) => resolve(code));
+    child.once('error', (err) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(guard);
+        reject(err);
+      }
+    });
+    child.once('close', (code) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(guard);
+        resolve(code);
+      }
+    });
   });
 }
 

@@ -79,6 +79,31 @@ const testFiles = files.map((file) => relative(PROJECT_ROOT, file).split(sep).jo
 console.log(`▶ node --test (${testFiles.length}/${allFiles.length} file${allFiles.length === 1 ? '' : 's'}) — ${process.platform} / ${process.version}`);
 if (filter) console.log(`  filter: ${filter}`);
 
+// ─── Watchdog anti-hang (temuan CI Windows: suite menggantung >19 menit) ───
+// Satu file test yang menggantung (spawn/pipe yang tak selesai) membekukan
+// SELURUH runner sampai job-level timeout 20 menit memakan sisa budget job.
+// `--test-timeout` (Node 18.24+/20.15+) membatasi DURASI per test; watchdog
+// idle membatasi JEDA tanpa output sama sekali — penutup total untuk semua
+// bentuk hang, di semua versi Node ≥ 18.
+const STREAM_IDLE_TIMEOUT_MS = 60_000; // 1 menit tanpa output → panic
+
+const versionParts = process.version.slice(1).split('.').map(Number);
+const nodeMajor = versionParts[0] ?? 0;
+const nodeMinor = versionParts[1] ?? 0;
+const supportsTestTimeout =
+  nodeMajor > 20 || (nodeMajor === 20 && nodeMinor >= 15) || (nodeMajor === 18 && nodeMinor >= 24);
+
+let idleTimer = null;
+const armIdleTimer = () => {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    console.error(`\n✖ Watchdog: tidak ada output dari test runner selama ${STREAM_IDLE_TIMEOUT_MS / 1000}s — kemungkinan test menggantung; runner dibunuh.`);
+    try {
+      child.kill('SIGKILL');
+    } catch {}
+  }, STREAM_IDLE_TIMEOUT_MS);
+};
+
 // Output di-stream LIVE (seperti stdio:'inherit') sekaligus dikumpulkan supaya
 // kegagalan bisa dilaporkan sebagai annotation CI — job log GitHub Action tidak
 // selalu mudah diakses/dibaca, sedangkan annotation muncul langsung di PR.
@@ -96,13 +121,24 @@ const capture = (chunk, stream) => {
   }
 };
 
-const child = spawn(process.execPath, ['--test', ...nodeFlags, ...testFiles], {
+const testRunnerArgs = supportsTestTimeout
+  ? ['--test', '--test-timeout=60000', ...nodeFlags, ...testFiles]
+  : ['--test', ...nodeFlags, ...testFiles];
+
+const child = spawn(process.execPath, testRunnerArgs, {
   cwd: PROJECT_ROOT,
   stdio: ['inherit', 'pipe', 'pipe'],
 });
 
-child.stdout?.on('data', (chunk) => capture(chunk, process.stdout));
-child.stderr?.on('data', (chunk) => capture(chunk, process.stderr));
+armIdleTimer();
+child.stdout?.on('data', (chunk) => {
+  armIdleTimer();
+  capture(chunk, process.stdout);
+});
+child.stderr?.on('data', (chunk) => {
+  armIdleTimer();
+  capture(chunk, process.stderr);
+});
 
 const exitCode = await new Promise((resolvePromise) => {
   child.on('error', (err) => {
@@ -110,6 +146,7 @@ const exitCode = await new Promise((resolvePromise) => {
     resolvePromise(1);
   });
   child.on('close', (code, signal) => {
+    if (idleTimer) clearTimeout(idleTimer);
     if (signal) {
       console.error(`✖ Test runner killed by signal ${signal}`);
       resolvePromise(1);

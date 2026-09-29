@@ -110,12 +110,18 @@ describe('env: dimensi shellFamily', () => {
     assert.equal(p.shellFamily, 'powershell');
   });
 
-  test('win32 powershell via PSModulePath meski ComSpec cmd', () => {
+  test('win32 PSModulePath saja TIDAK mengubah shell (tetap cmd) — fix CI Windows', () => {
+    // PERBAIKAN: PSModulePath ter-set machine-wide di Windows umum (termasuk
+    // runner GitHub Actions) BAHKAN saat shell aktif adalah cmd.exe. Deteksi
+    // lama menjadikannya sinyal "sesi PowerShell" sehingga executor memakai
+    // powershell.exe + windowsVerbatimArguments → quoting `node -e "..."`
+    // pecah, puluhan test gagal di CI Windows. Sinyal sah kini hanya ComSpec
+    // yang eksplisit menunjuk powershell/pwsh.
     const p = profileOf({
       platform: 'win32',
       env: { ComSpec: 'C:\\Windows\\system32\\cmd.exe', PSModulePath: 'C:\\Program Files\\WindowsPowerShell\\Modules' },
     });
-    assert.equal(p.shellFamily, 'powershell');
+    assert.equal(p.shellFamily, 'cmd');
   });
 
   test('win32 tanpa env sama sekali → cmd (fail-safe ke cmd)', () => {

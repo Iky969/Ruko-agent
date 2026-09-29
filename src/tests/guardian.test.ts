@@ -458,8 +458,12 @@ test('GAP-03: writes verdict to guardian audit log file with 0600 mode', async (
 
   const content = readFileSync(auditFile, 'utf8');
   assert.match(content, /verdict=safe/);
-  assert.ok(content.includes('python3 -c'), 'Log should include command');
-  assert.ok(content.includes('print(42)'), 'Log should include command args');
+  // PERBAIKAN (Windows): perintah inline BERBEDA per platform (node -e vs
+  // python3 -c). Catatan: command di audit log di-JSON.stringify sehingga
+  // inner-quote di-escape (\") — assert hanya pada awalan tanpa quote.
+  const interpreterPrefix = IS_WINDOWS ? 'node -e' : 'python3 -c';
+  assert.ok(content.includes(interpreterPrefix), 'Log should include command');
+  assert.ok(content.includes('print(42)') || content.includes('console.log(42)'), 'Log should include command args');
   assert.match(content, /Kalkulasi matematika sederhana/);
 
   if (process.platform !== 'win32') {
