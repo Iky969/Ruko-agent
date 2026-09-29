@@ -81,7 +81,7 @@ Kami menghargai laporan keamanan komunitas.
 
 ```bash
 npm run typecheck   # 0 error
-npm test            # 1054 tests — 1053 passed, 1 skipped (khusus Windows)
+npm test            # 1062 tests — 1061 passed, 1 skipped (khusus Windows)
 npm run test:e2e    # 1 passed
 npm run test:urls   # regresi file URL lintas platform
 ```

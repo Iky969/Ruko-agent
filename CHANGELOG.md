@@ -2,6 +2,20 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### Injeksi Konteks OS/Shell ke System Prompt (29 September 2026) — Anti "Perintah Bash di Windows"
+
+#### Ditambahkan
+- **`formatEnvironmentContext()` (`src/agent/roles.ts`)** — layer prompt baru (c2) berisi OS (`process.platform` + label), arsitektur, shell aktif (`envProfile.defaultShell` + `shellFamily`), pemisah path (`path.sep`), working directory, dan flavor lingkungan (termux/wsl/colab/ci), diikuti **ATURAN PERINTAH** yang berbeda per platform:
+  * Windows (platform `win32` ATAU `shellFamily` cmd/powershell — jadi WSL/pwsh lintas OS tetap terdeteksi): larangan eksplisit `grep`/`sed`/`awk`/`cat`/`ls -la`/`rm -rf`/`sleep`/`$VAR`/pemisah `;`, plus padanan benar (`dir`, `type`, `findstr`, `where`, `Remove-Item`, `%VAR%`, `&&`, `ping -n N 127.0.0.1 > NUL`, kutip ganda, PowerShell eksplisit dengan `-NoProfile -NonInteractive`).
+  * POSIX: utilitas Unix tersedia, larangan perintah khusus Windows (`dir`, `type`, `findstr`, `%VAR%`, `taskkill`, PowerShell).
+- **`Agent.systemPrompt()` menyuntikkan layer ini otomatis** (`src/agent/agent.ts`) memakai `getEnvProfile()` — sumber kebenaran yang SAMA dengan `executor.ts`, sehingga prompt dan eksekusi tidak pernah berbeda pendapat soal OS/shell. Layer diletakkan setelah role dan sebelum AGENT.md agar urutan cache-friendly lama tetap utuh.
+- **`src/tests/env_prompt_context.test.ts`** (8 test, murni/platform-agnostic): isi konteks (OS/arch/shell/pemisah/cwd), larangan+padanan Windows, aturan POSIX, deteksi `shellFamily` lintas platform, pelaporan flavor, urutan layer, skip saat layer kosong/null (tanpa regresi prompt lama), dan integrasi `Agent.systemPrompt()` vs `process.platform` nyata.
+
+#### Catatan
+- Isi layer sengaja stabil per mesin/sesi (tidak memuat tanggal/state per-turn) supaya prompt caching provider tetap efektif; `buildSystemPrompt()` tanpa field `environment` menghasilkan prompt bit-identik dengan sebelumnya.
+
+---
+
 ### Cross-Platform Test & CI Rekonsiliasi (29 September 2026) — Fix `ERR_INVALID_URL` Windows, Runner Test Cross-Platform, Matriks CI Linux/Windows/macOS
 
 #### Ditambahkan

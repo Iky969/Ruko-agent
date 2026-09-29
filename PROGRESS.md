@@ -6,13 +6,15 @@
 ## Status Saat Ini — v1.9.0 (29 Sep 2026)
 
 - **Versi**: 1.9.0 (stable)
-- **Tests**: 1054 total — 1053 passed, 0 failed, 1 skipped (test khusus win32; di Linux/macOS di-skip)
+- **Tests**: 1062 total — 1061 passed, 0 failed, 1 skipped (test khusus win32; di Linux/macOS di-skip)
 - **E2E**: 1 passed
 - **Typecheck**: clean
 - **Node**: >=18.0.0; CI matrix Linux + Windows + macOS × Node 18.x/20.x (+ 22.x di Linux)
 - **Dependencies**: 0 runtime (zero-dep) — ditegakkan otomatis oleh `src/tests/zero_dependency_guard.test.ts`
 
-### Apa yang Baru (29 Sep 2026) — Cross-Platform Test & CI Rekonsiliasi
+### Apa yang Baru (29 Sep 2026) — Konteks OS/Shell di System Prompt + Cross-Platform Test & CI
+
+- **Konteks lingkungan otomatis**: `formatEnvironmentContext()` (`roles.ts`) menyuntikkan OS/shell/pemisah path + aturan perintah (Windows vs POSIX) ke system prompt via `Agent.systemPrompt()`; memakai `getEnvProfile()` yang sama dengan `executor.ts` → model tidak lagi mengirim `grep`/`rm -rf`/`$VAR` di cmd.exe. Test: `src/tests/env_prompt_context.test.ts` (8 test)
 
 - **Fix `ERR_INVALID_URL` Windows**: konstruksi file URL `'file://' + path` dihapus total dari suite; semua path → URL lewat `pathToFileURL()` (`node:url`) di helper baru `src/tests/helpers/platform.ts`, dan injeksi URL ke `.mjs` mock memakai `JSON.stringify()` (escape-proof)
 - **Runner test cross-platform** `scripts/run-tests.mjs`: enumerasi `dist/tests/**/*.test.js` di Node lalu `node --test <argv…>` — tidak bergantung ekspansi glob shell (cmd.exe/PowerShell tidak meng-expand) maupun directory-mode Node yang berubah antar generasi; dukung `--filter`
