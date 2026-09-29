@@ -6,13 +6,15 @@
 ## Status Saat Ini — v1.9.0 (29 Sep 2026)
 
 - **Versi**: 1.9.0 (stable)
-- **Tests**: 1062 total — 1061 passed, 0 failed, 1 skipped (test khusus win32; di Linux/macOS di-skip)
+- **Tests**: 1064 total — 1063 passed, 0 failed, 1 skipped (test khusus win32; di Linux/macOS di-skip)
 - **E2E**: 1 passed
 - **Typecheck**: clean
 - **Node**: >=18.0.0; CI matrix Linux + Windows + macOS × Node 18.x/20.x (+ 22.x di Linux)
 - **Dependencies**: 0 runtime (zero-dep) — ditegakkan otomatis oleh `src/tests/zero_dependency_guard.test.ts`
 
 ### Apa yang Baru (29 Sep 2026) — Konteks OS/Shell di System Prompt + Cross-Platform Test & CI
+
+- **Fix macOS (temuan job CI `macos-latest`)**: `src/core/undo.ts` menilai containment snapshot pada bentuk **fisik** (symlink di-resolve) — `/undo` tidak lagi menolak berkas workspace sendiri saat workspace ber-symlink (`/var/folders` → `/private/var/folders`, `process.cwd()` selalu bentuk fisik); sekaligus menutup escape lewat directory symlink yang lolos dari cek lexical lama. +2 test regresi di `src/tests/undo.test.ts`
 
 - **Konteks lingkungan otomatis**: `formatEnvironmentContext()` (`roles.ts`) menyuntikkan OS/shell/pemisah path + aturan perintah (Windows vs POSIX) ke system prompt via `Agent.systemPrompt()`; memakai `getEnvProfile()` yang sama dengan `executor.ts` → model tidak lagi mengirim `grep`/`rm -rf`/`$VAR` di cmd.exe. Test: `src/tests/env_prompt_context.test.ts` (8 test)
 

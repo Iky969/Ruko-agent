@@ -2,6 +2,23 @@
 
 > Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
 
+### Fix macOS: Workspace Ber-symlink Salah Dianggap "Di Luar Workspace" (29 September 2026) — Temuan Matriks CI macOS
+
+#### Diperbaiki (bug produk, ketangkap job `macos-latest` di CI — bukan bug test)
+- **`src/core/undo.ts` — containment snapshot/undo kini dinilai pada bentuk FISIK (symlink di-resolve), bukan lexical.**
+  * Gejala: `/undo`, `delete_file`/`move_file` restore, dan `revertFile` gagal dengan `Akses dibatalkan: Target snapshot "..." berada di luar workspace ("...")` untuk berkas milik workspace sendiri.
+  * Akar masalah: `os.tmpdir()` di macOS mengembalikan `/var/folders/..` (symlink ke `/private/var/folders/..`) sedangkan **`process.cwd()` selalu bentuk fisik** (kernel me-resolve symlink, sama seperti perilaku `getcwd()` POSIX). Snapshot menyimpan path bentuk symlink, `undoLast()` memakai `process.cwd()` bentuk fisik → `relative()` lexical menghasilkan `../../..` → ditolak. Pola sama menimpa workspace/home yang di-symlink (mis. `/home/u -> /mnt/data/u`).
+  * Perbaikan: helper `canonicalize()` (resolve symlink pada ancestor terdekat yang ada, sehingga segmen yang belum dibuat pun ikut) + `isInside()`; dipakai oleh `validateSnapshotPath()` (dan konsisten dengan `assertInsideWorkspace()` yang sudah lebih dulu memakai `realpathSync`).
+  * **Bonus keamanan**: pemeriksaan lama yang murni lexical justru **melewatkan** escape lewat *directory symlink* di dalam workspace (`ws/link-out/secret.txt` dengan `link-out -> /etc`); dengan bentuk fisik, kasus itu kini **ditolak**. Tidak ada regresi: `file_security`/`audit_fixes`/`sensitive_protection` tetap hijau.
+  * `revertFileGit()` dan `revertFile()` juga memakai bentuk fisik untuk menghitung path relatif (`git checkout -- <rel>` dan pesan pengguna), agar rollback git tidak gagal di macOS.
+- **Test regresi baru (`src/tests/undo.test.ts`, +2 test)**: (1) workspace diakses lewat symlink tetap "di dalam" — `validateSnapshotPath`, `undoLast`, dan `revertFile`; (2) escape lewat directory symlink wajib tetap ditolak. Keduanya **terbukti gagal dengan kode lama** (3 pass/2 fail) dan lulus setelah perbaikan (5/5) — diverifikasi dengan `git stash` pada `src/core/undo.ts`.
+- **Verifikasi silang tanpa macOS**: suite penuh dijalankan dengan `TMPDIR` menunjuk direktori **symlink** (meniru `/var` → `/private/var` macOS) → sebelumnya 3 test gagal, sekarang **1064 test — 1063 pass, 0 fail, 1 skip** pada mode normal maupun symlink.
+
+#### Catatan
+- Satu kegagalan lain di run yang sama (`POSIX: killProcessTree ... process group`) **tidak** berkaitan dengan symlink: lulus saat dijalankan sendiri, gagal hanya di bawah beban suite penuh (race waktu tunggu PID grandchild) — flake, bukan regresi.
+
+---
+
 ### Injeksi Konteks OS/Shell ke System Prompt (29 September 2026) — Anti "Perintah Bash di Windows"
 
 #### Ditambahkan
