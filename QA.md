@@ -137,3 +137,131 @@ Sebelum Pull Request digabungkan ke cabang utama:
 | **TC-SCM-03** | `scopeAmendment.ts` | Target mutasi berada di balik symlink direktori internal yang mengarah ke `/tmp` atau root sistem | Pengecekan realpath parent mendeteksi pelarian hierarki; operasi ditolak atau memicu prompt amandemen. |
 | **TC-GOV-03** | `resourceGovernor.ts` / Tier 0 | Pemanggilan Compiler Gate pada repositori yang memuat `tsc.cmd` kustom di Windows | Sistem mengabaikan `.bin/tsc.cmd` dan mengeksekusi `node_modules/typescript/bin/tsc` via `process.execPath`. |
 | **TC-GOV-04** | `resourceGovernor.ts` / Tier 0 | Parameter compiler disuntikkan flag `--outDir /evil/path` | Eksekutor menolak argumen asing dan hanya mengizinkan flag baku `--noEmit`. |
+
+Kamu adalah Senior Distributed Systems & Concurrency Engineer.
+Analisis arsitektur Dual-Plane State Machine dan Plan Mode Lock pada Ruko-agent v2.0.0 berikut.
+
+Fokuskan penalaranmu pada:
+1. Concurrency & Deadlocks: Apakah ada celah di mana FileLock (fs.mkdir + mtime heartbeat) gagal mencegah race condition saat dua sesi CLI berjalan paralel di direktori yang sama?
+2. State Desynchronization: Apakah ada urutan eksekusi (misal crash mendadak, disk full, atau sinyal SIGINT/SIGTERM) yang menyebabkan state di ~/.ruko/sessions/ tidak sinkron dengan runtime agent, sehingga Plan Mode lock terbuka sebelum waktunya?
+3. Logika Transisi: Evaluasi apakah aturan Subtree Monotonic Expansion memiliki kelemahan logika traversal hierarki direktori.
+
+Gali setiap skenario secara kritis dan uji hipotesismu berulang kali sebelum menarik kesimpulan.
+
+1. Model Ancaman & Invarian Arsitektur
+ * Batas Tanggung Jawab (Threat Model): Menangani workstation single-user lokal yang berhadapan dengan repositori pihak ketiga tak tepercaya, prompt injection pada file sumber, manipulasi symlink, dan serangan SSRF ke jaringan internal developer.
+ * Dual-Plane State Machine: State otoritatif runtime (mode, approvalScope, activePlanHash) diisolasi sepenuhnya di tingkat host pada ~/.ruko/sessions/ dengan izin berkas ketat 0600/0700. Berkas konfigurasi di dalam direktori workspace murni berstatus proyeksi baca (read-only projection).
+ * Fail-Safe Resume: Setiap pemulihan sesi lama (session resume) otomatis mereset mode operasi kembali ke plan mode.
+ * Plan Mode Mutation Lock (Deny-by-Default): Selama dalam mode plan, seluruh pemanggilan perintah shell dan mutasi sistem berkas diblokir 100% tanpa pengecualian.
+ * Subtree Monotonic Expansion: Persetujuan akses mutasi (approval scope) menggunakan hierarki subtree. Modifikasi di dalam subdirektori yang sudah disetujui otomatis berstatus auto-approved, sedangkan mutasi di luar hierarki memicu verifikasi interaktif satu ketukan [Y/n].
+2. Primitif Pertahanan Inti (Zero-Dependency)
+ * HostFetch (node:http, node:https, node:net): Mitigasi SSRF dan DNS Rebinding dengan resolusi DNS manual per-hop, validasi CIDR privat komprehensif (IPv4, IPv6, dan IPv4-mapped IPv6), IP pinning langsung pada tingkat soket, preservasi TLS SNI, pemblokiran socket-reuse (agent: false, Connection: close), serta penolakan kredensial URL.
+ * SecureRead (node:fs): Pembacaan file anti-TOCTOU (Time-of-Check to Time-of-Use) dan anti-symlink traversal via validasi segmen bertahap (fs.lstat), pembukaan berkas deskriptor atomik kernel (O_NOFOLLOW | O_CLOEXEC), serta verifikasi silang pasangan inode/device sebelum dan sesudah pembacaan.
+ * Atomic FileLock (node:fs): Mutex konkurensi native berbasis primitif atomik fs.mkdir yang dilengkapi pembaruan detak jantung (mtime heartbeat), toleransi clock skew, serta eviksi otomatis terhadap stale lock dari proses yang mati mendadak (crash/SIGKILL).
+ * Sanitizer (node:buffer): Pemisahan domain sanitasi:
+   * Sanitasi Teks LLM: Normalisasi Unicode NFKC, pembersihan karakter BiDi override dan zero-width, serta penanganan code point multibyte non-BMP (pasangan surrogate) guna mencegah injeksi visual prompt.
+   * Sanitasi Path: Menjaga keabsahan nama file beraksen/Unicode (misal résumé.md) sembari memblokir null byte dan traversal escape.
+ * PackageJsonGuard: Validasi integritas manifest ketergantungan yang menolak penambahan atau perubahan skrip lifecycle berbahaya (preinstall, postinstall, prepare), pemblokiran skema URL eksternal atau git pada versi paket, proteksi polusi prototipe, mitigasi ReDoS SemVer, serta pencegahan pembajakan subpath imports.
+ * ResourceGovernor (node:child_process): Eksekusi subproses terisolasi menggunakan shell: false, pembersihan variabel lingkungan yang berbahaya (NODE_OPTIONS, LD_PRELOAD, dll.), penegakan batas waktu (timeout), pemantauan kuota output stream, serta penghentian pohon proses secara tuntas (kill process tree).
+3. Penegakan Kebijakan & Audit Integritas
+ * Direct Compiler Gate (Tier 0 Verification): Agen memverifikasi keberhasilan perbaikan kode secara mandiri dengan mengeksekusi biner kompilator langsung (seperti ./node_modules/.bin/tsc --noEmit) tanpa melalui perantara skrip package.json yang dapat disusupi.
+ * RedactionStream: Filter aliran teks berkinerja tinggi yang memotong buffer pada batas baris baru (\n) untuk menyensor kebocoran kunci privat, token akses personal (GitHub, AWS, Bearer), dan kredensial sensitif secara streaming.
+ * Tamper-Evident Hash Chain Log: Setiap mutasi state, keputusan penolakan otorisasi, dan log eksekusi dicatat ke dalam berkas append-only terenkripsi rantai hash SHA-256 (prevHash), menjamin jejak audit tidak dapat dimanipulasi dari dalam workspace.
+
+### 1.9 Audit Red-Teaming Lanjutan (Syscall, Resolver & Windows Edge-Cases)
+
+* **Vektor Celah: Semantic Gap `net.isIP()` vs OS Resolver (`0.0.0.0/8`, `::/128`, Non-Standard IPv4)**
+  * *Mekanisme:* 
+    1. Input URL dengan host `0.0.0.0` lolos evaluasi jika daftar CIDR hanya memuat rentang RFC 1918 dan loopback `127.0.0.0/8`. Kernel Linux/macOS merutekan koneksi `0.0.0.0` langsung ke `127.0.0.1`, memungkinkan akses tidak sah ke daemon lokal (misal Docker di port 2375).
+    2. Format literal non-standar (hex `0x7f.0.0.1`, octal, atau integer decimal) menghasilkan nilai `0` pada `net.isIP()`, tetapi tetap diterjemahkan sebagai alamat IP loopback oleh `getaddrinfo` via implementasi legacy `inet_aton()`.
+  * *Solusi:*
+    * Tambahkan `0.0.0.0/8` dan `::/128` ke dalam blok CIDR terlarang pada `hostFetch.ts`.
+    * Validasi CIDR wajib dieksekusi **hanya pada IP kanonis hasil resolusi DNS (`pinnedIP`)**, bukan pada string URL masukan mentah.
+    * Pastikan callback socket connection melempar `SSRFError` jika `pinnedIP` tidak valid atau tergolong rentang terlarang.
+
+* **Vektor Celah: Subtree Monotonic Expansion Bypass via Pre-Existing Symlink**
+  * *Mekanisme:* Evaluasi `target.startsWith(approvedPath)` hanya memvalidasi kesamaan string path visual. Jika direktori yang disetujui memuat symlink yang mengarah ke luar root workspace sebelum sesi dimulai (misal `project/link -> /etc`), penulisan berkas `project/link/passwd` akan dianggap *auto-approved* secara visual padahal mutasi fisik terjadi di direktori sensitif host.
+  * *Solusi:* 
+    * Lakukan resolusi jalur fisik (`fs.realpathSync`) pada direktori induk (*parent directory*) target sebelum membandingkannya dengan direktori izin kanonis:
+      ```typescript
+      const parentDir = path.dirname(targetPath);
+      const canonicalParent = fs.realpathSync(parentDir);
+      const canonicalApproved = fs.realpathSync(approvedPath);
+
+      if (!canonicalParent.startsWith(canonicalApproved + path.sep) && canonicalParent !== canonicalApproved) {
+        // Blokir mutasi atau minta konfirmasi interaktif [Y/n]
+      }
+      ```
+
+* **Vektor Celah: Eksekusi Kode Arbitrer via `tsc.cmd` Windows & Argv Injection pada Compiler Gate**
+  * *Mekanisme:* 
+    1. Di platform Windows, mengeksekusi `./node_modules/.bin/tsc` memicu eksekusi berkas batch `tsc.cmd`. Repositori pihak ketiga yang beritikad jahat dapat menyisipkan `tsc.cmd` palsu untuk memicu eksekusi kode tak terkontrol saat Ruko memanggil validasi Tier 0 di Plan Mode.
+    2. Opsi baris perintah (`argv`) yang dipengaruhi oleh LLM dapat menyuntikkan flag seperti `--outDir`, memungkinkan proses kompilasi menulis berkas di luar ruang lingkup yang diizinkan saat masih dalam Plan Mode.
+  * *Solusi:*
+    * **Bypass Biner `.bin/`:** Eksekusi skrip JavaScript compiler secara langsung menggunakan biner Node.js terverifikasi (`process.execPath`):
+      ```typescript
+      const tscJsPath = path.join(workspace, 'node_modules/typescript/bin/tsc');
+      spawn(process.execPath, [tscJsPath, '--noEmit'], {
+        shell: false,
+        env: isolatedEnv
+      });
+      ```
+    * **Argv Locking:** Kunci daftar argumen kompilasi secara absolut (`['--noEmit']`) tanpa menerima parameter tambahan dari inferensi model.
+
+---
+
+### Tambahan Matriks Uji Adversarial (Test Harness)
+
+| ID Uji | Modul Target | Payload / Kondisi Uji | Perilaku yang Diharapkan |
+| :--- | :--- | :--- | :--- |
+| **TC-NET-04** | `hostFetch.ts` | Request ke `http://0.0.0.0:3000` atau `http://[::]/` | Ditolak seketika dengan `SSRFError` (`PRIVATE_IP_BLOCKED`). |
+| **TC-NET-05** | `hostFetch.ts` | Hostname berupa format hex/decimal (`http://0x7f.0.0.1` / `http://2130706433`) | Resolver menerjemahkan ke `127.0.0.1` dan IP pinning menolak koneksi via `SSRFError`. |
+| **TC-SCM-03** | `scopeAmendment.ts` | Target mutasi berada di balik symlink direktori internal yang mengarah ke `/tmp` atau root sistem | Pengecekan realpath parent mendeteksi pelarian hierarki; operasi ditolak atau memicu prompt amandemen. |
+| **TC-GOV-03** | `resourceGovernor.ts` / Tier 0 | Pemanggilan Compiler Gate pada repositori yang memuat `tsc.cmd` kustom di Windows | Sistem mengabaikan `.bin/tsc.cmd` dan mengeksekusi `node_modules/typescript/bin/tsc` via `process.execPath`. |
+| **TC-GOV-04** | `resourceGovernor.ts` / Tier 0 | Parameter compiler disuntikkan flag `--outDir /evil/path` | Eksekutor menolak argumen asing dan hanya mengizinkan flag baku `--noEmit`. |
+### 1.10 Audit Konkurensi Sistem Terdistribusi & Ketahanan Filesystem (DeepSeek Review)
+
+* **Vektor Celah: Stale Eviction Race & Split-Brain pada FileLock**
+  * *Mekanisme:* 
+    1. Penggunaan mekanisme eviksi otomatis (*auto-eviction*) berbasis `mtime` rentan terhadap *TOCTOU Check-Then-Act*. Jika dua sesi CLI waiter (B dan C) mendeteksi lock yang ditinggalkan oleh sesi crash (A) secara bersamaan, keduanya dapat mengeksekusi `fs.rm` dan `fs.mkdir` paralel. Hal ini memicu kondisi *split-brain* di mana kedua sesi sama-sama menganggap dirinya pemegang lock yang sah.
+    2. *Event-loop starvation* di Node.js (misalnya saat sanitasi file teks berukuran besar atau kompilasi TypeScript intensif) dapat menunda `setInterval` pembaruan detak jantung (*heartbeat*), menyebabkan sesi yang sah keliru dianggap *stale* dan dieviksi secara prematur.
+  * *Solusi:*
+    * Ganti primitif pembuatan direktori dengan pembukaan berkas eksklusif atomik murni `fs.openSync(lockPath, 'wx', 0o600)` (`O_CREAT | O_EXCL`) yang menulis metadata `{ pid, nonce: crypto.randomUUID(), createdAt: Date.now() }`.
+    * Terapkan kebijakan **Fail-Closed (Tanpa Auto-Eviction Latar Belakang)**: Jika lockfile terdeteksi dan PID pemilik sudah mati atau tidak merespons, agen menolak berjalan secara otomatis dan mewajibkan intervensi manual via parameter `--force-unlock`.
+
+* **Vektor Celah: State Desynchronization via Truncated Write & Ketiadaan Directory Fsync**
+  * *Mekanisme:* 
+    1. Terminasi paksa (`SIGKILL`), crash daya, atau kondisi kehabisan ruang disk (`ENOSPC`) di tengah pembaruan `state.json` dapat meninggalkan berkas dalam kondisi terpotong (*truncated*). Jika deserialisasi JSON gagal dan penangan kesalahan (*fallback handler*) mereset state ke status *bypass*, invarian *Plan Mode Lock* terbuka secara tidak sah.
+    2. Operasi `fs.rename` di sistem berkas POSIX (ext4/APFS) hanya memutasi entri memori *cache*. Tanpa sinkronisasi ke direktori induk, kegagalan sistem dapat mengembalikan nama berkas ke versi lama sementara mutasi fisik di workspace sudah terjadi, merusak rantai audit *activePlanHash*.
+  * *Solusi:*
+    * Pola penulisan atomik 3-tahap wajib:
+      1. Tulis payload ke berkas sementara: `sessionPath.<uuid>.tmp` dengan izin `0600`.
+      2. Panggil `fs.fsyncSync(fileFd)` sebelum menutup deskriptor berkas.
+      3. Eksekusi `fs.renameSync(tmpPath, sessionPath)`.
+      4. Buka deskriptor direktori induk (`path.dirname(sessionPath)`) dan panggil `fs.fsyncSync(dirFd)` pada platform POSIX non-Win32.
+    * **Fail-Closed State Resume:** Jika berkas state korup, terpotong, atau gagal lolos verifikasi hash rantai, sistem wajib **HALT / CRASH SECARA EKSPLISIT** dan menolak mengeksekusi tindakan apa pun hingga sesi dipulihkan manual.
+
+* **Vektor Celah: Prefix Collision & Privilege Creep pada Subtree Monotonic Expansion**
+  * *Mekanisme:*
+    1. Validasi berbasis string `target.startsWith(approvedPath)` meloloskan direktori tetangga (*sibling collision*), misalnya target `/workspace/src-evil/` akan dianggap diizinkan jika ruang lingkup yang disetujui adalah `/workspace/src`.
+    2. Sifat ekspansi yang murni monotonik (*monotonic-only*) berisiko memicu *privilege creep*: jika pengembang tidak sengaja mengonfirmasi izin pada direktori tingkat tinggi (seperti `/` atau `/tmp`), seluruh sisa sesi terkontaminasi izin berlebih tanpa opsi pembatalan.
+  * *Solusi:*
+    * Validasi segmen jalur kanonis wajib menyertakan pemisah direktori:
+      ```typescript
+      const isAllowed = canonicalParent === canonicalApproved || 
+                        canonicalParent.startsWith(canonicalApproved + path.sep);
+      ```
+    * Sediakan perintah interaktif pemulihan batas (*Scope Contraction / Reset*) di terminal atau TUI untuk mengembalikan daftar `approvalScope` ke konfigurasi awal tanpa harus membatalkan seluruh sesi.
+
+---
+
+### Tambahan Matriks Uji Adversarial Konkurensi & Status (Test Harness)
+
+| ID Uji | Modul Target | Payload / Kondisi Uji | Perilaku yang Diharapkan |
+| :--- | :--- | :--- | :--- |
+| **TC-LCK-01** | `fileLock.ts` | Dua proses worker mencoba *acquire* lock secara simultan pada berkas yang sama via flag `wx` | Tepat satu proses yang berhasil (`fd > 0`); proses kedua langsung menerima error `EEXIST`. |
+| **TC-LCK-02** | `fileLock.ts` | Berkas lockfile eksis dengan PID proses yang sudah mati (stale lock) | Agen berhenti dengan pesan kesalahan eksplisit; menolak auto-evict tanpa flag `--force-unlock`. |
+| **TC-STA-01** | `hostState.ts` | Berkas `state.json` sengaja dipotong di tengah data (`{"mode": "act", "ap...`) | Pemulihan sesi gagal (*Fail-Closed*); proses melempar `CorruptedStateError` dan menghentikan eksekusi. |
+| **TC-STA-02** | `hostState.ts` | Mutasi state pada lingkungan POSIX | Eksekusi `fsync` diverifikasi terpanggil pada deskriptor berkas sementara dan deskriptor direktori induk. |
+| **TC-SCM-04** | `scopeAmendment.ts` | Target mutasi berupa direktori sibling prefix-collision: `/repo/src-patch/a.ts` dengan scope `/repo/src` | Validasi menolak eksekusi mutasi langsung; memicu prompt interaktif amandemen scope. |
+| **TC-SCM-05** | `scopeAmendment.ts` | Pemanggilan utilitas reset/kontraksi scope saat berada di dalam amandemen `/repo/` | Nilai `approvalScope` kembali terkunci ke konfigurasi direktori awal repositori. |
