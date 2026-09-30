@@ -1179,3 +1179,51 @@ Cetak biru arsitektur Ruko-agent v2.0.0 kini telah resmi terkunci dan siap dijad
 tunggal dalam penyusunan Pull Request. Modul pertama yang siap diimplementasikan ke
 dalam basis kode repositori adalah src/core/state/fileLock.ts dan
 src/core/prompt/sanitizer.ts.
+
+TAMBAHAN:
+1.// Patch untuk src/core/logging/redactionStream.ts
+export class RedactionTransform extends Transform {
+  private tail = '';
+  private decoder = new StringDecoder('utf8');
+
+  _transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback) {
+    let str = this.tail + this.decoder.write(chunk);
+    
+    // Cari newline terakhir sebelum safe margin 512 byte
+    if (str.length > 512) {
+      const searchBoundary = str.length - 512;
+      const lastNewline = str.lastIndexOf('\n', searchBoundary);
+
+      if (lastNewline !== -1) {
+        // Potong hanya pada batas baris utuh
+        const safeChunk = str.slice(0, lastNewline + 1);
+        this.push(redactText(safeChunk));
+        this.tail = str.slice(lastNewline + 1);
+      } else {
+        // Jika satu baris sangat panjang (>512), redaksikan seluruhnya lalu simpan sisa tail
+        const redacted = redactText(str);
+        const processUpTo = redacted.length - 512;
+        this.push(redacted.slice(0, processUpTo));
+        this.tail = redacted.slice(processUpTo);
+      }
+    } else {
+      this.tail = str;
+    }
+    callback();
+  }
+}
+2.// Di dalam evaluateMutationTarget (scopeAmendment.ts)
+if (!isInteractive || !process.stdin.isTTY) {
+  return false; // Otomatis tolak di lingkungan headless/CI tanpa interupsi
+}
+
+// Tambahkan timeout 30 detik untuk sesi lokal
+const rl = readline.createInterface({ input, output });
+const timer = setTimeout(() => {
+  rl.close();
+  console.log('\n[Ruko] Timeout 30 detik terlampaui. Amandemen ditolak otomatis.');
+}, 30_000);
+
+const answer = await rl.question('Izinkan amandemen scope ini? [Y/n]: ');
+clearTimeout(timer);
+rl.close();
