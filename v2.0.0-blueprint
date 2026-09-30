@@ -1,3 +1,42 @@
+# ATURAN DOKUMENTASI — Ruko-agent v2.0.0
+
+## CHANGELOG2.md — Ringkasan perubahan (untuk dibaca cepat)
+- Format: satu entry per fase/PR selesai, MAKSIMAL 5-8 baris per entry.
+- Struktur tiap entry:
+  ## [Fase X] Nama singkat — tanggal
+  - Apa yang berubah (1-2 kalimat)
+  - File yang disentuh (daftar singkat, bukan diff lengkap)
+  - Delta test: sebelum → sesudah (angka pasti, bukan perkiraan)
+- JANGAN taruh reasoning/analisis panjang di sini — itu tempatnya PROGRESS2.md.
+- Ditulis SETELAH fase disetujui dan siap masuk histori resmi, bukan saat draft.
+
+## PROGRESS2.md — Dokumentasi kerja detail (working memory)
+- Ini tempat "apa yang sedang terjadi sekarang" — status fase aktif, keputusan teknis, alasan di baliknya.
+- Update di SETIAP STOP checkpoint (bukan cuma di akhir fase) — kalau agent berhenti minta review, catat status di sini SEBELUM menunggu.
+- Struktur per fase:
+  ## Fase X — [status: BELUM MULAI / SEDANG JALAN / SELESAI-nunggu review / DISETUJUI]
+  - Objective:
+  - Keputusan teknis penting + alasan:
+  - Rekonsiliasi test (sebelum/sesudah/delta):
+  - Belum di-commit / sudah di-commit (hash jika ada):
+  - Next step:
+- Kalau fase dianggap kelar & disetujui, RINGKAS jadi 1 paragraf pendek, pindahkan detail ke CHANGELOG2.md, jangan biarkan file ini menumpuk detail lama tanpa batas — arsipkan fase lama secara berkala.
+
+## QA.md — Masukan dari agent/manusia (belum tentu dieksekusi)
+- Ini bak-pasir buat saran, kritik, temuan yang BELUM disetujui untuk dieksekusi — beda dari PROGRESS2.md yang isinya kerjaan yang sedang/sudah berjalan.
+- Format per entry:
+  ## [Sumber: nama agent/model atau "manusia"] — tanggal
+  - Topik/area yang dibahas:
+  - Masukan/temuan:
+  - Status: [belum ditinjau / ditinjau-ditolak (+alasan) / ditinjau-diterima → pindah ke Fase mana]
+- Entry yang statusnya "diterima" WAJIB dipindah referensinya ke PROGRESS2.md pas mulai dieksekusi — QA.md bukan tempat final, cuma tempat singgah.
+- Entry yang "ditolak" tetap disimpan (jangan dihapus) sebagai jejak keputusan — biar nggak ditanyain ulang oleh agent lain di kemudian hari.
+
+## ATURAN UMUM (semua file)
+- Bahasa Indonesia, konsisten dengan dokumentasi lain di proyek.
+- Setiap agent yang kerja WAJIB baca PROGRESS2.md dan QA.md dulu sebelum mulai fase baru — supaya tidak mengulang analisis yang sudah ada atau mengeksekusi hal yang sudah ditolak di QA.md.
+- JANGAN commit ketiga file ini bersamaan dengan commit kode fungsional — pisahkan jadi commit dokumentasi sendiri, biar histori git tetap bersih dan gampang di-review terpisah.
+
 SPESIFIKASI ARSITEKTUR & BLUEPRINT REKAYASA FINAL
 RUKO-AGENT v2.0.0 (Zero-Dependency Local-First Coding Agent)
 Dokumen ini merupakan spesifikasi rekayasa teknis definitif dan kontrak kerja implementasi untuk rilis Ruko-agent v2.0.0. Seluruh arsitektur, primitif keamanan, dan modul kode disusun berdasarkan konsensus mutlak lintas model penalaran, mengeliminasi dependensi eksternal npm, dan disesuaikan untuk target runtime Node.js 22 LTS, Node.js 24 LTS, serta Node.js 26 Current.
