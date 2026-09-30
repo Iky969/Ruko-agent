@@ -1,0 +1,1181 @@
+SPESIFIKASI ARSITEKTUR & BLUEPRINT REKAYASA FINAL
+RUKO-AGENT v2.0.0 (Zero-Dependency Local-First Coding Agent)
+Dokumen ini merupakan spesifikasi rekayasa teknis definitif dan kontrak kerja implementasi untuk rilis Ruko-agent v2.0.0. Seluruh arsitektur, primitif keamanan, dan modul kode disusun berdasarkan konsensus mutlak lintas model penalaran, mengeliminasi dependensi eksternal npm, dan disesuaikan untuk target runtime Node.js 22 LTS, Node.js 24 LTS, serta Node.js 26 Current.
+1. Piagam Proyek & Model Ancaman (Threat Model Charter)
+[ REPOSITORI EKSTERNAL / UNTRUSTED WORKSPACE ]
+  ├── Payload Indirect Prompt Injection (IPI)
+  ├── Trojan Dependency (package.json injection)
+  ├── Symlink Traversal (CVE-2025-55130 class)
+  └── Host Rebinding / SSRF to Localhost (127.0.0.1 / Cloud Metadata)
+                         │
+                         ▼
+═══════════════════════════════════════════════════════════════ HOST SECURITY BOUNDARY
+       ┌──────────────────────────────────────────────┐
+       │             RUKO-AGENT v2.0.0                │
+       │    (Deterministic Local Policy Enforcer)     │
+       ├──────────────────────────────────────────────┤
+       │ • Dual-Plane State Machine (~/.ruko/ 0600)   │
+       │ • Plan Mode Deny-by-Default Shell            │
+       │ • Subtree Scope Contract & Micro-Prompt      │
+       │ • Pure Native TypeScript (Zero-Dependency)   │
+       └──────────────────────────────────────────────┘
+                         │
+                         ▼
+[ OS KERNEL & INFRASTRUCTURE (Tanggung Jawab Lingkungan Pengembang) ]
+
+1.1 Batas Tanggung Jawab (Operational Boundary)
+ * Target Lingkungan: Single-user local workstation milik pengembang. Ruko dirancang untuk melindungi laptop dan stasiun kerja lokal pengembang dari repositori pihak ketiga yang beritikad jahat (malicious repo) dan injeksi instruksi tak langsung (Indirect Prompt Injection / IPI).
+ * Pengecualian Eksplisit: Ruko bukan platform SaaS multi-tenant. Isolasi hipervisor perangkat keras atau kernel bersama (shared-kernel isolation seperti AWS Firecracker, gVisor, atau runtime kata-containers) berada di luar batas tanggung jawab kode aplikasi dan diserahkan kepada infrastruktur host jika Ruko di kemudian hari di-deploy pada lingkungan cloud multi-pengguna.
+1.2 Invarian Arsitektur Utama (Non-Negotiable Invariants)
+ * Model Data Tainted: Seluruh luaran LLM, respons pemanggilan tool, masukan pengguna, dan isi berkas workspace berstatus data tidak tepercaya (tainted). Prompt engineering bukan batas keamanan (security boundary).
+ * Dual-Plane State Machine: State otoritatif runtime (mode, activePlanHash, approvalScope, sessionTokenHash) disimpan eksklusif pada memori host dan direktori pengguna terisolasi (~/.ruko/sessions/<sessionId>/state.json) dengan hak akses 0600. Berkas .ruko/plan.json di dalam workspace murni merupakan proyeksi baca (read-only projection).
+ * Fail-Safe Resume Reset: Pemulihan sesi terputus (session resumption) secara mekanis mengembalikan status ke mode: "plan".
+ * Kebijakan Monotonik (Monotonic Policy): Konfigurasi lokal (.ruko/config.json) hanya boleh memperketat batasan keamanan, dilarang melonggarkan izin konfigurasi global (~/.ruko/config.json).
+ * Deny-by-Default Shell di Plan Mode: Tidak ada heuristik perintah baca vs tulis. Seluruh perintah shell eksekusi arbitrer diblokir 100% pada Plan Mode.
+ * Eksekusi Biner Kompilator Langsung: Verifikasi mandiri mengeksekusi biner kompilator langsung tanpa melalui script package.json.
+2. Implementasi Modul Teknis (Production-Ready)
+2.1 Mutex Konkurensi Native & Heartbeat (src/core/state/fileLock.ts)
+Mengadopsi pola kerja proper-lockfile secara murni tanpa dependensi npm: operasi atomik fs.mkdir dipadukan dengan pembaruan periodik waktu modifikasi (mtime) sebagai detak jantung (heartbeat) untuk mendeteksi stale lock akibat SIGKILL atau process crash.
+// src/core/state/fileLock.ts
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+
+export interface LockOptions {
+  timeoutMs?: number;
+  retryIntervalMs?: number;
+  staleTimeoutMs?: number;
+  heartbeatIntervalMs?: number;
+}
+
+export class FileLock {
+  private lockPath: string;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+
+  constructor(targetFilePath: string) {
+    this.lockPath = `${path.resolve(targetFilePath)}.lock`;
+  }
+
+  async acquire(opts: LockOptions = {}): Promise<() => Promise<void>> {
+    const timeoutMs = opts.timeoutMs ?? 5000;
+    const retryIntervalMs = opts.retryIntervalMs ?? 50;
+    const staleTimeoutMs = opts.staleTimeoutMs ?? 8000;
+    const heartbeatIntervalMs = opts.heartbeatIntervalMs ?? 2000;
+
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      try {
+        // fs.mkdir bersifat atomik di tingkat kernel POSIX dan NTFS
+        await fs.mkdir(this.lockPath);
+        
+        // Perbarui mtime awal sebagai bukti kepemilikan
+        await this.touch();
+
+        // Aktifkan heartbeat loop
+        this.heartbeatTimer = setInterval(async () => {
+          try {
+            await this.touch();
+          } catch {
+            this.stopHeartbeat();
+          }
+        }, heartbeatIntervalMs);
+
+        // Handler pelepasan lock
+        return async () => {
+          this.stopHeartbeat();
+          try {
+            await fs.rmdir(this.lockPath);
+          } catch {}
+        };
+      } catch (err: any) {
+        if (err.code !== 'EEXIST') throw err;
+
+        // Periksa stale lock via evaluasi mtime heartbeat
+        try {
+          const stat = await fs.stat(this.lockPath);
+          const age = Date.now() - stat.mtimeMs;
+
+          if (age > staleTimeoutMs) {
+            // Pemilik kunci sebelumnya dianggap mati (crash/SIGKILL)
+            await fs.rmdir(this.lockPath).catch(() => {});
+            continue;
+          }
+        } catch {
+          // Direktori lock terhapus di antara eksekusi, coba kembali
+          continue;
+        }
+
+        await new Promise((r) => setTimeout(r, retryIntervalMs));
+      }
+    }
+
+    throw new Error(`LOCK_TIMEOUT: Gagal memperoleh lock pada ${this.lockPath} setelah ${timeoutMs}ms`);
+  }
+
+  private async touch(): Promise<void> {
+    const now = new Date();
+    await fs.utimes(this.lockPath, now, now).catch(() => {});
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+}
+
+2.2 Sanitasi Teks & Karakter Astral Unicode (src/core/prompt/sanitizer.ts)
+Mengamankan masukan workspace dari serangan homoglyph visual, pemisah baris tersembunyi, dan kontrol arah teks (BiDi override) menggunakan normalisasi NFKC dan pemindaian code point non-BMP.
+// src/core/prompt/sanitizer.ts
+const ALLOWED_ASCII_RE = /^[a-zA-Z0-9._\-\/: ]$/;
+const STRIP_RE = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF\u2028\u2029\u00AD\u200E\u200F\u061C]/g;
+const CONTROL_RE = /[\x00-\x1F\x7F]/g;
+
+export function sanitizeForPrompt(input: string): string {
+  if (typeof input !== 'string') input = String(input ?? '');
+
+  // 1. Normalisasi NFKC memetakan homoglyph (misal U+2215 -> /)
+  let s = input.normalize('NFKC');
+
+  // 2. Bersihkan karakter kontrol BiDi, zero-width, dan separator
+  s = s.replace(STRIP_RE, '');
+
+  // 3. Escape kontrol ASCII (\n -> \u000a, \r -> \u000d)
+  s = s.replace(CONTROL_RE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
+  // 4. Iterasi code point aman (menangani surrogate pair dan emoji)
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const codePoint = s.codePointAt(i)!;
+
+    if (codePoint > 0xFFFF) {
+      out += `\\u{${codePoint.toString(16).toUpperCase()}}`;
+      i++; // Lewati pasangan low surrogate
+      continue;
+    }
+
+    const char = String.fromCodePoint(codePoint);
+    if (ALLOWED_ASCII_RE.test(char)) {
+      out += char;
+    } else {
+      out += `\\u${codePoint.toString(16).padStart(4, '0')}`;
+    }
+  }
+  return out;
+}
+
+export function sanitizePath(input: string): string {
+  const sanitized = sanitizeForPrompt(input);
+  let result = sanitized.replace(/\\u002f/g, '/').replace(/\/{2,}/g, '/');
+
+  if (process.platform === 'win32') {
+    const WIN_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+    result = result.split('/').map((seg) => (WIN_RESERVED.test(seg) ? `_${seg}` : seg)).join('/');
+  }
+  return result;
+}
+
+2.3 Pembatas Jaringan & Proteksi SSRF (src/core/network/hostFetch.ts)
+Mengisolasi permintaan HTTP/HTTPS melalui resolusi manual per-hop, validasi CIDR privat, pencegahan socket-reuse, dan preservasi TLS SNI.
+// src/core/network/hostFetch.ts
+import * as dns from 'node:dns/promises';
+import * as net from 'node:net';
+import * as http from 'node:http';
+import * as https from 'node:https';
+import { URL } from 'node:url';
+
+export class SSRFError extends Error {
+  code = 'PRIVATE_IP_BLOCKED';
+}
+
+const MAX_RESPONSE_SIZE = 5 * 1024 * 1024; // 5 MB batas DoS
+const REQUEST_TIMEOUT_MS = 10_000;          // 10 detik
+
+const PRIVATE_CIDRS = [
+  { ip: '10.0.0.0', mask: 8 }, { ip: '172.16.0.0', mask: 12 },
+  { ip: '192.168.0.0', mask: 16 }, { ip: '127.0.0.0', mask: 8 },
+  { ip: '0.0.0.0', mask: 8 }, { ip: '169.254.0.0', mask: 16 },
+  { ip: '100.64.0.0', mask: 10 }, { ip: '224.0.0.0', mask: 4 },
+];
+
+function ipToLong(ip: string): number {
+  return ip.split('.').reduce((acc, oct) => (acc << 8) + parseInt(oct, 10), 0) >>> 0;
+}
+
+export function isPrivateIP(ip: string): boolean {
+  let normalized = ip.toLowerCase();
+
+  // Ekstraksi IPv4-mapped IPv6 sebelum klasifikasi
+  if (normalized.startsWith('::ffff:')) {
+    normalized = normalized.substring(7);
+  }
+
+  if (net.isIP(normalized) === 4) {
+    const long = ipToLong(normalized);
+    return PRIVATE_CIDRS.some((cidr) => {
+      const mask = ~((1 << (32 - cidr.mask)) - 1) >>> 0;
+      return (long & mask) === (ipToLong(cidr.ip) & mask);
+    });
+  }
+
+  if (net.isIP(normalized) === 6) {
+    return normalized === '::1' || normalized === '::' ||
+           normalized.startsWith('fe80:') || normalized.startsWith('fc') ||
+           normalized.startsWith('fd') || normalized.startsWith('ff');
+  }
+
+  return false;
+}
+
+export interface FetchResult {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
+export class HostFetch {
+  static async fetch(urlStr: string, opts: { method?: string; body?: string; maxRedirects?: number } = {}): Promise<FetchResult> {
+    const maxRedirects = opts.maxRedirects ?? 3;
+    let currentUrl = urlStr;
+
+    for (let i = 0; i <= maxRedirects; i++) {
+      const url = new URL(currentUrl);
+      if (!['http:', 'https:'].includes(url.protocol)) {
+        throw new SSRFError(`Protokol diblokir: ${url.protocol}`);
+      }
+      if (url.username || url.password) {
+        throw new SSRFError('Kredensial inline pada URL dilarang');
+      }
+
+      // 1. Resolusi DNS eksplisit di setiap hop
+      const records = await dns.lookup(url.hostname, { all: true, verbatim: true });
+      if (records.length === 0) throw new SSRFError(`Resolusi DNS gagal: ${url.hostname}`);
+
+      // 2. Blokir jika setidaknya satu record mengarah ke IP privat
+      for (const r of records) {
+        if (isPrivateIP(r.address)) {
+          throw new SSRFError(`IP terlarang terdeteksi: ${url.hostname} -> ${r.address}`);
+        }
+      }
+
+      const pinnedIP = records[0].address;
+      const isHttps = url.protocol === 'https:';
+      const lib = isHttps ? https : http;
+
+      // 3. Eksekusi koneksi: IP Pinning + SNI utuh + Anti Socket-Reuse
+      const response = await new Promise<FetchResult>((resolve, reject) => {
+        const req = lib.request(
+          {
+            hostname: pinnedIP,
+            port: url.port || (isHttps ? 443 : 80),
+            path: url.pathname + url.search,
+            method: opts.method || 'GET',
+            agent: false, // Nonaktifkan connection pool untuk menutup celah socket reuse
+            headers: {
+              'Host': url.host,
+              'Connection': 'close', // Paksa penutupan TCP setelah respons
+              'User-Agent': 'ruko-agent/2.0.0',
+              'Accept': '*/*',
+            },
+            servername: isHttps ? url.hostname : undefined, // Mempertahankan SNI TLS
+            timeout: REQUEST_TIMEOUT_MS,
+            lookup: (_hostname, _opts, cb) => cb(null, pinnedIP, net.isIP(pinnedIP)),
+          },
+          (res) => {
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk) => {
+              body += chunk;
+              if (body.length > MAX_RESPONSE_SIZE) {
+                req.destroy(new SSRFError('Ukuran respons melebihi batas 5MB'));
+              }
+            });
+            res.on('end', () => {
+              resolve({
+                status: res.statusCode || 0,
+                headers: res.headers as Record<string, string>,
+                body,
+              });
+            });
+          }
+        );
+
+        req.on('timeout', () => req.destroy(new SSRFError('Batas waktu koneksi terlampaui')));
+        req.on('error', reject);
+        if (opts.body) req.write(opts.body);
+        req.end();
+      });
+
+      // 4. Manual redirect handler (evaluasi ulang DNS di setiap hop)
+      if (response.status >= 300 && response.status < 400 && response.headers.location) {
+        if (i === maxRedirects) throw new SSRFError('Batas redirect terlampaui');
+        currentUrl = new URL(response.headers.location, currentUrl).toString();
+        continue;
+      }
+
+      return response;
+    }
+    throw new SSRFError('Redirect loop terdeteksi');
+  }
+}
+
+2.4 Pembacaan Berkas Bebas TOCTOU (src/core/tools/secureRead.ts)
+Mengamankan I/O berkas melalui validasi segmen bertahap, pembukaan file descriptor atomik, dan verifikasi inode/device silang untuk memitigasi serangan balapan symlink.
+// src/core/tools/secureRead.ts
+import * as fs from 'node:fs/promises';
+import * as fsSync from 'node:fs';
+import * as path from 'node:path';
+
+export class SecurityViolation extends Error {
+  constructor(public code: string, msg: string) { super(msg); }
+}
+
+const MAX_FILE_SIZE = 5 * 1024 * 1024;
+const O_NOFOLLOW = fsSync.constants.O_NOFOLLOW ?? 0;
+const O_RDONLY = fsSync.constants.O_RDONLY;
+const O_CLOEXEC = fsSync.constants.O_CLOEXEC ?? 0;
+
+function isInsideWorkspace(workspaceRoot: string, target: string): boolean {
+  const relative = path.relative(workspaceRoot, target);
+  return (relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)) || target === workspaceRoot;
+}
+
+export async function secureReadFile(workspaceRoot: string, userPath: string): Promise<Buffer> {
+  const workspaceReal = await fs.realpath(workspaceRoot);
+  const resolved = path.resolve(workspaceReal, userPath);
+
+  if (!isInsideWorkspace(workspaceReal, resolved)) {
+    throw new SecurityViolation('PATH_TRAVERSAL', `Target melarikan diri dari workspace: ${userPath}`);
+  }
+  if (resolved.includes('\0')) {
+    throw new SecurityViolation('NULL_BYTE', 'Null byte injection terdeteksi');
+  }
+
+  // Pre-check segmen path untuk memblokir symlink di tengah jalur
+  const segments = path.relative(workspaceReal, resolved).split(path.sep);
+  let currentSegmentPath = workspaceReal;
+  for (const seg of segments) {
+    if (seg === '' || seg === '.') continue;
+    currentSegmentPath = path.join(currentSegmentPath, seg);
+    try {
+      const segStat = await fs.lstat(currentSegmentPath);
+      if (segStat.isSymbolicLink()) {
+        throw new SecurityViolation('SYMLINK_IN_PATH', `Symlink terdeteksi pada segmen path: ${currentSegmentPath}`);
+      }
+      if (segStat.isFIFO() || segStat.isSocket()) {
+        throw new SecurityViolation('UNSAFE_FILE_TYPE', `Tipe berkas tidak diizinkan: ${currentSegmentPath}`);
+      }
+    } catch (e: any) {
+      if (e.code === 'ENOENT') break;
+      throw e;
+    }
+  }
+
+  let handle: fs.FileHandle | null = null;
+  try {
+    const flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC;
+    handle = await fs.open(resolved, flags);
+  } catch (e: any) {
+    if (e.code === 'ELOOP') {
+      throw new SecurityViolation('SYMLINK_BLOCKED', `Symlink diblokir (O_NOFOLLOW): ${userPath}`);
+    }
+    if (O_NOFOLLOW === 0 && process.platform === 'win32') {
+      handle = await fs.open(resolved, O_RDONLY | O_CLOEXEC);
+    } else {
+      throw e;
+    }
+  }
+
+  try {
+    // Validasi langsung via File Descriptor kernel
+    const stat = await handle!.stat();
+    if (!stat.isFile()) throw new SecurityViolation('NOT_A_FILE', 'Target bukan berkas reguler');
+    if (stat.size > MAX_FILE_SIZE) throw new SecurityViolation('FILE_TOO_LARGE', 'Ukuran berkas melebihi 5MB');
+
+    // Post-open cross-check: resolusi realpath dan inode matching
+    const realPath = await fs.realpath(resolved);
+    if (!isInsideWorkspace(workspaceReal, realPath)) {
+      throw new SecurityViolation('SYMLINK_ESCAPE', 'Jalur fisik symlink keluar dari workspace root');
+    }
+
+    const realStat = await fs.stat(realPath);
+    if (stat.ino !== realStat.ino || stat.dev !== realStat.dev) {
+      throw new SecurityViolation('TOCTOU_RACE', 'Inode/device mismatch (indikasi race condition)');
+    }
+
+    const data = await handle!.readFile();
+
+    // Verifikasi post-read stat (memastikan berkas tidak dimutasi saat dibaca)
+    const postStat = await handle!.stat();
+    if (postStat.mtimeMs !== stat.mtimeMs || postStat.size !== stat.size) {
+      throw new SecurityViolation('TOCTOU_MUTATION', 'Berkas termutasi selama proses pembacaan');
+    }
+
+    return data;
+  } finally {
+    await handle?.close();
+  }
+}
+
+2.5 State Kanonis Host Terisolasi (src/core/state/hostState.ts)
+Mengelola state otoritatif runtime di luar jangkauan workspace (~/.ruko/sessions/) dengan izin berkas ketat 0600 dan penanganan kunci platform Windows.
+// src/core/state/hostState.ts
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import * as crypto from 'node:crypto';
+import { constants as C } from 'node:fs';
+
+export interface ScopeContract {
+  planHash: string;
+  allowedPaths: string[];
+  approvedAt: string;
+  correlationId: string;
+}
+
+export interface HostState {
+  sessionId: string;
+  mode: 'plan' | 'act';
+  activePlanHash: string | null;
+  approvalScope: ScopeContract | null;
+  sessionTokenHash: string;
+  updatedAt: string;
+}
+
+const HOST_DIR = path.join(os.homedir(), '.ruko', 'sessions');
+const IS_WIN = process.platform === 'win32';
+const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+export function validateSessionId(id: string): void {
+  if (!SESSION_ID_RE.test(id)) {
+    throw new Error(`SESSION_ID_INVALID: Format identifier sesi tidak valid: ${id}`);
+  }
+}
+
+export async function saveHostState(state: HostState): Promise<void> {
+  validateSessionId(state.sessionId);
+  const dir = path.join(HOST_DIR, state.sessionId);
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+
+  const target = path.join(dir, 'state.json');
+  const tmp = path.join(dir, `.state.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`);
+  state.updatedAt = new Date().toISOString();
+
+  const fd = await fs.open(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL, 0o600);
+  await fd.writeFile(JSON.stringify(state, null, 2), 'utf8');
+  await fd.sync();
+  await fd.close();
+
+  // Retry loop backoff eksponensial untuk antivirus/indexer Win32
+const maxAttempts = IS_WIN ? 8 : 1;
+let lastErr: any;
+for (let i = 0; i < maxAttempts; i++) {
+try {
+await fs.rename(tmp, target);
+lastErr = null;
+break;
+} catch (e: any) {
+lastErr = e;
+if (!IS_WIN || (e.code !== 'EPERM' && e.code !== 'EACCES' &&
+e.code !== 'EBUSY')) throw e;
+await new Promise((r) => setTimeout(r, 10 * (1 << i)));
+}
+}
+if (lastErr) throw lastErr;
+}
+export async function loadHostState(sessionId: string):
+Promise<HostState> {
+validateSessionId(sessionId);
+const target = path.join(HOST_DIR, sessionId, 'state.json');
+try {
+const raw = await fs.readFile(target, 'utf8');
+const state = JSON.parse(raw) as HostState;
+// Invarian Reset: Sesi yang di-resume wajib selalu mendarat di
+plan mode
+if (state.mode === 'act') {
+state.mode = 'plan';
+state.approvalScope = null;
+}
+return state;
+} catch {
+const rawToken = crypto.randomBytes(32).toString('hex');
+const newState: HostState = {
+sessionId,
+mode: 'plan',
+activePlanHash: null,
+approvalScope: null,
+sessionTokenHash:
+crypto.createHash('sha256').update(rawToken).digest('hex'),
+updatedAt: new Date().toISOString(),
+};
+await saveHostState(newState);
+return newState;
+}
+} 2.6 Kontrak Scope & Amandemen Terkendali
+(src/core/approval/scopeAmendment.ts)
+Mengizinkan ekspansi otomatis pada subtree berkas yang sudah disetujui, dan menyajikan
+micro-prompt terminal satu ketukan ([Y/n]) jika agen membutuhkan berkas di luar folder yang
+disepakati.
+// src/core/approval/scopeAmendment.ts
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
+import * as readline from 'node:readline/promises';
+import { stdin as input, stdout as output } from 'node:process';
+import { HostState, saveHostState, loadHostState } from
+'../state/hostState';
+import { FileLock } from '../state/fileLock';
+import * as os from 'node:os';
+function normalizeCasePath(p: string): string {
+const resolved = path.resolve(p);
+return process.platform === 'win32' || process.platform === 'darwin'
+? resolved.toLowerCase()
+: resolved;
+}
+function canonicalize(obj: any): string {
+if (obj === null || typeof obj !== 'object') return
+JSON.stringify(obj);
+if (Array.isArray(obj)) return
+`[${obj.map(canonicalize).join(',')}]`;
+const sortedKeys = Object.keys(obj).sort();
+return `{${sortedKeys.map((k) =>
+`${JSON.stringify(k)}:${canonicalize(obj[k])}`).join(',')}}`;
+}
+export function computePlanHash(plan: any, allowedPaths: string[],
+workspaceRoot: string): string {
+const normWorkspace = normalizeCasePath(workspaceRoot);
+const targets = allowedPaths
+.map((p) => path.relative(normWorkspace,
+normalizeCasePath(path.resolve(normWorkspace, p))).replace(/\\/g,
+'/'))
+.sort();
+const payload = { plan, targets, workspaceRoot: normWorkspace };
+return
+crypto.createHash('sha256').update(canonicalize(payload)).digest('hex'
+); }
+export class ScopeAmendmentManager {
+constructor(private state: HostState, private workspaceRoot: string)
+{}
+private isWithinSubtree(target: string, parentSubtree: string):
+boolean {
+const normTarget =
+normalizeCasePath(path.resolve(this.workspaceRoot, target));
+const normParent =
+normalizeCasePath(path.resolve(this.workspaceRoot, parentSubtree));
+return normTarget === normParent ||
+normTarget.startsWith(normParent + path.sep);
+}
+async evaluateMutationTarget(targetPath: string, reason: string,
+isInteractive: boolean): Promise<boolean> {
+if (!this.state.approvalScope) return false;
+const normTarget =
+normalizeCasePath(path.resolve(this.workspaceRoot, targetPath));
+const normRoot = normalizeCasePath(this.workspaceRoot);
+// 1. Validasi batas root workspace (pelarian di luar root ditolak
+mutlak)
+if (!normTarget.startsWith(normRoot + path.sep) && normTarget !==
+normRoot) {
+return false;
+}
+// 2. Subtree Containment: Auto-approve jika target berada di
+dalam folder yang sudah disetujui
+const inSubtree =
+this.state.approvalScope.allowedPaths.some((allowed) =>
+this.isWithinSubtree(targetPath, allowed)
+);
+if (inSubtree) {
+return true;
+}
+// 3. Target baru di luar subtree membutuhkan otorisasi eksplisit
+pengembang
+if (!isInteractive) {
+return false;
+}
+const rl = readline.createInterface({ input, output }); console.log(`\n[Ruko] AI mengusulkan amandemen scope untuk target
+baru: ${targetPath}`);
+console.log(`Alasan: ${reason}`);
+const answer = await rl.question('Izinkan amandemen scope ini?
+[Y/n]: ');
+rl.close();
+const confirmed = answer.trim().toLowerCase() === '' ||
+answer.trim().toLowerCase() === 'y';
+if (!confirmed) {
+return false;
+}
+// 4. Perbarui izin pada state host dengan perlindungan atomic
+FileLock
+const stateFile = path.join(os.homedir(), '.ruko', 'sessions',
+this.state.sessionId, 'state.json');
+const lock = new FileLock(stateFile);
+const release = await lock.acquire();
+try {
+const freshState = await loadHostState(this.state.sessionId);
+if
+(!freshState.approvalScope!.allowedPaths.includes(targetPath)) {
+freshState.approvalScope!.allowedPaths.push(targetPath);
+await saveHostState(freshState);
+this.state = freshState;
+}
+return true;
+} finally {
+await release();
+}
+}
+}
+2.7 Guard Manifest & Dependensi
+(src/core/verification/packageJsonGuard.ts)
+Memvalidasi manifest paket dari serangan trojan melalui pencegahan penyuntikan URL
+eksternal, validasi SemVer ketat, dan pemblokiran skrip lifecycle instalasi.
+// src/core/verification/packageJsonGuard.ts
+const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'constructor',
+'prototype']);
+const DANGEROUS_VALUE_PREFIXES = [
+'http://', 'https://', 'git://', 'git+http://', 'git+https://', 'github:', 'gitlab:', 'bitbucket:', 'file:', 'ssh://',
+];
+const DANGEROUS_SCRIPTS = [
+'preinstall', 'postinstall', 'preuninstall', 'postuninstall',
+'prepare', 'prepublish', 'prepublishOnly', 'prepack', 'postpack',
+];
+const SEMVER_STRICT_RANGE =
+/^[~^]?(?:[0-9]+|[xX*])(?:\.(?:[0-9]+|[xX*])){0,2}(?:-[0-9A-Za-z-]+(?:
+\.[0-9A-Za-z-]+)*)?$/;
+export function verifyPackageJsonChange(
+original: Record<string, any>,
+updated: Record<string, any>
+): { allowed: boolean; reason?: string } {
+// 1. Blokir modifikasi skrip siklus hidup instalasi
+const origScripts = original.scripts || {};
+const newScripts = updated.scripts || {};
+for (const s of DANGEROUS_SCRIPTS) {
+if (newScripts[s] && newScripts[s] !== origScripts[s]) {
+return { allowed: false, reason: `Skrip siklus hidup berbahaya
+dilarang: ${s}` };
+}
+}
+// 2. Blokir modifikasi field biner arbitrer
+if (updated.bin && JSON.stringify(updated.bin) !==
+JSON.stringify(original.bin)) {
+return { allowed: false, reason: 'Modifikasi field "bin" ditolak
+dalam sesi otomatis' };
+}
+// 3. Validasi nama paket dan format nilai dependensi (Anti-Value
+Injection)
+const depSections = ['dependencies', 'devDependencies',
+'peerDependencies', 'optionalDependencies'];
+for (const sec of depSections) {
+const origDeps = original[sec] || {};
+const newDeps = updated[sec] || {};
+for (const [pkg, val] of Object.entries(newDeps)) {
+if (FORBIDDEN_OBJECT_KEYS.has(pkg)) {
+return { allowed: false, reason: `Injeksi property prototype
+terlarang: ${pkg}` };
+}
+if (origDeps[pkg] === val) continue; if (typeof val !== 'string') {
+return { allowed: false, reason: `Nilai versi paket ${pkg}
+harus berupa string` };
+}
+const lowerVal = val.toLowerCase().trim();
+if (DANGEROUS_VALUE_PREFIXES.some((p) =>
+lowerVal.startsWith(p))) {
+return { allowed: false, reason: `Injeksi URL/Git terdeteksi
+pada dependensi ${pkg}: ${val}` };
+}
+if (val.startsWith('.') || val.startsWith('/') ||
+val.startsWith('~')) {
+return { allowed: false, reason: `Path lokal dilarang pada
+dependensi ${pkg}: ${val}` };
+}
+if (!SEMVER_STRICT_RANGE.test(val) &&
+!/^(latest|beta|next|workspace:\*)$/.test(val)) {
+return { allowed: false, reason: `Nilai versi paket ${pkg}
+bukan format semver sah: ${val}` };
+}
+}
+}
+return { allowed: true };
+}
+2.8 Identitas Repositori Tepercaya (src/core/state/trustedRoots.ts)
+Mengikat status repositori tepercaya pada alamat Git Remote Origin kanonis dan UID
+kepemilikan filesystem, tahan terhadap operasi git checkout atau perpindahan branch.
+// src/core/state/trustedRoots.ts
+import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
+export interface TrustedRecord {
+path: string;
+gitRemoteOrigin?: string;
+ownerUid?: number;
+}
+const CONFIG_PATH = path.join(os.homedir(), '.ruko', 'trusted_roots.json');
+export class TrustedRootsManager {
+private getGitOrigin(dir: string): string | null {
+try {
+return execFileSync('git', ['remote', 'get-url', 'origin'], {
+cwd: dir,
+encoding: 'utf8',
+stdio: ['ignore', 'pipe', 'ignore'],
+timeout: 2000,
+}).trim();
+} catch {
+return null;
+}
+}
+async isTrusted(workspacePath: string): Promise<boolean> {
+try {
+// 1. Resolusi realpath fisik sesungguhnya (Bongkar symlink
+traversal)
+const realWorkspace = await
+fs.realpath(path.resolve(workspacePath));
+const content = await fs.readFile(CONFIG_PATH, 'utf8');
+const records = JSON.parse(content) as TrustedRecord[];
+for (const record of records) {
+const realTrustedRoot = await
+fs.realpath(path.resolve(record.path)).catch(() => null);
+if (!realTrustedRoot) continue;
+// 2. Verifikasi batas penampungan fisik
+const relative = path.relative(realTrustedRoot,
+realWorkspace);
+const isContained = relative === '' ||
+(!relative.startsWith('..') && !path.isAbsolute(relative));
+if (isContained) {
+// 3. Verifikasi kepemilikan UID (POSIX)
+if (process.platform !== 'win32' && record.ownerUid !==
+undefined) {
+const stat = await fs.lstat(realWorkspace);
+if (stat.uid !== record.ownerUid) return false;
+}
+// 4. Verifikasi remote origin Git
+if (record.gitRemoteOrigin) {
+const currentOrigin = this.getGitOrigin(realWorkspace); if (currentOrigin !== record.gitRemoteOrigin) return
+false;
+}
+return true;
+}
+}
+return false;
+} catch {
+return false;
+}
+}
+}
+2.9 Isolasi Subprocess & Tata Kelola Resource
+(src/core/executor/resourceGovernor.ts)
+Mengatur pemanggilan subprocess dengan pembersihan environment agresif, limitasi alokasi
+output/waktu, dan pembersihan hierarki proses anak (process tree).
+// src/core/executor/resourceGovernor.ts
+import { spawn, execSync } from 'node:child_process';
+const IS_WIN = process.platform === 'win32';
+const ENV_ALLOWLIST = new Set([
+'PATH', 'HOME', 'USER', 'LANG', 'LC_ALL', 'TERM',
+'SYSTEMROOT', 'SystemRoot', 'windir', 'APPDATA', 'LOCALAPPDATA',
+'TEMP', 'TMP'
+]);
+export interface ResourceLimits {
+timeoutMs: number;
+maxOutputBytes: number;
+}
+const DEFAULT_LIMITS: ResourceLimits = {
+timeoutMs: 30_000,
+maxOutputBytes: 10 * 1024 * 1024, // 10 MB
+};
+export function buildIsolatedEnv(): NodeJS.ProcessEnv {
+const cleanEnv: NodeJS.ProcessEnv = {};
+for (const key of Object.keys(process.env)) {
+if (ENV_ALLOWLIST.has(key)) {
+cleanEnv[key] = process.env[key]; }
+}
+// Wajib dihapus untuk mencegah eskalasi eksekusi kode lokal
+delete cleanEnv.NODE_OPTIONS;
+delete cleanEnv.NODE_PATH;
+delete cleanEnv.LD_PRELOAD;
+delete cleanEnv.DYLD_INSERT_LIBRARIES;
+cleanEnv.PATH = IS_WIN
+? `${process.env.SystemRoot}\\System32;${process.env.SystemRoot}`
+: '/usr/local/bin:/usr/bin:/bin';
+cleanEnv.RUKO_ENFORCED = '1';
+return cleanEnv;
+}
+export function killProcessTree(pid: number): void {
+if (IS_WIN) {
+try {
+execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
+} catch {
+try { process.kill(pid, 'SIGKILL'); } catch {}
+}
+} else {
+try {
+process.kill(-pid, 'SIGKILL'); // Menghentikan seluruh process
+group
+} catch {
+try { process.kill(pid, 'SIGKILL'); } catch {}
+}
+}
+}
+export function spawnIsolated(
+bin: string,
+args: string[],
+cwd: string,
+limits: Partial<ResourceLimits> = {}
+): Promise<{ stdout: string; stderr: string; exitCode: number | null
+}> {
+const finalLimits = { ...DEFAULT_LIMITS, ...limits };
+return new Promise((resolve, reject) => {
+const child = spawn(bin, args, {
+cwd,
+shell: false,
+env: buildIsolatedEnv(), stdio: ['ignore', 'pipe', 'pipe'],
+windowsHide: true,
+detached: !IS_WIN,
+});
+let stdout = '';
+let stderr = '';
+let settled = false;
+const timer = setTimeout(() => {
+if (!settled) {
+settled = true;
+killProcessTree(child.pid!);
+reject(new Error(`RESOURCE_TIMEOUT: Proses melampaui batas
+waktu ${finalLimits.timeoutMs}ms`));
+}
+}, finalLimits.timeoutMs);
+child.stdout?.on('data', (d: Buffer) => {
+stdout += d.toString('utf8');
+if (stdout.length + stderr.length > finalLimits.maxOutputBytes
+&& !settled) {
+settled = true;
+clearTimeout(timer);
+killProcessTree(child.pid!);
+reject(new Error('RESOURCE_OVERFLOW: Output proses melebihi
+batas'));
+}
+});
+child.stderr?.on('data', (d: Buffer) => {
+stderr += d.toString('utf8');
+if (stdout.length + stderr.length > finalLimits.maxOutputBytes
+&& !settled) {
+settled = true;
+clearTimeout(timer);
+killProcessTree(child.pid!);
+reject(new Error('RESOURCE_OVERFLOW: Output proses melebihi
+batas'));
+}
+});
+child.on('close', (code) => {
+if (!settled) {
+settled = true;
+clearTimeout(timer);
+resolve({ stdout, stderr, exitCode: code });
+} });
+child.on('error', (err) => {
+if (!settled) {
+settled = true;
+clearTimeout(timer);
+reject(err);
+}
+});
+});
+}
+2.10 Redaksi Data Sensitif & Stream Parser
+(src/core/logging/redactionStream.ts)
+Transform stream tanpa sintaks regex (?i) PCRE, menggunakan StringDecoder untuk
+mengamankan batas chunk buffer dari pemotongan token rahasia.
+// src/core/logging/redactionStream.ts
+import { Transform, TransformCallback } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
+const REDACTION_RULES = [
+{ pattern: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE
+KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g,
+replace: '[REDACTED:PRIVATE_KEY]' },
+{ pattern: /gh[pousr]_[A-Za-z0-9_]{36,255}/g, replace:
+'[REDACTED:GITHUB_TOKEN]' },
+{ pattern: /AKIA[0-9A-Z]{16}/g, replace: '[REDACTED:AWS_KEY]' },
+{ pattern: /Bearer\s+[A-Za-z0-9\-_\.=]{16,512}/gi, replace: 'Bearer
+[REDACTED:BEARER]' },
+{ pattern:
+/(api[_-]?key|secret|password)["'\s:=]{1,4}[A-Za-z0-9_\-]{16,128}/gi,
+replace: '$1=[REDACTED]' },
+];
+export function redactText(text: string): string {
+let out = text;
+for (const rule of REDACTION_RULES) {
+out = out.replace(rule.pattern, rule.replace);
+}
+return out;
+}
+export class RedactionTransform extends Transform {
+private tail = '';
+private decoder = new StringDecoder('utf8'); _transform(chunk: Buffer, _encoding: BufferEncoding, callback:
+TransformCallback) {
+let str = this.tail + this.decoder.write(chunk);
+if (str.length > 512) {
+const processUpTo = str.length - 512;
+this.push(redactText(str.slice(0, processUpTo)));
+this.tail = str.slice(processUpTo);
+} else {
+this.tail = str;
+}
+callback();
+}
+_flush(callback: TransformCallback) {
+this.tail += this.decoder.end();
+if (this.tail) {
+this.push(redactText(this.tail));
+this.tail = '';
+}
+callback();
+}
+}
+export function pruneForLLM(rawOutput: string, exitCode: number |
+null): string {
+const lines = rawOutput.split('\n');
+const last15 = lines.slice(-15).join('\n');
+const errors = lines.filter((l) =>
+/(error|fail|exception)/i.test(l)).slice(0, 10);
+return [
+`EXIT_CODE: ${exitCode ?? 'unknown'}`,
+`--- ERROR SUMMARY (pruned) ---`,
+errors.join('\n') || '(no error pattern detected)',
+`--- LAST 15 LINES ---`,
+last15,
+].join('\n');
+}
+2.11 Log Audit Berantai Kriptografis
+(src/core/logging/hashChainLog.ts)
+Struktur berkas append-only dengan rantai hash kriptografis SHA-256 (prevHash) untuk
+mendeteksi manipulasi log secara retrospektif.
+// src/core/logging/hashChainLog.ts import { open, stat } from 'node:fs/promises';
+import { constants as C } from 'node:fs';
+import { createHash } from 'node:crypto';
+export interface AuditEntry {
+index: number;
+timestamp: string;
+prevHash: string;
+payload: Record<string, unknown>;
+hash: string;
+}
+export class TamperEvidentLogger {
+private currentHash = '0'.repeat(64);
+private currentIndex = 0;
+constructor(private logPath: string) {}
+async append(payload: Record<string, unknown>): Promise<AuditEntry>
+{
+const timestamp = new Date().toISOString();
+const index = this.currentIndex + 1;
+const serialized = JSON.stringify({ index, timestamp, prevHash:
+this.currentHash, payload });
+const hash =
+createHash('sha256').update(serialized).digest('hex');
+const entry: AuditEntry = { index, timestamp, prevHash:
+this.currentHash, payload, hash };
+const fd = await open(this.logPath, C.O_WRONLY | C.O_CREAT |
+C.O_APPEND, 0o600);
+try {
+await fd.writeFile(JSON.stringify(entry) + '\n', 'utf8');
+await fd.sync();
+} finally {
+await fd.close();
+}
+this.currentHash = hash;
+this.currentIndex = index;
+return entry;
+}
+async verifyChain(): Promise<boolean> {
+try { await stat(this.logPath); } catch { return true; }
+const fd = await open(this.logPath, C.O_RDONLY);
+try {
+const content = await fd.readFile({ encoding: 'utf8' }); const lines = content.split('\n').filter(Boolean);
+let prev = '0'.repeat(64);
+for (const line of lines) {
+const entry: AuditEntry = JSON.parse(line);
+if (entry.prevHash !== prev) return false;
+const serialized = JSON.stringify({
+index: entry.index, timestamp: entry.timestamp, prevHash:
+entry.prevHash, payload: entry.payload
+});
+if (entry.hash !==
+createHash('sha256').update(serialized).digest('hex')) return false;
+prev = entry.hash;
+}
+return true;
+} finally {
+await fd.close();
+}
+}
+}
+2.12 Verifikasi Kompilator Mandiri (src/core/verification/tieredGate.ts)
+Mengeksekusi kompilator TypeScript (./node_modules/.bin/tsc) langsung tanpa wrapper skrip
+manifest untuk mencegah pemalsuan kode keluar (exit-code spoofing).
+// src/core/verification/tieredGate.ts
+import { spawnIsolated } from '../executor/resourceGovernor';
+import * as path from 'node:path';
+export class TieredGate {
+constructor(private changedFiles: string[], private workspaceRoot:
+string) {}
+async runTier0(): Promise<boolean> {
+const tscBin = path.resolve(this.workspaceRoot,
+'node_modules/.bin/tsc');
+try {
+const result = await spawnIsolated(
+tscBin,
+['--noEmit', '--skipLibCheck', 'true'],
+this.workspaceRoot,
+{ timeoutMs: 45_000 }
+);
+return result.exitCode === 0;
+} catch {
+return false;
+} }
+async evaluate(): Promise<{ allowed: boolean; reason: string }> {
+const hasLockfileChange = this.changedFiles.some(
+(f) => f.includes('package-lock.json') ||
+f.includes('pnpm-lock.yaml')
+);
+if (hasLockfileChange) {
+return { allowed: false, reason:
+'LOCKFILE_MODIFICATION_REQUIRES_MANUAL_REVIEW' };
+}
+const tier0Pass = await this.runTier0();
+if (!tier0Pass) {
+return { allowed: false, reason: 'TIER0_TYPECHECK_FAILED' };
+}
+return { allowed: true, reason: 'PASSED' };
+}
+}
+2.13 Fasad Tunggal Pipeline Keamanan (src/core/securityPipeline.ts)
+Pintu gerbang terpusat evaluasi pemanggilan tool dengan prinsip penolakan default
+(Fail-Closed) sebelum instruksi menyentuh kernel sistem operasi.
+// src/core/securityPipeline.ts
+import { HostState } from './state/hostState';
+import { ScopeAmendmentManager } from './approval/scopeAmendment';
+import { secureReadFile } from './tools/secureRead';
+import { HostFetch } from './network/hostFetch';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+export class SecurityPipeline {
+private amendmentManager: ScopeAmendmentManager;
+constructor(private state: HostState, private workspaceRoot: string)
+{
+this.amendmentManager = new ScopeAmendmentManager(state,
+workspaceRoot);
+}
+async evaluateAndDispatch(tool: string, args: any, isInteractive =
+true): Promise<any> {
+// 1. Invarian Plan Mode (Deny-by-Default Aksi Mutasi)
+if (this.state.mode === 'plan') {
+const SAFE_IN_PLAN = new Set(['read_file', 'list_dir', 'code_search']);
+if (!SAFE_IN_PLAN.has(tool)) {
+throw new Error(`BLOCKED_IN_PLAN_MODE: Tool ${tool} memerlukan
+persetujuan (/approve)`);
+}
+}
+// 2. Evaluasi Scope Mutasi Berkas
+if (tool === 'write_file' || tool === 'edit_file') {
+const target = args.path || args.file || '';
+const allowed = await
+this.amendmentManager.evaluateMutationTarget(
+target,
+args.reason || 'Mutasi berkas',
+isInteractive
+);
+if (!allowed) {
+throw new Error(`SECURITY_DENIED: Target mutasi di luar scope
+yang diizinkan (${target})`);
+}
+}
+// 3. Dispatching Operasi Tervalidasi
+switch (tool) {
+case 'read_file':
+return await secureReadFile(this.workspaceRoot, args.path);
+case 'write_file': {
+const dest = path.resolve(this.workspaceRoot, args.path);
+await fs.mkdir(path.dirname(dest), { recursive: true });
+await fs.writeFile(dest, args.content, { mode: 0o600 });
+return { ok: true, path: dest };
+}
+case 'web_fetch':
+return await HostFetch.fetch(args.url);
+default:
+throw new Error(`TOOL_UNKNOWN_OR_BLOCKED: ${tool}`);
+}
+}
+}
+3. Roadmap Eksekusi 4 Fase
+┌─────────────────────────────────────────────────────────────┐ │ FASE 1: Fondasi P0 Keamanan, State & I/O Lintas Platform │
+│ - F1-T0: hostFetch SSRF Pinning (https.request + SNI) │
+│ - F1-T1: Allowlist Sanitizer (NFKC + codePointAt) │
+│ - F1-T2: fileLock Mutex (Atomic mkdir + mtime Heartbeat) │
+│ - F1-T3: Dual-Plane State (~/.ruko/ 0600) Win32 Backoff │
+│ - F1-T4: RedactionTransform Tanpa Regex PCRE + Tail Buffer │
+└──────────────────────────────┬──────────────────────────────┘
+▼
+┌─────────────────────────────────────────────────────────────┐
+│ FASE 2: Disiplin AI, Scope Amendment & Verifikasi Mandiri │
+│ - F2-T1: Dispatcher Gate Lock di Hulu Pipeline │
+│ - F2-T2: Subtree Auto-Approve & Micro-Prompt Terminal │
+│ - F2-T3: packageJsonGuard Anti-Value & SemVer Check │
+│ - F2-T4: Direct Binary Tier 0 Compiler Gate │
+└──────────────────────────────┬──────────────────────────────┘
+▼
+┌─────────────────────────────────────────────────────────────┐
+│ FASE 3: Strangler Refactor Pipa Keamanan & Profil Monoton │
+│ - F3-T1: Fasad SecurityPipeline Tunggal Fail-Closed │
+│ - F3-T2: Migrasi Bertahap Callsite per-PR + AST Lint Check │
+│ - F3-T3: TrustedRoots via Realpath Fisik & Git Origin │
+│ - F3-T4: Tamper-Evident Hash Chain Audit Trail │
+└──────────────────────────────┬──────────────────────────────┘
+▼
+┌─────────────────────────────────────────────────────────────┐
+│ FASE 4: Integritas Rilis & Standar Ekosistem Runtime (2026) │
+│ - F4-T1: Rangkaian Uji Penetrasi Adversarial Lolos 100% │
+│ - F4-T2: Matriks CI 3-OS (Ubuntu, macOS, Windows) Node 22/24│
+│ - F4-T3: Installer Pemasang Berbasis Tag Statis + Sigstore │
+└─────────────────────────────────────────────────────────────┘
+4. Definition of Done (DoD) & Release Acceptance
+Gate
+Sebelum tag v2.0.0 dirilis resmi ke publik, sistem wajib memenuhi kriteria deterministik berikut:
+1. Host-Governed Invariant: Seluruh mutasi disk dan eksekusi subprocess tertolak
+mekanis di level dispatcher selama Plan Mode aktif; flag /yolo terbukti tidak mampu
+membatalkan batasan scope.
+2. Kriptografi Kontrak Scope: Perubahan path di luar subtree memicu prompt konfirmasi
+interaktif; modifikasi hash rencana membatalkan izin eksekusi secara otomatis.
+3. Fail-Safe Resume State: Pemulihan sesi terputus (resume) selalu kembali ke Plan Mode
+tanpa pengecualian.
+4. Adversarial Suite Lulus 100%: Rangkaian uji penetrasi lokal meloloskan 10/10 skenario
+SSRF (IP privat, DNS rebinding, redirect berantai), 7/7 skenario Unicode/BiDi injection,
+dan pengujian race condition symlink TOCTOU.
+5. Kebijakan Monotonik Terbukti: Penambahan konfigurasi permisif di tingkat workspace .ruko/config.json terbukti diabaikan dan ter-override oleh konfigurasi global pengguna.
+6. Anti-Value Injection Manifest: Upaya penyuntikan URL eksternal, tarball git, atau skrip
+siklus hidup pada package.json tertolak deterministik sebelum instalasi dijalankan.
+7. Penyensoran Kredensial Menyeluruh: Token rahasia, private key, dan header
+authorization tidak pernah bocor ke file log sesi mentah, audit log, maupun terminal
+display.
+8. Supply Chain Terverifikasi: Skrip instalasi install.sh hanya mengunduh rilis tag statis
+SemVer dan memvalidasi checksum SHA-256 serta tanda tangan Sigstore/Cosign.
+5. Draf Klausul Batas Tanggung Jawab Keamanan
+(SECURITY.md)
+# Kebijakan Keamanan Ruko-agent (Security Policy)
+## Model Ancaman & Batas Tanggung Jawab (Scope of Protection)
+Ruko-agent v2.0.0 dirancang secara spesifik sebagai **Deterministic
+Local Policy Enforcer**
+untuk melindungi stasiun kerja pengembang lokal (*single-user
+developer workstation*) dari
+repositori pihak ketiga yang beritikad jahat dan injeksi instruksi tak
+langsung (*Indirect Prompt Injection*).
+### Batasan Arsitektur yang Dikecualikan
+1. **Lingkungan Multi-Tenant SaaS:** Ruko tidak menyediakan batas
+isolasi berbasis hipervisor
+perangkat keras atau pemisahan kernel Linux multi-penyewa
+(*shared-kernel multi-tenant isolation*).
+2. **Infrastruktur Cloud Hosted:** Jika Ruko dijalankan dalam
+infrastruktur cloud yang melayani
+banyak pengguna asing secara bersamaan, penyedia layanan wajib
+mengisolasi setiap instance
+di dalam MicroVM perangkat keras (seperti AWS Firecracker) atau
+gVisor sandbox. Tanggung jawab
+tersebut berada sepenuhnya di lapisan infrastruktur pengelola,
+bukan pada biner Ruko.
+Cetak biru arsitektur Ruko-agent v2.0.0 kini telah resmi terkunci dan siap dijadikan acuan
+tunggal dalam penyusunan Pull Request. Modul pertama yang siap diimplementasikan ke
+dalam basis kode repositori adalah src/core/state/fileLock.ts dan
+src/core/prompt/sanitizer.ts.
