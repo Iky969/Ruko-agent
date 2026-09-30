@@ -86,3 +86,54 @@ Sebelum Pull Request digabungkan ke cabang utama:
  * [ ] No Unhandled Rejections: Seluruh operasi I/O dan jaringan memiliki blok finally untuk merilis file handle, timer detak jantung, atau stream listener.
  * [ ] Fail-Closed Verification: Saat terjadi kegagalan parser (JSON rusak, timeout, error filesystem), sistem selalu memilih opsi penolakan izin paling restriktif (deny-by-default).
  * [ ] Audit Trail Integrity: Setiap penolakan akses atau amandemen izin tercatat ke dalam append-only hash chain log dengan format JSON kanonis.
+### 1.9 Audit Red-Teaming Lanjutan (Syscall, Resolver & Windows Edge-Cases)
+
+* **Vektor Celah: Semantic Gap `net.isIP()` vs OS Resolver (`0.0.0.0/8`, `::/128`, Non-Standard IPv4)**
+  * *Mekanisme:* 
+    1. Input URL dengan host `0.0.0.0` lolos evaluasi jika daftar CIDR hanya memuat rentang RFC 1918 dan loopback `127.0.0.0/8`. Kernel Linux/macOS merutekan koneksi `0.0.0.0` langsung ke `127.0.0.1`, memungkinkan akses tidak sah ke daemon lokal (misal Docker di port 2375).
+    2. Format literal non-standar (hex `0x7f.0.0.1`, octal, atau integer decimal) menghasilkan nilai `0` pada `net.isIP()`, tetapi tetap diterjemahkan sebagai alamat IP loopback oleh `getaddrinfo` via implementasi legacy `inet_aton()`.
+  * *Solusi:*
+    * Tambahkan `0.0.0.0/8` dan `::/128` ke dalam blok CIDR terlarang pada `hostFetch.ts`.
+    * Validasi CIDR wajib dieksekusi **hanya pada IP kanonis hasil resolusi DNS (`pinnedIP`)**, bukan pada string URL masukan mentah.
+    * Pastikan callback socket connection melempar `SSRFError` jika `pinnedIP` tidak valid atau tergolong rentang terlarang.
+
+* **Vektor Celah: Subtree Monotonic Expansion Bypass via Pre-Existing Symlink**
+  * *Mekanisme:* Evaluasi `target.startsWith(approvedPath)` hanya memvalidasi kesamaan string path visual. Jika direktori yang disetujui memuat symlink yang mengarah ke luar root workspace sebelum sesi dimulai (misal `project/link -> /etc`), penulisan berkas `project/link/passwd` akan dianggap *auto-approved* secara visual padahal mutasi fisik terjadi di direktori sensitif host.
+  * *Solusi:* 
+    * Lakukan resolusi jalur fisik (`fs.realpathSync`) pada direktori induk (*parent directory*) target sebelum membandingkannya dengan direktori izin kanonis:
+      ```typescript
+      const parentDir = path.dirname(targetPath);
+      const canonicalParent = fs.realpathSync(parentDir);
+      const canonicalApproved = fs.realpathSync(approvedPath);
+
+      if (!canonicalParent.startsWith(canonicalApproved + path.sep) && canonicalParent !== canonicalApproved) {
+        // Blokir mutasi atau minta konfirmasi interaktif [Y/n]
+      }
+      ```
+
+* **Vektor Celah: Eksekusi Kode Arbitrer via `tsc.cmd` Windows & Argv Injection pada Compiler Gate**
+  * *Mekanisme:* 
+    1. Di platform Windows, mengeksekusi `./node_modules/.bin/tsc` memicu eksekusi berkas batch `tsc.cmd`. Repositori pihak ketiga yang beritikad jahat dapat menyisipkan `tsc.cmd` palsu untuk memicu eksekusi kode tak terkontrol saat Ruko memanggil validasi Tier 0 di Plan Mode.
+    2. Opsi baris perintah (`argv`) yang dipengaruhi oleh LLM dapat menyuntikkan flag seperti `--outDir`, memungkinkan proses kompilasi menulis berkas di luar ruang lingkup yang diizinkan saat masih dalam Plan Mode.
+  * *Solusi:*
+    * **Bypass Biner `.bin/`:** Eksekusi skrip JavaScript compiler secara langsung menggunakan biner Node.js terverifikasi (`process.execPath`):
+      ```typescript
+      const tscJsPath = path.join(workspace, 'node_modules/typescript/bin/tsc');
+      spawn(process.execPath, [tscJsPath, '--noEmit'], {
+        shell: false,
+        env: isolatedEnv
+      });
+      ```
+    * **Argv Locking:** Kunci daftar argumen kompilasi secara absolut (`['--noEmit']`) tanpa menerima parameter tambahan dari inferensi model.
+
+---
+
+### Tambahan Matriks Uji Adversarial (Test Harness)
+
+| ID Uji | Modul Target | Payload / Kondisi Uji | Perilaku yang Diharapkan |
+| :--- | :--- | :--- | :--- |
+| **TC-NET-04** | `hostFetch.ts` | Request ke `http://0.0.0.0:3000` atau `http://[::]/` | Ditolak seketika dengan `SSRFError` (`PRIVATE_IP_BLOCKED`). |
+| **TC-NET-05** | `hostFetch.ts` | Hostname berupa format hex/decimal (`http://0x7f.0.0.1` / `http://2130706433`) | Resolver menerjemahkan ke `127.0.0.1` dan IP pinning menolak koneksi via `SSRFError`. |
+| **TC-SCM-03** | `scopeAmendment.ts` | Target mutasi berada di balik symlink direktori internal yang mengarah ke `/tmp` atau root sistem | Pengecekan realpath parent mendeteksi pelarian hierarki; operasi ditolak atau memicu prompt amandemen. |
+| **TC-GOV-03** | `resourceGovernor.ts` / Tier 0 | Pemanggilan Compiler Gate pada repositori yang memuat `tsc.cmd` kustom di Windows | Sistem mengabaikan `.bin/tsc.cmd` dan mengeksekusi `node_modules/typescript/bin/tsc` via `process.execPath`. |
+| **TC-GOV-04** | `resourceGovernor.ts` / Tier 0 | Parameter compiler disuntikkan flag `--outDir /evil/path` | Eksekutor menolak argumen asing dan hanya mengizinkan flag baku `--noEmit`. |
