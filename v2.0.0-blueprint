@@ -1,6 +1,6 @@
 # ATURAN DOKUMENTASI — Ruko-agent v2.0.0
 
-## CHANGELOG2.md — Ringkasan perubahan (untuk dibaca cepat)
+## CHANGELOGv2.md — Ringkasan perubahan (untuk dibaca cepat)
 - Format: satu entry per fase/PR selesai, MAKSIMAL 5-8 baris per entry.
 - Struktur tiap entry:
   ## [Fase X] Nama singkat — tanggal
