@@ -24,3 +24,8 @@ Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tun
 - Modul `sanitizer.ts` dengan normalisasi Unicode NFKC dan penanganan *code point* non-BMP.
 - Subtree auto-approval dan terminal micro-prompt `[Y/n]` untuk amandemen scope dinamis.
 - Identifikasi repositori tepercaya berbasis Git Remote Origin kanonis dan UID kepemilikan.
+
+### [Fase 1] Fondasi P0 Keamanan, State & I/O Lintas Platform — 2026-09-30
+- Implementasi 5 modul fondasi blueprint v2.0.0: `hostFetch` anti-SSRF (IP pinning per-hop, blokir CIDR privat, anti socket-reuse, SNI utuh), `sanitizer` NFKC + astral code point + `sanitizePath` non-mangling, `fileLock` mutex (mkdir atomik + heartbeat mtime + eviksi stale lock), `hostState` dual-plane `~/.ruko/sessions` 0600 (backoff Win32 + fail-safe resume reset ke plan mode), dan `redactionStream` tail-buffer 512B anti token-terbelah.
+- File: `src/core/network/hostFetch.ts`, `src/core/prompt/sanitizer.ts`, `src/core/state/fileLock.ts`, `src/core/state/hostState.ts`, `src/core/logging/redactionStream.ts` + 5 suite test adversarial `src/tests/fase1_*.test.ts` (TC-NET/LCK/SEC/RED sesuai QA.md).
+- Delta test: 1064 (1063 pass / 0 fail / 1 skip) → 1118 (1117 pass / 0 fail / 1 skip win32) = +54.
