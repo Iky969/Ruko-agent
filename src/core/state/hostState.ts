@@ -101,13 +101,13 @@ export async function saveHostState(state: HostState): Promise<void> {
  * kali dibaca kembali — resume tanpa pengecualian. Bila state tidak ada/rusak,
  * state baru dibuat dalam mode 'plan' (fail-closed).
  */
-export async function loadHostState(sessionId: string): Promise<HostState> {
+export async function loadHostState(sessionId: string, opts: { resume?: boolean } = { resume: true }): Promise<HostState> {
   validateSessionId(sessionId);
   const target = path.join(hostDir(), sessionId, 'state.json');
   try {
     const raw = await fs.readFile(target, 'utf8');
     const state = JSON.parse(raw) as HostState;
-    if (state.mode === 'act') {
+    if (opts.resume !== false && state.mode === 'act') {
       state.mode = 'plan';
       state.approvalScope = null;
     }

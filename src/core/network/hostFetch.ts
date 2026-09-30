@@ -178,7 +178,7 @@ export class HostFetch {
               timeout: REQUEST_TIMEOUT_MS,
               // IP pinning: suplai hasil verifikasi pertama langsung ke soket,
               // mencegah lookup sekunder di level kernel (DNS rebinding TOCTOU).
-              lookup: (_hostname, _opts, cb) => cb(null, pinnedIP, net.isIP(pinnedIP) as 4 | 6),
+              lookup: (_hostname: any, _opts: any, cb: any) => cb(null, pinnedIP, net.isIP(pinnedIP) as 4 | 6),
             },
             (res) => {
               let body = '';

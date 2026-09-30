@@ -10,6 +10,9 @@ import { codeSearchTool, globTool, listDirTool, readFileTool } from './filetools
 import { appendMemory } from '../core/memory.js';
 import { deleteSkill, listSkills, readSkill, saveSkill } from '../core/skills.js';
 import { searchSessions } from '../core/session.js';
+import { evaluateDispatcherGate } from '../core/dispatcher/dispatcherGate.js';
+import type { HostState } from '../core/state/hostState.js';
+import type { ScopeAmendmentManager } from '../core/approval/scopeAmendment.js';
 import { runSubagent } from './subagent.js';
 import { webFetchTool } from './webtools.js';
 import { defaultProcessManager } from './processManager.js';
@@ -389,6 +392,10 @@ export interface ToolDeps {
    * spawning a second, invisible one.
    */
   activityTray?: ActivityTray;
+  /** v2.0.0: Authoritative HostState from ~/.ruko/sessions/ */
+  hostState?: HostState | null;
+  /** v2.0.0: ScopeAmendmentManager instance for evaluating mutation scope */
+  scopeAmendmentManager?: ScopeAmendmentManager | null;
 }
 
 /** Tools refused while plan mode is active (read_file stays available). */
@@ -1538,14 +1545,22 @@ export function resolveExecTimeout(call: Record<string, any>, fallbackMs: number
 
 /** Executes a parsed tool call; the result is char-capped before re-entering context. */
 export async function runToolCall(call: ToolCall, deps: ToolDeps = {}): Promise<string> {
-  // §6: plan mode is a CODE guarantee, not a prompt request.
-  if (deps.planMode && PLAN_MODE_BLOCKED.has(call.tool)) {
-    return capToolResult(
-      JSON.stringify({
-        error: `plan mode aktif: tool "${call.tool}" diblok (hanya baca yang boleh). Matikan dengan /plan off setelah rencana disetujui.`,
-      }),
-    );
+  const ws = deps.workspaceRoot ?? getWorkspaceRoot();
+  const decision = await evaluateDispatcherGate({
+    tool: call.tool,
+    args: call,
+    hostState: deps.hostState,
+    planMode: deps.planMode,
+    yoloMode: deps.config ? !deps.config.approvalEnabled : false,
+    scopeManager: deps.scopeAmendmentManager,
+    isInteractive: deps.confirm !== undefined,
+    workspaceRoot: ws,
+  });
+
+  if (!decision.allowed) {
+    return capToolResult(JSON.stringify({ error: decision.reason }));
   }
+
   return capToolResult(await runToolCallRaw(call, deps));
 }
 

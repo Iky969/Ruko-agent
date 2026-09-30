@@ -25,6 +25,11 @@ Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tun
 - Subtree auto-approval dan terminal micro-prompt `[Y/n]` untuk amandemen scope dinamis.
 - Identifikasi repositori tepercaya berbasis Git Remote Origin kanonis dan UID kepemilikan.
 
+### [Fase 2] Disiplin AI, Scope Amendment & Verifikasi Mandiri — 2026-09-30
+- Implementasi gerbang dispatcher hulu anti-mutasi saat Plan Mode (kebal terhadap flag `/yolo`), `ScopeAmendmentManager` subtree auto-approve dengan micro-prompt terminal `[Y/n]` dan fail-closed non-TTY, `packageJsonGuard` anti-value injection & SemVer ReDoS guard, serta `TieredGate` verifikasi langsung biner `./node_modules/.bin/tsc` via `resourceGovernor` subproses terisolasi.
+- File: `src/core/dispatcher/dispatcherGate.ts`, `src/core/approval/scopeAmendment.ts`, `src/core/verification/packageJsonGuard.ts`, `src/core/executor/resourceGovernor.ts`, `src/core/verification/tieredGate.ts`, `src/agent/tools.ts` + 5 suite test `src/tests/fase2_*.test.ts`.
+- Delta test: 1118 (1117 pass / 0 fail / 1 skip) → 1149 (1148 pass / 0 fail / 1 skip win32) = +31.
+
 ### [Fase 1] Fondasi P0 Keamanan, State & I/O Lintas Platform — 2026-09-30
 - Implementasi 5 modul fondasi blueprint v2.0.0: `hostFetch` anti-SSRF (IP pinning per-hop, blokir CIDR privat, anti socket-reuse, SNI utuh), `sanitizer` NFKC + astral code point + `sanitizePath` non-mangling, `fileLock` mutex (mkdir atomik + heartbeat mtime + eviksi stale lock), `hostState` dual-plane `~/.ruko/sessions` 0600 (backoff Win32 + fail-safe resume reset ke plan mode), dan `redactionStream` tail-buffer 512B anti token-terbelah.
 - File: `src/core/network/hostFetch.ts`, `src/core/prompt/sanitizer.ts`, `src/core/state/fileLock.ts`, `src/core/state/hostState.ts`, `src/core/logging/redactionStream.ts` + 5 suite test adversarial `src/tests/fase1_*.test.ts` (TC-NET/LCK/SEC/RED sesuai QA.md).

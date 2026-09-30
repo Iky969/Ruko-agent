@@ -6,7 +6,7 @@
  * release idempoten, dan LOCK_TIMEOUT.
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, utimesSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, utimesSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
@@ -127,11 +127,14 @@ describe('F1-T2 FileLock', () => {
   test('TC-LCK-01 lintas proses: child proses terpisah menunggu lock (fisik)', async () => {
     const dir = tempDir('ruko-lock-child-');
     const target = join(dir, 'cross.json');
+    const readyFile = join(dir, 'ready.txt');
 
     // Child script: coba acquire, catat waktu, release
     const moduleUrl = toFileUrl(join(PROJECT_ROOT, 'dist', 'core', 'state', 'fileLock.js'));
     const script = `
       import { FileLock } from ${JSON.stringify(moduleUrl)};
+      import * as fs from 'node:fs';
+      fs.writeFileSync(${JSON.stringify(readyFile)}, '1');
       const lock = new FileLock(${JSON.stringify(target)});
       const t0 = Date.now();
       const release = await lock.acquire({ timeoutMs: 5000, retryIntervalMs: 25 });
@@ -143,7 +146,12 @@ describe('F1-T2 FileLock', () => {
     const childPromise = execFileAsync(NODE_BIN, ['--input-type=module', '-e', script], {
       timeout: 15_000,
     });
-    // Lepaskan lock A setelah 150ms agar child harus menunggu dulu
+    // Tunggu sampai child proses siap dan mulai mencoba acquire
+    for (let i = 0; i < 50; i++) {
+      if (existsSync(readyFile)) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // Lepaskan lock A setelah 150ms agar child benar-benar menunggu dulu
     await new Promise((r) => setTimeout(r, 150));
     await releaseA();
     const { stdout } = await childPromise;
