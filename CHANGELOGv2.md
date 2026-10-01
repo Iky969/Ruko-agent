@@ -25,6 +25,16 @@ Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tun
 - Subtree auto-approval dan terminal micro-prompt `[Y/n]` untuk amandemen scope dinamis.
 - Identifikasi repositori tepercaya berbasis Git Remote Origin kanonis dan UID kepemilikan.
 
+### [Fase 1 Hardening] TC-STA-01 & TC-STA-02 Corrupted State Fail-Closed & Directory Fsync — 2026-10-01
+- Eliminasi reset state diam-diam saat parsing berkas state gagal akibat crash atau simulasi ENOSPC; melempar `CorruptedStateError` eksplisit halt secara fail-closed (TC-STA-01). Ditambahkan best-effort directory fsync pada POSIX dengan graceful fallback EINVAL untuk lingkungan OverlayFS/WSL (TC-STA-02).
+- File: `src/core/state/hostState.ts`, `src/tests/fase1_hostState.test.ts`.
+- Delta test: 1168 (1167 pass / 0 fail / 1 skip) → 1172 (1171 pass / 0 fail / 1 skip win32) = +4.
+
+### [Fase 1 Hardening] TC-LCK-01 & TC-LCK-02 v2 FileLock Split-Brain & Deterministic Reclamation — 2026-10-01
+- Migrasi mutex native ke pembuatan berkas eksklusif kernel atomik `openSync('wx', 0o600)`, verifikasi keaktifan proses via `process.kill(pid, 0)` tanpa auto-eviction buta, eliminasi split-brain 50 worker paralel, dan proteksi metadata fail-closed dengan opsi `--force-unlock`.
+- File: `src/core/state/fileLock.ts`, `src/tests/fase1_fileLock.test.ts`.
+- Delta test: 1164 (1163 pass / 0 fail / 1 skip) → 1168 (1167 pass / 0 fail / 1 skip win32) = +4.
+
 ### [Fase 2 Hardening] Windows tsc.cmd Spoofing & Argv Locking — 2026-10-01
 - Bypass mutlak wrapper `.bin/tsc.cmd` di Windows dengan mengeksekusi biner JS compiler (`node_modules/typescript/bin/tsc`) langsung via `process.execPath`, serta penguncian ketat argumen kompilator hanya pada `['--noEmit']` (anti-injeksi `--outDir`).
 - File: `src/core/executor/resourceGovernor.ts`, `src/core/verification/tieredGate.ts`, `src/tests/fase2_resourceGovernor.test.ts`, `src/tests/fase2_tieredGate.test.ts`.
