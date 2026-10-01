@@ -34,6 +34,7 @@ import { getWorkspaceRoot } from '../agent/tools.js';
 import { defaultProcessManager } from '../agent/processManager.js';
 // Fase B (v1.9.0): EnvProfile singleton (deteksi murni, Fase A).
 import { getEnvProfile } from './env.js';
+import type { SecurityPipeline } from './securityPipeline.js';
 
 /** Prompt line shown under the status bar (placeholder until the user types). */
 const PROMPT_HINT = '/? untuk bantuan, tanya apa saja...';
@@ -77,7 +78,12 @@ export class SystemLoop {
     private readonly agent: Agent,
     private readonly config: AgentConfig,
     private readonly configPath: string,
-  ) {}
+    private readonly securityPipeline?: SecurityPipeline | null,
+  ) {
+    if (this.securityPipeline) {
+      this.sessionId = this.securityPipeline.sessionId;
+    }
+  }
 
   /** Starts the loop. Blocks (TTY: until exit) or wires piped line events. */
   start(): void {
@@ -336,6 +342,7 @@ export class SystemLoop {
     this.agent.activityTray.clear();
     this.editor?.close();
     this.rl?.close();
+    void this.securityPipeline?.releaseLock().catch(() => {});
   }
 
   private saveSession(): void {

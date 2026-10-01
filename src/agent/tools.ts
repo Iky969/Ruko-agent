@@ -492,6 +492,102 @@ export function assertInsideWorkspace(abs: string, workspaceRoot: string = getWo
   }
 }
 
+export class SecurityBoundaryError extends Error {
+  readonly code = 'SECURITY_BOUNDARY_VIOLATION';
+  constructor(message: string) {
+    super(message);
+    this.name = 'SecurityBoundaryError';
+  }
+}
+
+/**
+ * Memvalidasi bahwa targetPath beserta seluruh rantai direktori induknya
+ * secara fisik berada di dalam batas workspaceRoot kanonis (anti-symlink traversal).
+ * CVSS 9.3 — Menutup celah parent directory symlink escape (CWE-59 / CWE-61).
+ */
+export function assertPhysicalContainment(targetPath: string, workspaceRoot: string = getWorkspaceRoot()): string {
+  let canonicalWs: string;
+  try {
+    canonicalWs = realpathSync(path.resolve(workspaceRoot));
+  } catch {
+    canonicalWs = path.resolve(workspaceRoot);
+  }
+
+  const absTarget = path.isAbsolute(targetPath)
+    ? path.resolve(targetPath)
+    : path.resolve(canonicalWs, targetPath);
+
+  const isInside = (childPath: string, parentPath: string): boolean => {
+    const normChild = process.platform === 'win32' ? childPath.toLowerCase() : childPath;
+    const normParent = process.platform === 'win32' ? parentPath.toLowerCase() : parentPath;
+    if (normChild === normParent) return true;
+    const rel = path.relative(normParent, normChild);
+    return !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
+
+  // 1. Cek target file itu sendiri jika sudah eksis
+  try {
+    const targetLst = lstatSync(absTarget);
+    if (targetLst.isSymbolicLink()) {
+      let realTarget: string;
+      try {
+        realTarget = realpathSync(absTarget);
+      } catch {
+        const target = readlinkSync(absTarget);
+        realTarget = path.isAbsolute(target) ? path.resolve(target) : path.resolve(path.dirname(absTarget), target);
+      }
+      if (!isInside(realTarget, canonicalWs)) {
+        throw new SecurityBoundaryError(
+          `Akses ditolak: target '${targetPath}' adalah symbolic link yang mengarah ke luar workspace ('${realTarget}').`
+        );
+      }
+    } else {
+      const realTarget = realpathSync(absTarget);
+      if (!isInside(realTarget, canonicalWs)) {
+        throw new SecurityBoundaryError(
+          `Akses ditolak: target '${targetPath}' secara fisik berada di luar direktori kerja sah ('${realTarget}').`
+        );
+      }
+    }
+  } catch (err: any) {
+    if (err instanceof SecurityBoundaryError) throw err;
+    if (err?.code !== 'ENOENT') throw err;
+  }
+
+  // 2. Walk-up ancestor traversal: Cek seluruh rantai direktori induk
+  let current = path.dirname(absTarget);
+  while (current && current !== path.dirname(current)) {
+    try {
+      const lst = lstatSync(current);
+      if (lst.isSymbolicLink()) {
+        const real = realpathSync(current);
+        if (!isInside(real, canonicalWs)) {
+          throw new SecurityBoundaryError(
+            `Akses ditolak: direktori '${current}' adalah symbolic link yang mengarah ke luar workspace ('${real}').`
+          );
+        }
+      }
+      // Direktori eksis ditemukan, verifikasi resolusi kanonis seluruh rantai
+      const canonicalParent = realpathSync(current);
+      if (!isInside(canonicalParent, canonicalWs)) {
+        throw new SecurityBoundaryError(
+          `Akses ditolak: direktori induk '${current}' berakar di luar direktori kerja sah ('${canonicalParent}').`
+        );
+      }
+      break;
+    } catch (err: any) {
+      if (err instanceof SecurityBoundaryError) throw err;
+      if (err?.code === 'ENOENT') {
+        current = path.dirname(current);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  return absTarget;
+}
+
 /**
  * Immutable security core files of Ruko Agent.
  * Modifying or deleting these files through agent tools is forbidden.
@@ -799,6 +895,7 @@ function resolveToolPath(p: string, workspaceRoot: string = getWorkspaceRoot()):
   const cwd = path.resolve(workspaceRoot);
   const abs = path.resolve(cwd, p);
   assertInsideWorkspace(abs, cwd);
+  assertPhysicalContainment(abs, cwd);
   assertNotSensitivePath(abs, cwd);
   return abs;
 }
@@ -812,6 +909,7 @@ async function writeWithDiff(
   workspaceRoot: string = getWorkspaceRoot(),
   toolName: string = 'edit_file',
 ): Promise<string> {
+  assertPhysicalContainment(abs, workspaceRoot);
   // PERBAIKAN (Windows — temuan CI): O_NOFOLLOW DIABAIKAN libuv di Windows
   // (open tetap mengikuti symlink), sehingga edit_file lewat symlink file yang
   // menunjuk DI LUAR workspace BERHASIL MENULIS di luar sandbox (test keamanan
@@ -1553,7 +1651,7 @@ export async function runToolCall(call: ToolCall, deps: ToolDeps = {}): Promise<
     planMode: deps.planMode,
     yoloMode: deps.config ? !deps.config.approvalEnabled : false,
     scopeManager: deps.scopeAmendmentManager,
-    isInteractive: deps.confirm !== undefined,
+    isInteractive: (deps.subagentDepth ?? 0) === 0 && deps.confirm !== undefined,
     workspaceRoot: ws,
   });
 
@@ -1807,6 +1905,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       try {
         assertNotSecurityCore(file, ws);
         abs = resolveToolPath(file, ws);
+        assertPhysicalContainment(abs, ws);
         assertNotSecurityCore(abs, ws);
         rel = path.relative(ws, abs) || file;
       } catch (err) {
@@ -2249,6 +2348,8 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
             onLog: deps.onLog,
             signal: deps.signal,
             activityTray: deps.activityTray,
+            hostState: deps.hostState,
+            scopeAmendmentManager: deps.scopeAmendmentManager,
           },
           {
             planMode: deps.planMode,

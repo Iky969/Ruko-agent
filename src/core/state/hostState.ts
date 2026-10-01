@@ -197,6 +197,7 @@ export async function loadHostState(sessionId: string, opts: { resume?: boolean 
   if (opts.resume !== false && state.mode === 'act') {
     state.mode = 'plan';
     state.approvalScope = null;
+    await saveHostState(state);
   }
   return state;
 }

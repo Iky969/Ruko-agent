@@ -1,9 +1,9 @@
 import { constants as fsConstants, promises as fs, realpathSync } from 'node:fs';
 import { Buffer } from 'node:buffer';
 import * as path from 'node:path';
-import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isPathInsideWorkspace, isSensitivePath } from './tools.js';
+import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isPathInsideWorkspace, isSensitivePath, assertPhysicalContainment, SecurityBoundaryError } from './tools.js';
 
-export { assertNotSecurityCore, isSecurityCoreFile } from './tools.js';
+export { assertNotSecurityCore, isSecurityCoreFile, assertPhysicalContainment, SecurityBoundaryError } from './tools.js';
 
 /** Default number of lines a `read_file` call returns when not asked for. */
 export const DEFAULT_READ_LIMIT = 200;
@@ -127,6 +127,7 @@ export async function readFileTool(
   try {
     abs = path.resolve(cwd, filePath);
     assertInsideWorkspace(abs, cwd);
+    assertPhysicalContainment(abs, cwd);
     assertNotSensitivePath(filePath, cwd);
     assertNotSensitivePath(abs, cwd);
   } catch (err) {

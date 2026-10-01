@@ -51,8 +51,8 @@
 ---
 
 ## 3. Active Task / Next Focus
-- **Current Step:** Fase 1 Hardening (TC-LCK-01/02 v2 FileLock & TC-STA-01/02 State Corruption Fail-Closed) — SELESAI-nunggu review
-- **Action Item:** Menunggu review persetujuan TC-LCK-01/02 v2 & TC-STA-01/02; bersiap lanjut ke Fase 3 sisanya (F3-T1 Fasad SecurityPipeline Tunggal Fail-Closed & F3-T3 TrustedRoots).
+- **Current Step:** Subagent Scope Inheritance & P0 Remediation — [status: DISETUJUI]
+- **Action Item:** Push perubahan yang telah disetujui (P0-1, P0-2, P0-3, Subagent Scope Inheritance, .gitignore) ke branch remote `V2.0.0-dev-Unreleased`.
 
 ---
 
@@ -107,8 +107,75 @@
   - Sesudah: 1172 tests (1171 pass / 0 fail / 1 skip win32).
   - Delta: +4 test baru (1171 pass / 0 fail / 1 skip win32).
 - **Belum di-commit.**
-- **Next step:** Menunggu review persetujuan; lanjut ke Fase 3 sisanya (F3-T1 Fasad SecurityPipeline Tunggal Fail-Closed & F3-T3 TrustedRoots).
+## 10. P0-1: Security Pipeline Wiring & Anti-Phantom Security (`bootstrapSecurityPipeline`) [status: DISETUJUI]
+- **Objective:** Mengeliminasi "Phantom Security" (modul v2.0.0 FileLock, HostState, ScopeAmendmentManager, DispatcherGate hanya aktif di unit test dan 0% terhubung ke CLI nyata) dengan membangun fasad komposisi tunggal fail-closed `bootstrapSecurityPipeline()` yang mengikat seluruh guardrail ke `src/index.ts`, `src/agent/agent.ts`, dan `src/core/loop.ts`.
+- **Keputusan teknis penting + alasan:**
+  1. **Fasad F3-T1 `bootstrapSecurityPipeline()` (`src/core/securityPipeline.ts`)**: Komposisi root terpadu yang mengeksekusi urutan fail-closed: 1) Memperoleh FileLock eksklusif kernel pada state sesi, 2) Memuat HostState terisolasi (0600) di `~/.ruko/sessions/<sessionId>/state.json` dengan fail-safe reset ke Plan Mode saat resume, 3) Menginstansiasi `ScopeAmendmentManager`, 4) Mengekspos gerbang evaluasi `DispatcherGate`. Jika ada langkah yang gagal, lock dilepaskan seketika dan melempar error (fail-closed).
+  2. **Injeksi ke Agent & Loop (`src/agent/agent.ts` & `src/core/loop.ts`)**: `Agent` menerima setter `setHostState()` dan `setScopeAmendmentManager()`, menyinkronkan mode host state dengan planMode, dan menyuntikkan dependensi ini langsung ke `runToolCall`. `SystemLoop` menerima instance pipeline dan menjamin pelepasan lock pada `stop()`.
+  3. **Wiring CLI Entrypoint & Emergency Cleanup (`src/index.ts`)**: CLI interaktif memanggil `bootstrapSecurityPipeline()` saat inisialisasi. Jika gagal, proses berhenti seketika dengan `process.exit(1)` (menolak beroperasi tanpa proteksi). `emergencyCleanup` membebaskan lock jika terjadi uncaught crash sebelum terminal di-restore.
+  4. **Sinkronisasi Atomik Reset Mode saat Resume (`src/core/state/hostState.ts`)**: Memastikan perubahan mode kembali ke `'plan'` saat memuat sesi lama disimpan secara atomik ke disk (`await saveHostState(state)`).
+- **File yang dimodifikasi / dibuat:**
+  - `src/core/securityPipeline.ts` (baru) — Fasad terpadu `bootstrapSecurityPipeline` dan interface `SecurityPipeline`.
+  - `src/index.ts` — Wiring bootstrap pipeline, passing ke Agent dan SystemLoop, emergency cleanup lock release.
+  - `src/agent/agent.ts` — Integrasi `setHostState()`, `setScopeAmendmentManager()`, dan injeksi ke `runToolCall`.
+  - `src/core/loop.ts` — Menyimpan `sessionId`, pelepasan lock otomatis pada `stop()`.
+  - `src/core/state/hostState.ts` — Simpan atomik `saveHostState(state)` saat resume reset ke mode `'plan'`.
+  - `src/tests/security_pipeline_wiring.test.ts` (baru) — Suite uji regresi adversarial: verifikasi default plan mode, anti split-brain 2 proses, penolakan mutasi YOLO dalam plan mode, izin mutasi dalam scope approved ACT mode, pelepasan lock pada SystemLoop stop, dan fail-closed mutasi luar scope di lingkungan headless.
+- **Rekonsiliasi test (sebelum/sesudah/delta):**
+  - Sebelum: 1179 tests (1178 pass / 0 fail / 1 skip win32, 56 suites).
+  - Sesudah: 1185 tests (1184 pass / 0 fail / 1 skip win32, 57 suites).
+  - Delta: +6 test baru (1184 pass / 0 fail / 1 skip win32, 57 suites).
+- **Next step:** Eksekusi Item 2 P0: implementasi `assertPhysicalContainment()` dengan `realpathSync` walk-up ancestor di `writeWithDiff` dan `readFileTool` untuk menutup celah symlink direktori induk (CVSS 9.3).
 
 
+## 11. P0-2: Parent Directory Symlink Traversal Escape Remediation (`assertPhysicalContainment`) [status: DISETUJUI]
+- **Objective:** Menutup celah bypass sandbox CVSS 9.3 (CWE-59 / CWE-61) di mana `O_NOFOLLOW` POSIX hanya melindungi komponen akhir (basename) dan membiarkan direktori induk symlink (`./link_dir -> /etc`) melarikan diri ke direktori sensitif host pada operasi `writeWithDiff`, `readFileTool`, dan `delete_file`.
+- **Keputusan teknis penting + alasan:**
+  1. **Primitif Defensif `assertPhysicalContainment` (`src/agent/tools.ts`)**: Utilitas defensif walk-up ancestor traversal yang mengevaluasi apakah `targetPath` dan seluruh rantai direktori induknya (`path.dirname(absTarget)`) secara fisik berada di dalam direktori kerja kanonis (`canonicalWs = realpathSync(workspaceRoot)`).
+  2. **Walk-up Ancestor Traversal Fail-Closed**: Menelusuri seluruh rantai direktori induk hingga ke direktori terdekat yang eksis pada disk. Jika ditemukan komponen direktori yang merupakan symbolic link ke luar workspace atau direktori induk ter-resolve ke lokasi fisik di luar `canonicalWs`, melempar `SecurityBoundaryError` (`SECURITY_BOUNDARY_VIOLATION`) seketika. Menangani path non-existent bersarang (`symlink/sub1/sub2/file.txt`) tanpa logic bypass.
+  3. **Penyematan di Layer I/O Langsung**: Dipanggil secara konsisten di `resolveToolPath` (fondasi seluruh tool file di `tools.ts`), `writeWithDiff` (penulisan berkas), `delete_file` (penghapusan berkas), dan `readFileTool` di `src/agent/filetools.ts` (pembacaan berkas).
+- **File yang dimodifikasi / dibuat:**
+  - `src/agent/tools.ts` — Definisi `SecurityBoundaryError`, implementasi `assertPhysicalContainment()`, dan integrasi pada `resolveToolPath`, `writeWithDiff`, `delete_file`.
+  - `src/agent/filetools.ts` — Import dan ekspor `assertPhysicalContainment`, penyematan pada `readFileTool`.
+  - `src/tests/parent_symlink_escape.test.ts` (baru) — Suite uji regresi adversarial: lolos file normal, lolos file baru di subdirektori sah, tolak file non-existent dan existing di dalam parent symlink, tolak penulisan write_file tanpa menyentuh direktori luar, tolak readFileTool lewat parent symlink, tolak delete_file lewat parent symlink.
+- **Rekonsiliasi test (sebelum/sesudah/delta):**
+  - Sebelum: 1185 tests (1184 pass / 0 fail / 1 skip win32, 57 suites).
+  - Sesudah: 1191 tests (1190 pass / 0 fail / 1 skip win32, 58 suites).
+  - Delta: +6 test baru (1190 pass / 0 fail / 1 skip win32, 58 suites).
+- **Next step:** Eksekusi Item 3 P0: implementasi `DANGEROUS_WORKSPACE_ENV_VARS` denylist di `loadDotenv()` untuk memblokir `NODE_OPTIONS`, `LD_PRELOAD`, `HTTP_PROXY`, `*_BASE_URL`, dsb. dari `.env` repo asing.
+
+
+## 12. P0-3: Workspace Dotenv Denylist & RCE / SSRF Isolation (`DANGEROUS_WORKSPACE_ENV_VARS`) [status: DISETUJUI]
+- **Objective:** Menutup celah RCE dan pencurian kredensial CVSS 9.1 (ADIT.md §1.2, UCUP.md §1.2) di mana repositori pihak ketiga (untrusted repo) menyuntikkan variabel lingkungan berbahaya (`NODE_OPTIONS`, `LD_PRELOAD`, `DYLD_*`, `HTTP_PROXY`, `*_BASE_URL`) via berkas `.env` ke `process.env` global.
+- **Keputusan teknis penting + alasan:**
+  1. **Statuta Denylist `DANGEROUS_WORKSPACE_ENV_VARS` (`src/core/dotenv.ts`)**: Denylist statis mencakup variabel injeksi proses dan loader biner (`NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`, `NODE_V8_COVERAGE`, `NODE_PATH`, `NODE_DEBUG`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `PYTHONPATH`, `PERL5LIB`, `RUBYLIB`, `JAVA_TOOL_OPTIONS`), pembajakan proxy (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `SOCKS_PROXY`, `NO_PROXY`), dan hook eksekusi shell (`BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `CDPATH`, `IFS`, `BASH_RCFILE`, `ZDOTDIR`, `SHELL`).
+  2. **Pola Wildcard Dinamis (`isDangerousWorkspaceEnvVar`)**: Menolak mutlak seluruh variabel dengan awalan `DYLD_*` (menutup varian bypass macOS seperti `DYLD_FRAMEWORK_PATH`, `DYLD_FALLBACK_LIBRARY_PATH`), awalan `LD_*` (Linux loader injection), serta akhiran `*_BASE_URL` dan `*_API_BASE` (mencegah pembajakan endpoint LLM atau MCP registry ke server penyerang).
+  3. **Penyaringan Fail-Closed di `loadDotenv()`**: Variabel yang masuk dalam denylist ditolak mentah-mentah (diabaikan) dan TIDAK PERNAH masuk ke `process.env` atau hasil balik `safeLoaded`, bahkan ketika flag `override: true` diberikan. Variabel aplikasi sah (seperti `PORT`, `APP_ENV`) tetap dimuat normal.
+- **File yang dimodifikasi / dibuat:**
+  - `src/core/dotenv.ts` — Definisi `DANGEROUS_WORKSPACE_ENV_VARS`, implementasi `isDangerousWorkspaceEnvVar()`, dan sanitasi denylist pada `loadDotenv()`.
+  - `src/tests/dotenv_denylist.test.ts` (baru) — Suite uji regresi adversarial: deteksi variabel RCE/proxy/wildcard base URL/wildcard DYLD/LD, filtrasi loadDotenv pada payload berbahaya, perlindungan override: true.
+- **Rekonsiliasi test (sebelum/sesudah/delta):**
+  - Sebelum: 1191 tests (1190 pass / 0 fail / 1 skip win32, 58 suites).
+  - Sesudah: 1194 tests (1193 pass / 0 fail / 1 skip win32, 59 suites).
+  - Delta: +3 test baru di suite `dotenv_denylist.test.ts` (1193 pass / 0 fail / 1 skip win32, 59 suites).
+- **Next step:** Selesai; dilanjutkan ke Subagent Scope Inheritance (Section 13).
+
+
+## 13. Subagent Scope Inheritance & Confinement (`ScopeAmendmentManager` + `HostState`) [status: DISETUJUI]
+- **Objective:** Menutup celah bypass sandbox di mana subagent yang didelegasikan oleh parent agent berjalan dalam konteks unconfined (tanpa batas subtree) atau dapat memicu micro-prompt terminal untuk memperluas cakupan direktori di luar izin parent agent (ADIT.md §3.3, UCUP.md §3.3).
+- **Keputusan teknis penting + alasan:**
+  1. **Pewarisan Instansi `ScopeAmendmentManager` & `HostState` (`src/agent/subagent.ts`)**: `SubagentDeps` menerima `hostState` dan `scopeAmendmentManager` opsional dari parent agent. Pada `runSubagent`, dependensi ini diikat langsung ke instance `subAgent` via `subAgent.setHostState(deps.hostState)` dan `subAgent.setScopeAmendmentManager(deps.scopeAmendmentManager)`. Hal ini menjamin subagent berbagi batas subtree fisik yang sama persis dengan parent agent tanpa isolasi semu tanpa proteksi.
+  2. **Non-Interactive Confinement & Fail-Closed Hulu (`src/agent/tools.ts`)**: Pada `runToolCall`, `isInteractive` diset secara ketat: `(deps.subagentDepth ?? 0) === 0 && deps.confirm !== undefined`. Ketika `subagentDepth > 0`, subagent secara absolut beroperasi dalam mode non-interaktif. Jika subagent mencoba melakukan mutasi di luar subtree yang telah disetujui parent, `ScopeAmendmentManager.evaluateMutationTarget` mengembalikan `false` dan `DispatcherGate` seketika mengembalikan `SECURITY_DENIED: Target mutasi di luar scope yang diizinkan (...)` tanpa bisa memunculkan prompt interaktif `[Y/n]` untuk meloloskan diri.
+  3. **Penerusan Otomatis pada Tool `delegate` (`src/agent/tools.ts`)**: Handler tool `delegate` meneruskan `hostState: deps.hostState` dan `scopeAmendmentManager: deps.scopeAmendmentManager` ke pemanggilan `runSubagent`, memastikan pendelegasian multi-tier tetap terikat pada boundary keamanan hulu.
+  4. **Pewarisan Status Plan Mode**: Jika parent agent berada dalam Plan Mode (`hostState.mode === 'plan'`), subagent otomatis mewarisi mode tersebut dan ditolak dari segala bentuk mutasi file/shell.
+- **File yang dimodifikasi / dibuat:**
+  - `src/agent/subagent.ts` — Ekstensi `SubagentDeps` dan injeksi `hostState` serta `scopeAmendmentManager` ke subagent instance.
+  - `src/agent/tools.ts` — Non-interactive enforcement saat `subagentDepth > 0` di `runToolCall`, dan penerusan dependensi di tool `delegate`.
+  - `src/tests/subagent_scope_inheritance.test.ts` (baru) — Suite uji regresi adversarial: 1) Blokir mutasi subagent di luar subtree parent, 2) Izinkan mutasi subagent di dalam subtree parent, 3) Pewarisan Plan Mode memblokir seluruh mutasi subagent, 4) Pendelegasian tool `delegate` meneruskan boundary scope secara end-to-end.
+- **Rekonsiliasi test (sebelum/sesudah/delta):**
+  - Sebelum: 1194 tests (1193 pass / 0 fail / 1 skip win32, 59 suites).
+  - Sesudah: 1198 tests (1197 pass / 0 fail / 1 skip win32, 60 suites).
+  - Delta: +4 test baru di suite `subagent_scope_inheritance.test.ts` (1197 pass / 0 fail / 1 skip win32, 60 suites).
+- **Next step:** Push perubahan yang telah disetujui ke branch remote `V2.0.0-dev-Unreleased`.
 
 

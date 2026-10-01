@@ -39,6 +39,8 @@ import {
 import { getEnvProfile } from '../core/env.js';
 import { readMemorySafe } from '../core/memory.js';
 import { formatSkillsForPrompt, initDefaultSkills, loadSkillsContext, scanSkills } from '../core/skills.js';
+import type { HostState } from '../core/state/hostState.js';
+import type { ScopeAmendmentManager } from '../core/approval/scopeAmendment.js';
 
 /** Safety cap on how many tool iterations one instruction may trigger (default 30). */
 export const DEFAULT_MAX_TOOL_ITERATIONS = 30;
@@ -209,6 +211,30 @@ export class Agent {
     public readonly subagentDepth: number = 0,
   ) {
     this.confirm = confirm ?? null;
+  }
+
+  private hostState: HostState | null = null;
+  private scopeAmendmentManager: ScopeAmendmentManager | null = null;
+
+  /** Mengikat HostState v2.0.0 (dual-plane state kanonis di ~/.ruko/sessions/). */
+  setHostState(state: HostState | null): void {
+    this.hostState = state;
+    if (state) {
+      this.planMode = state.mode === 'plan';
+    }
+  }
+
+  getHostState(): HostState | null {
+    return this.hostState;
+  }
+
+  /** Mengikat ScopeAmendmentManager v2.0.0 (subtree auto-approval & circuit breaker). */
+  setScopeAmendmentManager(manager: ScopeAmendmentManager | null): void {
+    this.scopeAmendmentManager = manager;
+  }
+
+  getScopeAmendmentManager(): ScopeAmendmentManager | null {
+    return this.scopeAmendmentManager;
   }
 
   /** Replaces the approval prompt hook (wired by the loop once stdin is open). */
@@ -790,6 +816,8 @@ export class Agent {
               workspaceRoot: this.workspaceRoot,
               subagentDepth: this.subagentDepth,
               activityTray: this.activityTray,
+              hostState: this.hostState ?? undefined,
+              scopeAmendmentManager: this.scopeAmendmentManager ?? undefined,
             });
           } finally {
             const toolElapsedMs = Date.now() - toolStart;
