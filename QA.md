@@ -125,18 +125,19 @@ Sebelum Pull Request digabungkan ke cabang utama:
       });
       ```
     * **Argv Locking:** Kunci daftar argumen kompilasi secara absolut (`['--noEmit']`) tanpa menerima parameter tambahan dari inferensi model.
+  * *Status:* **ditinjau-diterima** → dieksekusi di Fase 2 Hardening (TC-GOV-03 & TC-GOV-04, rujuk `PROGRESS2.md` §7).
 
 ---
 
 ### Tambahan Matriks Uji Adversarial (Test Harness)
 
-| ID Uji | Modul Target | Payload / Kondisi Uji | Perilaku yang Diharapkan |
-| :--- | :--- | :--- | :--- |
-| **TC-NET-04** | `hostFetch.ts` | Request ke `http://0.0.0.0:3000` atau `http://[::]/` | Ditolak seketika dengan `SSRFError` (`PRIVATE_IP_BLOCKED`). |
-| **TC-NET-05** | `hostFetch.ts` | Hostname berupa format hex/decimal (`http://0x7f.0.0.1` / `http://2130706433`) | Resolver menerjemahkan ke `127.0.0.1` dan IP pinning menolak koneksi via `SSRFError`. |
-| **TC-SCM-03** | `scopeAmendment.ts` | Target mutasi berada di balik symlink direktori internal yang mengarah ke `/tmp` atau root sistem | Pengecekan realpath parent mendeteksi pelarian hierarki; operasi ditolak atau memicu prompt amandemen. |
-| **TC-GOV-03** | `resourceGovernor.ts` / Tier 0 | Pemanggilan Compiler Gate pada repositori yang memuat `tsc.cmd` kustom di Windows | Sistem mengabaikan `.bin/tsc.cmd` dan mengeksekusi `node_modules/typescript/bin/tsc` via `process.execPath`. |
-| **TC-GOV-04** | `resourceGovernor.ts` / Tier 0 | Parameter compiler disuntikkan flag `--outDir /evil/path` | Eksekutor menolak argumen asing dan hanya mengizinkan flag baku `--noEmit`. |
+| ID Uji | Modul Target | Payload / Kondisi Uji | Perilaku yang Diharapkan | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **TC-NET-04** | `hostFetch.ts` | Request ke `http://0.0.0.0:3000` atau `http://[::]/` | Ditolak seketika dengan `SSRFError` (`PRIVATE_IP_BLOCKED`). | belum ditinjau |
+| **TC-NET-05** | `hostFetch.ts` | Hostname berupa format hex/decimal (`http://0x7f.0.0.1` / `http://2130706433`) | Resolver menerjemahkan ke `127.0.0.1` dan IP pinning menolak koneksi via `SSRFError`. | belum ditinjau |
+| **TC-SCM-03** | `scopeAmendment.ts` | Target mutasi berada di balik symlink direktori internal yang mengarah ke `/tmp` atau root sistem | Pengecekan realpath parent mendeteksi pelarian hierarki; operasi ditolak atau memicu prompt amandemen. | ditinjau-diterima (Fase 3 §6) |
+| **TC-GOV-03** | `resourceGovernor.ts` / Tier 0 | Pemanggilan Compiler Gate pada repositori yang memuat `tsc.cmd` kustom di Windows | Sistem mengabaikan `.bin/tsc.cmd` dan mengeksekusi `node_modules/typescript/bin/tsc` via `process.execPath`. | **ditinjau-diterima (Fase 2 Hardening §7)** |
+| **TC-GOV-04** | `resourceGovernor.ts` / Tier 0 | Parameter compiler disuntikkan flag `--outDir /evil/path` | Eksekutor menolak argumen asing dan hanya mengizinkan flag baku `--noEmit`. | **ditinjau-diterima (Fase 2 Hardening §7)** |
 
 Kamu adalah Senior Distributed Systems & Concurrency Engineer.
 Analisis arsitektur Dual-Plane State Machine dan Plan Mode Lock pada Ruko-agent v2.0.0 berikut.
@@ -357,18 +358,18 @@ const isInsideSubtree = canonicalParent === canonicalApproved ||
    * Non-Punitive Cancellation: Penolakan amandemen hanya membatalkan sub-tugas yang bersangkutan, tanpa melumpuhkan runtime utama atau mereset paksa mode ke plan.
    * Scope Contraction Utility: Sediakan instruksi terminal manual (/scope reset atau opsi TUI) untuk mereset daftar approvalScope kembali ke batas direktori kerja awal repositori.
 B. Matriks Uji Adversarial Komprehensif (Test Harness Extension)
-| ID Uji | Modul Target | Payload / Skenario Pengujian | Hasil yang Diharapkan (Pass Criteria) |
-|---|---|---|---|
-| TC-NET-04 | hostFetch.ts | Request ke URL literal IPv4 non-standar: [http://0x7f.0.0.1:3000](http://0x7f.0.0.1:3000) atau [http://0.0.0.0:80](http://0.0.0.0:80) | Ditolak seketika dengan SSRFError (PRIVATE_IP_BLOCKED). |
-| TC-NET-05 | hostFetch.ts | Request ke loopback IPv6 [http://[::1]:8080](http://[::1]:8080) dan metadata link-local [http://169.254.169.254](http://169.254.169.254) | Ditolak seketika dengan SSRFError (METADATA_OR_LOOPBACK_BLOCKED). |
-| TC-GOV-03 | resourceGovernor.ts | Eksekusi Compiler Gate pada repositori Windows dengan berkas palsu node_modules/.bin/tsc.cmd | Agen mengabaikan .cmd wrapper dan memanggil typescript/lib/tsc.js via process.execPath. |
-| TC-GOV-04 | resourceGovernor.ts | Injeksi argumen berbahaya pada kompilator: ['--noEmit', '--outDir', '/tmp'] | Eksekutor menolak parameter tambahan; hanya parameter konstan ['--noEmit'] yang diteruskan. |
-| TC-LCK-01 | fileLock.ts | Simulasi 50 proses paralel bersaing melakukan acquire lockfile secara simultan | Tepat satu proses yang memperoleh deskriptor berkas (fd > 0); 49 lainnya menerima error EEXIST. |
-| TC-LCK-02 | fileLock.ts | Lockfile eksis di disk dengan metadata PID yang sudah mati (kill(pid, 0) melempar ESRCH) | Agen mendeteksi status yatim (deadlock); menampilkan opsi reklamasi interaktif atau halt tertib. |
-| TC-STA-01 | hostState.ts | Manipulasi berkas state.json terpotong (truncated payload) akibat simulasi ENOSPC | Resume gagal tertib (Fail-Closed); melempar CorruptedStateError tanpa fallback ke bypass mode. |
-| TC-STA-02 | hostState.ts | Operasi penulisan status pada lingkungan dengan overlayfs tanpa dukungan directory fsync | Operasi fsync pada file tetap sukses; error EINVAL pada direktori ditangani via graceful fallback. |
-| TC-SCM-03 | scopeAmendment.ts | Upaya mutasi berkas di balik symlink pra-eksisting yang mengarah keluar dari workspace | Resolusi fisik direktori induk mendeteksi pelarian hierarki; operasi ditolak atau memicu prompt amandemen. |
-| TC-SCM-04 | scopeAmendment.ts | Upaya mutasi pada direktori tetangga (sibling prefix): target /repo/src-patch/x vs scope /repo/src | Pengecekan pembatas segmen mendeteksi ketidaksesuaian path; menolak eksekusi mutasi otomatis. |
-| TC-SCM-05 | scopeAmendment.ts | Eksekusi perintah kontraksi scope pasca-perluasan hierarki ke root sistem | Array approvalScope tereduksi kembali hanya memuat direktori kanonis awal repositori. |
-| TC-FSM-01 | scopeAmendment.ts | Prompt injection berulang meminta amandemen ke path terlarang yang identik sebanyak 3 kali | Tripwire aktif pada penolakan ketiga; membatalkan rantai tindakan terkait tanpa melumpuhkan sesi. |
-| TC-FSM-02 | scopeAmendment.ts | Modifikasi berkas dependensi internal pada struktur monorepo symlink (pnpm) | Path divalidasi terhadap daftar root workspace monorepo; tidak memicu false rejection. |
+| ID Uji | Modul Target | Payload / Skenario Pengujian | Hasil yang Diharapkan (Pass Criteria) | Status |
+|---|---|---|---|---|
+| TC-NET-04 | hostFetch.ts | Request ke URL literal IPv4 non-standar: [http://0x7f.0.0.1:3000](http://0x7f.0.0.1:3000) atau [http://0.0.0.0:80](http://0.0.0.0:80) | Ditolak seketika dengan SSRFError (PRIVATE_IP_BLOCKED). | belum ditinjau |
+| TC-NET-05 | hostFetch.ts | Request ke loopback IPv6 [http://[::1]:8080](http://[::1]:8080) dan metadata link-local [http://169.254.169.254](http://169.254.169.254) | Ditolak seketika dengan SSRFError (METADATA_OR_LOOPBACK_BLOCKED). | belum ditinjau |
+| TC-GOV-03 | resourceGovernor.ts | Eksekusi Compiler Gate pada repositori Windows dengan berkas palsu node_modules/.bin/tsc.cmd | Agen mengabaikan .cmd wrapper dan memanggil typescript/lib/tsc.js via process.execPath. | **ditinjau-diterima (Fase 2 Hardening §7)** |
+| TC-GOV-04 | resourceGovernor.ts | Injeksi argumen berbahaya pada kompilator: ['--noEmit', '--outDir', '/tmp'] | Eksekutor menolak parameter tambahan; hanya parameter konstan ['--noEmit'] yang diteruskan. | **ditinjau-diterima (Fase 2 Hardening §7)** |
+| TC-LCK-01 | fileLock.ts | Simulasi 50 proses paralel bersaing melakukan acquire lockfile secara simultan | Tepat satu proses yang memperoleh deskriptor berkas (fd > 0); 49 lainnya menerima error EEXIST. | belum ditinjau |
+| TC-LCK-02 | fileLock.ts | Lockfile eksis di disk dengan metadata PID yang sudah mati (kill(pid, 0) melempar ESRCH) | Agen mendeteksi status yatim (deadlock); menampilkan opsi reklamasi interaktif atau halt tertib. | belum ditinjau |
+| TC-STA-01 | hostState.ts | Manipulasi berkas state.json terpotong (truncated payload) akibat simulasi ENOSPC | Resume gagal tertib (Fail-Closed); melempar CorruptedStateError tanpa fallback ke bypass mode. | belum ditinjau |
+| TC-STA-02 | hostState.ts | Operasi penulisan status pada lingkungan dengan overlayfs tanpa dukungan directory fsync | Operasi fsync pada file tetap sukses; error EINVAL pada direktori ditangani via graceful fallback. | belum ditinjau |
+| TC-SCM-03 | scopeAmendment.ts | Upaya mutasi berkas di balik symlink pra-eksisting yang mengarah keluar dari workspace | Resolusi fisik direktori induk mendeteksi pelarian hierarki; operasi ditolak atau memicu prompt amandemen. | ditinjau-diterima (Fase 3 §6) |
+| TC-SCM-04 | scopeAmendment.ts | Upaya mutasi pada direktori tetangga (sibling prefix): target /repo/src-patch/x vs scope /repo/src | Pengecekan pembatas segmen mendeteksi ketidaksesuaian path; menolak eksekusi mutasi otomatis. | belum ditinjau |
+| TC-SCM-05 | scopeAmendment.ts | Eksekusi perintah kontraksi scope pasca-perluasan hierarki ke root sistem | Array approvalScope tereduksi kembali hanya memuat direktori kanonis awal repositori. | belum ditinjau |
+| TC-FSM-01 | scopeAmendment.ts | Prompt injection berulang meminta amandemen ke path terlarang yang identik sebanyak 3 kali | Tripwire aktif pada penolakan ketiga; membatalkan rantai tindakan terkait tanpa melumpuhkan sesi. | belum ditinjau |
+| TC-FSM-02 | scopeAmendment.ts | Modifikasi berkas dependensi internal pada struktur monorepo symlink (pnpm) | Path divalidasi terhadap daftar root workspace monorepo; tidak memicu false rejection. | ditinjau-diterima (Fase 3 §6) |

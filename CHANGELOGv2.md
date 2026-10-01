@@ -25,6 +25,16 @@ Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tun
 - Subtree auto-approval dan terminal micro-prompt `[Y/n]` untuk amandemen scope dinamis.
 - Identifikasi repositori tepercaya berbasis Git Remote Origin kanonis dan UID kepemilikan.
 
+### [Fase 2 Hardening] Windows tsc.cmd Spoofing & Argv Locking — 2026-10-01
+- Bypass mutlak wrapper `.bin/tsc.cmd` di Windows dengan mengeksekusi biner JS compiler (`node_modules/typescript/bin/tsc`) langsung via `process.execPath`, serta penguncian ketat argumen kompilator hanya pada `['--noEmit']` (anti-injeksi `--outDir`).
+- File: `src/core/executor/resourceGovernor.ts`, `src/core/verification/tieredGate.ts`, `src/tests/fase2_resourceGovernor.test.ts`, `src/tests/fase2_tieredGate.test.ts`.
+- Delta test: 1157 (1156 pass / 0 fail / 1 skip) → 1164 (1163 pass / 0 fail / 1 skip win32) = +7.
+
+### [Fase 3] TC-SCM-03 Symlink Hardening — 2026-10-01
+- Validasi fisik `realpathSync` pada parent directory target dan allowedPaths untuk memblokir eksfiltrasi/mutasi via symlink pra-eksisting ke luar workspace, dengan walk-up ancestor dan pengecualian monorepo legit.
+- File: `src/core/approval/scopeAmendment.ts`, `src/tests/fase2_scopeAmendment.test.ts`, `src/tests/fase3_scopeAmendment_symlink.test.ts`.
+- Delta test: 1149 (1148 pass / 0 fail / 1 skip) → 1157 (1156 pass / 0 fail / 1 skip win32) = +8.
+
 ### [Fase 2] Disiplin AI, Scope Amendment & Verifikasi Mandiri — 2026-09-30
 - Implementasi gerbang dispatcher hulu anti-mutasi saat Plan Mode (kebal terhadap flag `/yolo`), `ScopeAmendmentManager` subtree auto-approve dengan micro-prompt terminal `[Y/n]` dan fail-closed non-TTY, `packageJsonGuard` anti-value injection & SemVer ReDoS guard, serta `TieredGate` verifikasi langsung biner `./node_modules/.bin/tsc` via `resourceGovernor` subproses terisolasi.
 - File: `src/core/dispatcher/dispatcherGate.ts`, `src/core/approval/scopeAmendment.ts`, `src/core/verification/packageJsonGuard.ts`, `src/core/executor/resourceGovernor.ts`, `src/core/verification/tieredGate.ts`, `src/agent/tools.ts` + 5 suite test `src/tests/fase2_*.test.ts`.

@@ -51,8 +51,8 @@
 ---
 
 ## 3. Active Task / Next Focus
-- **Current Step:** Fase 2 (Blueprint) — SELESAI-nunggu review
-- **Action Item:** Menunggu review persetujuan Fase 2; bersiap lanjut ke Fase 3 (Strangler Refactor Pipa Keamanan & Profil Monoton: F3-T1 Fasad SecurityPipeline Tunggal Fail-Closed).
+- **Current Step:** Fase 3 sisanya (F3-T1 Fasad SecurityPipeline Tunggal Fail-Closed & F3-T3 TrustedRoots) — BELUM MULAI
+- **Action Item:** Bersiap lanjut ke Fase 3 sisanya (F3-T1 Fasad SecurityPipeline Tunggal Fail-Closed & F3-T3 TrustedRoots).
 
 ---
 
@@ -61,18 +61,18 @@
 - **Next step:** Fase 2 — F2-T1 Dispatcher Gate Lock (detail keputusan teknis F1 dipindah ke `CHANGELOGv2.md`).
 
 
-## 5. Fase 2 — [status: SELESAI-nunggu review]
-- **Objective:** Disiplin AI, Scope Amendment & Verifikasi Mandiri (F2-T1 Dispatcher Gate Lock, F2-T2 ScopeAmendmentManager & micro-prompt terminal, F2-T3 packageJsonGuard anti-value injection & SemVer check, F2-T4 TieredGate & ResourceGovernor subprocess isolation).
-- **Keputusan teknis penting + alasan:**
-  1. Dispatcher Gate Lock (`src/core/dispatcher/dispatcherGate.ts` & `src/agent/tools.ts`): Memblokir seluruh mutasi disk dan eksekusi subprocess secara mekanis selama Plan Mode aktif; kebal terhadap flag `/yolo` (`approvalEnabled: false`) sesuai DoD #1.
-  2. Scope Amendment Manager (`src/core/approval/scopeAmendment.ts`): Menerapkan subtree auto-approval jika target berada di dalam subtree folder yang diizinkan (TC-SCM-01); fail-closed otomatis di lingkungan non-TTY/headless CI (TC-SCM-02); micro-prompt terminal `[Y/n]` interaktif dengan timeout 30s untuk mencegah proses hang; mismatch activePlanHash otomatis membatalkan izin (DoD #2); pembaruan allowedPaths dilindungi FileLock atomik.
-  3. Manifest & Dependency Guard (`src/core/verification/packageJsonGuard.ts`): Memblokir injeksi URL eksternal/Git (TC-PKG-01), modifikasi lifecycle scripts (TC-PKG-02), ReDoS pada string versi >64 karakter (TC-PKG-03), subpath imports hijacking (QA.md §1.5), dan prototype pollution.
-  4. Direct Binary Tier 0 Compiler Gate (`src/core/verification/tieredGate.ts` & `src/core/executor/resourceGovernor.ts`): Menolak modifikasi lockfile; mengeksekusi biner tsc langsung tanpa wrapper script npm; resource governor membersihkan NODE_OPTIONS, NODE_PATH, LD_PRELOAD (TC-GOV-02) dan menghentikan process tree saat timeout/overflow (TC-GOV-01).
-- **Rekonsiliasi test (sebelum/sesudah/delta):**
-  - Sebelum: 1118 tests (1117 pass / 0 fail / 1 skip win32).
-  - Sesudah: 1149 tests (1148 pass / 0 fail / 1 skip win32).
-  - Delta: +31 test adversarial baru (fase2_dispatcherGate, fase2_scopeAmendment, fase2_packageJsonGuard, fase2_resourceGovernor, fase2_tieredGate).
-- **Commit hash:**
-  - Kode fungsional: `5bca61b`
-  - Test suites: `dce22f1`
-- **Next step:** Fase 3 — F3-T1 Fasad SecurityPipeline Tunggal Fail-Closed & F3-T3 TrustedRoots.
+## 5. Fase 2 — [status: DISETUJUI]
+- **Ringkasan terarsip (aturan blueprint: fase disetujui diringkas 1 paragraf):** Fase 2 disetujui 100% — mengimplementasikan gerbang dispatcher hulu anti-mutasi saat Plan Mode (kebal flag `/yolo`), `ScopeAmendmentManager` subtree auto-approve dengan micro-prompt terminal `[Y/n]` dan fail-closed non-TTY, `packageJsonGuard` anti-value injection & SemVer ReDoS guard, serta `TieredGate` verifikasi biner tsc mandiri via `resourceGovernor` subproses terisolasi dengan pembersihan `NODE_OPTIONS`, `NODE_PATH`, `LD_PRELOAD`. Delta test: 1118 → 1149 (+31 test baru). Kode: commit `5bca61b`; test: commit `dce22f1`.
+- **Next step:** Fase 3 — Scope & Boundary Hardening.
+
+
+## 6. Fase 3 — TC-SCM-03 Symlink Hardening [status: DISETUJUI]
+- **Ringkasan terarsip (aturan blueprint: fase disetujui diringkas 1 paragraf):** Hardening `ScopeAmendmentManager` (QA.md §5, TC-SCM-03) dengan validasi fisik `fs.realpathSync` pada direktori induk target dan allowedPaths untuk memblokir mutasi via symlink pra-eksisting ke luar workspace. Dilengkapi walk-up ancestor untuk file baru serta pengecualian monorepo sah (`monorepoRoots`). Delta test: 1149 → 1157 (+8 test baru).
+- **Next step:** Fase 2 Hardening (TC-GOV-03 & TC-GOV-04) & Fase 3 sisanya.
+
+
+## 7. Fase 2 Hardening — TC-GOV-03 Windows tsc.cmd Spoofing & TC-GOV-04 Argv Locking [status: DISETUJUI]
+- **Ringkasan terarsip (aturan blueprint: fase disetujui diringkas 1 paragraf):** Hardening Direct Binary Tier 0 Compiler Gate (`resourceGovernor.ts` & `tieredGate.ts`) mem-bypass mutlak direktori `.bin/` (meniadakan celah eksekusi batch wrapper palsu `tsc.cmd` di Windows), mengeksekusi biner JS compiler asli (`node_modules/typescript/bin/tsc`) langsung via `process.execPath`, serta mengunci parameter baris perintah kompilator secara absolut ke `['--noEmit']` untuk menolak injeksi flag berbahaya seperti `--outDir` (TC-GOV-03 & TC-GOV-04). Delta test: 1157 → 1164 (+7 test baru).
+- **Next step:** Fase 3 sisanya — F3-T1 Fasad SecurityPipeline Tunggal Fail-Closed & F3-T3 TrustedRoots.
+
+
