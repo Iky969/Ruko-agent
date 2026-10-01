@@ -1,5 +1,5 @@
 /**
- * scopeAmendment.ts — F2-T2 + F3 TC-SCM-03 (Fase 2-3, Blueprint v2.0.0 §2.6)
+ * scopeAmendment.ts — F2-T2 + F3 TC-SCM-03 + TC-FSM-01 + TC-SCM-05 (Fase 2-3, Blueprint v2.0.0 §2.6)
  *
  * Kontrak Scope & Amandemen Terkendali:
  * Mengizinkan ekspansi otomatis pada subtree berkas yang sudah disetujui, dan
@@ -20,6 +20,12 @@
  *     directory target dan setiap entry allowedPaths untuk mendeteksi symlink
  *     escape. Fail-closed jika realpathSync gagal (dangling symlink dll).
  *     Pengecualian untuk symlink monorepo legit via monorepoRoots.
+ *  7. TC-FSM-01 Circuit Breaker: Lacak penolakan berturut-turut pada canonical
+ *     path yang SAMA (pakai realpath). Setelah 3x penolakan identik berturut-turut
+ *     pada path yang sama, trigger circuit-breaker: batalkan amandemen berikutnya
+ *     ke path itu untuk sisa sesi, non-punitif, beri pesan jelas.
+ *  8. TC-SCM-05 Scope Contraction: Method eksplisit untuk reset allowedPaths
+ *     ke konfigurasi awal sesi (tanpa perlu sesi baru).
  *
  * ZERO dependency — hanya `node:*`.
  */
@@ -106,7 +112,51 @@ export class ScopeAmendmentManager {
     private state: HostState,
     private workspaceRoot: string,
     private options: ScopeAmendmentOptions = {},
-  ) {}
+  ) {
+    // TC-FSM-01: Track consecutive rejections per canonical path
+    this.consecutiveRejections = new Map<string, number>();
+    // Store initial allowedPaths for scope contraction (TC-SCM-05)
+    this.initialAllowedPaths = this.state.approvalScope?.allowedPaths.slice() ?? [];
+  }
+
+  private consecutiveRejections: Map<string, number>;
+  private initialAllowedPaths: string[];
+
+  /**
+   * Get canonical path for circuit breaker tracking (TC-FSM-01).
+   * Uses realpathSync to ensure consistent tracking regardless of symlinks.
+   */
+  private getCanonicalPathForTracking(targetPath: string): string | null {
+    const absTarget = path.resolve(this.workspaceRoot, targetPath);
+    const parentDir = path.dirname(absTarget);
+    let canonicalParent = safeRealpathSync(parentDir);
+    if (canonicalParent === null) {
+      // Walk up to find nearest resolvable ancestor
+      let current = parentDir;
+      const segments: string[] = [];
+      while (current !== path.dirname(current)) {
+        try {
+          const stat = fsSync.lstatSync(current);
+          if (stat.isSymbolicLink()) {
+            return null; // dangling symlink
+          }
+        } catch {
+          // ENOENT - continue walking up
+        }
+        segments.unshift(path.basename(current));
+        current = path.dirname(current);
+        const resolved = safeRealpathSync(current);
+        if (resolved !== null) {
+          canonicalParent = path.join(resolved, ...segments);
+          break;
+        }
+      }
+      if (canonicalParent === null) return null;
+    }
+    // Return canonical parent + target basename for path-specific tracking
+    const targetBasename = path.basename(absTarget);
+    return path.join(canonicalParent, targetBasename);
+  }
 
   private isWithinSubtree(target: string, parentSubtree: string): boolean {
     const normTarget = normalizeCasePath(path.resolve(this.workspaceRoot, target));
@@ -258,6 +308,24 @@ export class ScopeAmendmentManager {
       return true;
     }
 
+    // TC-FSM-01: Circuit Breaker check before prompting
+    // Track by canonical path to be consistent with TC-SCM-03 symlink hardening
+    const canonicalPath = this.getCanonicalPathForTracking(targetPath);
+    if (canonicalPath !== null) {
+      const rejectionCount = this.consecutiveRejections.get(canonicalPath) ?? 0;
+      if (rejectionCount >= 3) {
+        // Circuit breaker triggered: block further amendment requests to this path
+        // Non-punitif: return false without prompt, clear message to user/log
+        if (this.options.output && typeof this.options.output.write === 'function') {
+          this.options.output.write(
+            `\n[Ruko] Circuit breaker aktif: amandemen scope ke path yang sama ('${targetPath}') telah ditolak 3x berturut-turut. ` +
+            `Permintaan selanjutnya ke path ini diblokir untuk sisa sesi ini.\n`,
+          );
+        }
+        return false;
+      }
+    }
+
     // 3. Target baru di luar subtree membutuhkan otorisasi eksplisit pengembang.
     // Fail-Closed di lingkungan headless/CI tanpa TTY (QA.md §1.7)
     const effectiveTTY = this.options.isTTY ?? (Boolean(process.stdin.isTTY) && process.env.CI !== 'true');
@@ -294,6 +362,19 @@ export class ScopeAmendmentManager {
       rl.close();
     }
 
+    // TC-FSM-01: Track rejection/approval
+    if (canonicalPath !== null) {
+      if (confirmed) {
+        // On approval: reset counter for THIS path, and also reset all OTHER paths
+        // since user approved a different path (breaks consecutive chain)
+        this.consecutiveRejections.clear();
+      } else {
+        // On rejection: increment counter for this canonical path
+        const newCount = (this.consecutiveRejections.get(canonicalPath) ?? 0) + 1;
+        this.consecutiveRejections.set(canonicalPath, newCount);
+      }
+    }
+
     if (!confirmed) {
       return false;
     }
@@ -319,6 +400,60 @@ export class ScopeAmendmentManager {
     } finally {
       await release();
     }
+  }
+
+  /**
+   * TC-SCM-05: Scope Contraction Utility
+   * Reset allowedPaths kembali ke konfigurasi awal sesi (initial state).
+   * Dipanggil manual oleh user (command eksplisit) atau otomatis pasca-circuit-breaker.
+   */
+  async contractScope(): Promise<boolean> {
+    if (!this.state.approvalScope) return false;
+
+    const hostDir = process.env.RUKO_HOST_STATE_DIR
+      ? path.resolve(process.env.RUKO_HOST_STATE_DIR)
+      : path.join(os.homedir(), '.ruko', 'sessions');
+    const stateFile = path.join(hostDir, this.state.sessionId, 'state.json');
+    const lock = new FileLock(stateFile);
+    const release = await lock.acquire();
+    try {
+      const freshState = await loadHostState(this.state.sessionId, { resume: false });
+      if (!freshState.approvalScope) {
+        return false;
+      }
+      // Reset to initial allowedPaths
+      freshState.approvalScope.allowedPaths = this.initialAllowedPaths.slice();
+      await saveHostState(freshState);
+      this.state = freshState;
+      // Also clear circuit breaker state
+      this.consecutiveRejections.clear();
+      return true;
+    } finally {
+      await release();
+    }
+  }
+
+  /**
+   * Get current circuit breaker status for a path (for testing/debugging)
+   */
+  getCircuitBreakerStatus(targetPath: string): { canonicalPath: string | null; rejectionCount: number; isBlocked: boolean } {
+    const canonicalPath = this.getCanonicalPathForTracking(targetPath);
+    if (canonicalPath === null) {
+      return { canonicalPath: null, rejectionCount: 0, isBlocked: false };
+    }
+    const rejectionCount = this.consecutiveRejections.get(canonicalPath) ?? 0;
+    return {
+      canonicalPath,
+      rejectionCount,
+      isBlocked: rejectionCount >= 3,
+    };
+  }
+
+  /**
+   * Get initial allowedPaths snapshot (for testing)
+   */
+  getInitialAllowedPaths(): string[] {
+    return this.initialAllowedPaths.slice();
   }
 
   getState(): HostState {

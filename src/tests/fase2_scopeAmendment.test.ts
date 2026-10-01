@@ -200,3 +200,271 @@ describe('F2-T2 Scope Amendment Manager', () => {
     assert.equal(h1, hReordered, 'Urutan input allowedPaths harus dinormalisasi');
   });
 });
+
+describe('TC-FSM-01 Circuit Breaker: Consecutive Identical Rejections', () => {
+  test('TC-FSM-01: Circuit breaker trigger tepat di percobaan ke-3 pada path identik', async () => {
+    createHostDir();
+    const ws = createWorkspace();
+    const state = createMockHostState('sess-fsm-01', ['src/core']);
+    await saveHostState(state);
+
+    const inStream = Readable.from(['n\n', 'n\n', 'n\n']); // 3x rejection
+    let outputBuffer = '';
+    const outStream = new Writable({
+      write(chunk, _enc, cb) {
+        outputBuffer += chunk.toString();
+        cb();
+      },
+    });
+
+    const manager = new ScopeAmendmentManager(state, ws, {
+      input: inStream,
+      output: outStream,
+      isTTY: true,
+      promptTimeoutMs: 5000,
+    });
+
+    // 1st rejection
+    const r1 = await manager.evaluateMutationTarget('src/secrets.env', 'akses env', true);
+    assert.equal(r1, false, '1st rejection should return false');
+
+    // 2nd rejection
+    const r2 = await manager.evaluateMutationTarget('src/secrets.env', 'akses env lagi', true);
+    assert.equal(r2, false, '2nd rejection should return false');
+
+    // 3rd rejection - circuit breaker should trigger
+    const r3 = await manager.evaluateMutationTarget('src/secrets.env', 'akses env sekali lagi', true);
+    assert.equal(r3, false, '3rd rejection should return false');
+
+    // 4th attempt - should be blocked by circuit breaker WITHOUT prompting
+    const r4 = await manager.evaluateMutationTarget('src/secrets.env', 'masih coba akses', true);
+    assert.equal(r4, false, '4th attempt should be blocked by circuit breaker');
+    assert.ok(outputBuffer.includes('Circuit breaker aktif'), 'Should show circuit breaker message');
+  });
+
+  test('TC-FSM-01: Circuit breaker TIDAK trigger kalau penolakan di path berbeda (bukan konsekutif identik)', async () => {
+    createHostDir();
+    const ws = createWorkspace();
+    const state = createMockHostState('sess-fsm-02', ['src/core']);
+    await saveHostState(state);
+
+    const inStream = Readable.from(['n\n', 'n\n', 'n\n']); // rejections on different paths
+    const outStream = new Writable({
+      write(chunk, _enc, cb) { cb(); },
+    });
+
+    const manager = new ScopeAmendmentManager(state, ws, {
+      input: inStream,
+      output: outStream,
+      isTTY: true,
+      promptTimeoutMs: 5000,
+    });
+
+    // Reject 3 different paths - should NOT trigger circuit breaker on any
+    const r1 = await manager.evaluateMutationTarget('src/secrets.env', 'akses env', true);
+    assert.equal(r1, false);
+
+    const r2 = await manager.evaluateMutationTarget('src/config.json', 'akses config', true);
+    assert.equal(r2, false);
+
+    const r3 = await manager.evaluateMutationTarget('src/private.key', 'akses key', true);
+    assert.equal(r3, false);
+
+    // 4th attempt on a NEW path should still prompt (not blocked)
+    // We can't easily test prompt here since stream is consumed, but verify internal counter
+    const status1 = manager.getCircuitBreakerStatus('src/secrets.env');
+    const status2 = manager.getCircuitBreakerStatus('src/config.json');
+    const status3 = manager.getCircuitBreakerStatus('src/private.key');
+
+    assert.equal(status1.rejectionCount, 1, 'Path 1 should have 1 rejection');
+    assert.equal(status2.rejectionCount, 1, 'Path 2 should have 1 rejection');
+    assert.equal(status3.rejectionCount, 1, 'Path 3 should have 1 rejection');
+    assert.equal(status1.isBlocked, false, 'Path 1 should not be blocked');
+    assert.equal(status2.isBlocked, false, 'Path 2 should not be blocked');
+    assert.equal(status3.isBlocked, false, 'Path 3 should not be blocked');
+  });
+
+  test('TC-FSM-01: Counter reset saat user APPROVE permintaan ke path lain di antaranya', async () => {
+    createHostDir();
+    const ws = createWorkspace();
+    const state = createMockHostState('sess-fsm-03', ['src/core']);
+    await saveHostState(state);
+
+    // Use PassThrough stream - we can write answers before each call
+    const { PassThrough } = await import('node:stream');
+    const input = new PassThrough();
+    const outStream = new Writable({ write(chunk, _enc, cb) { cb(); } });
+
+    const manager = new ScopeAmendmentManager(state, ws, {
+      input,
+      output: outStream,
+      isTTY: true,
+      promptTimeoutMs: 5000,
+    });
+
+    // Helper to write answer and call evaluateMutationTarget
+    const callWithAnswer = async (answer: string, target: string, reason: string) => {
+      input.write(answer + '\n');
+      return manager.evaluateMutationTarget(target, reason, true);
+    };
+
+    const r1 = await callWithAnswer('n', 'src/secrets.env', 'akses env');
+    assert.equal(r1, false);
+
+    const r2 = await callWithAnswer('n', 'src/secrets.env', 'akses env lagi');
+    assert.equal(r2, false);
+
+    // Approve a DIFFERENT path - this should reset the consecutive counter for path A
+    const r3 = await callWithAnswer('y', 'src/config.json', 'akses config');
+    assert.equal(r3, true, 'Approval on different path should succeed');
+
+    // Now reject path A again - should be 1st rejection in new chain
+    const r4 = await callWithAnswer('n', 'src/secrets.env', 'akses env sekali lagi');
+    assert.equal(r4, false, 'Should still prompt (not blocked)');
+
+    // Check status - path A should only have 1 rejection now (counter reset by approval on B)
+    const statusA = manager.getCircuitBreakerStatus('src/secrets.env');
+    assert.equal(statusA.rejectionCount, 1, 'Counter for path A should reset after approval on path B');
+    assert.equal(statusA.isBlocked, false, 'Path A should not be blocked');
+  });
+
+  test('TC-FSM-01: Setelah breaker trigger, permintaan lanjutan ke path sama ditolak otomatis tanpa prompt', async () => {
+    createHostDir();
+    const ws = createWorkspace();
+    const state = createMockHostState('sess-fsm-04', ['src/core']);
+    await saveHostState(state);
+
+    // Use separate input for each call to track if prompt was shown
+    let promptCount = 0;
+    const createInput = () => Readable.from(['n\n']); // fresh stream each call
+    const outStream = new Writable({
+      write(chunk, _enc, cb) { cb(); },
+    });
+
+    const manager = new ScopeAmendmentManager(state, ws, {
+      isTTY: true,
+      promptTimeoutMs: 5000,
+    });
+
+    // We need to simulate the prompt being shown - use getCircuitBreakerStatus
+    // to verify internal state instead of mocking prompt
+
+    // 3 rejections
+    await manager.evaluateMutationTarget('src/private.key', 'akses key', true);
+    await manager.evaluateMutationTarget('src/private.key', 'akses key lagi', true);
+    await manager.evaluateMutationTarget('src/private.key', 'akses key sekali lagi', true);
+
+    // 4th attempt should be blocked
+    const blocked = await manager.evaluateMutationTarget('src/private.key', 'masih coba', false);
+    assert.equal(blocked, false, 'Should be blocked without prompt');
+
+    // Verify circuit breaker status
+    const status = manager.getCircuitBreakerStatus('src/private.key');
+    assert.equal(status.rejectionCount, 3, 'Should have 3 rejections');
+    assert.equal(status.isBlocked, true, 'Should be blocked');
+  });
+});
+
+describe('TC-SCM-05 Scope Contraction Utility', () => {
+  test('TC-SCM-05: Scope contraction utility reset allowedPaths ke initial state', async () => {
+    createHostDir();
+    const ws = createWorkspace();
+    const initialPaths = ['src/core', 'docs'];
+    const state = createMockHostState('sess-scm-05', initialPaths);
+    await saveHostState(state);
+
+    const manager = new ScopeAmendmentManager(state, ws, { isTTY: false });
+
+    // Verify initial state
+    const initial = manager.getInitialAllowedPaths();
+    assert.deepEqual(initial, ['src/core', 'docs'], 'Initial paths should match');
+
+    // Simulate some approvals adding new paths (by directly modifying state)
+    state.approvalScope!.allowedPaths.push('src/new_module.ts', 'scripts/deploy.sh');
+    await saveHostState(state);
+
+    // Verify expansion happened
+    const expanded = manager.getState().approvalScope!.allowedPaths;
+    assert.ok(expanded.includes('src/new_module.ts'), 'Should have expanded paths');
+    assert.ok(expanded.includes('scripts/deploy.sh'), 'Should have expanded paths');
+
+    // Now contract scope
+    const contracted = await manager.contractScope();
+    assert.equal(contracted, true, 'Contract should succeed');
+
+    // Verify reset to initial
+    const afterContract = manager.getState().approvalScope!.allowedPaths;
+    assert.deepEqual(afterContract.sort(), ['src/core', 'docs'].sort(), 'Should reset to initial paths');
+    assert.equal(afterContract.includes('src/new_module.ts'), false, 'Expanded paths should be removed');
+    assert.equal(afterContract.includes('scripts/deploy.sh'), false, 'Expanded paths should be removed');
+  });
+
+  test('TC-SCM-05: Contract scope juga clear circuit breaker state', async () => {
+    createHostDir();
+    const ws = createWorkspace();
+    const state = createMockHostState('sess-scm-06', ['src/core']);
+    await saveHostState(state);
+
+    const inStream = Readable.from(['n\n', 'n\n', 'n\n']);
+    const outStream = new Writable({ write(chunk, _enc, cb) { cb(); } });
+
+    const manager = new ScopeAmendmentManager(state, ws, {
+      input: inStream,
+      output: outStream,
+      isTTY: true,
+      promptTimeoutMs: 5000,
+    });
+
+    // Trigger circuit breaker on a path
+    await manager.evaluateMutationTarget('src/secrets.env', 'akses env', true);
+    await manager.evaluateMutationTarget('src/secrets.env', 'akses env lagi', true);
+    await manager.evaluateMutationTarget('src/secrets.env', 'akses env sekali lagi', true);
+
+    // Verify circuit breaker is active
+    let status = manager.getCircuitBreakerStatus('src/secrets.env');
+    assert.equal(status.isBlocked, true, 'Circuit breaker should be active');
+
+    // Contract scope
+    await manager.contractScope();
+
+    // Circuit breaker should be cleared
+    status = manager.getCircuitBreakerStatus('src/secrets.env');
+    assert.equal(status.rejectionCount, 0, 'Rejection count should be cleared');
+    assert.equal(status.isBlocked, false, 'Circuit breaker should be cleared');
+  });
+
+  test('TC-SCM-05: Regresi - alur approval normal (approve/reject biasa) tetap bekerja', async () => {
+    createHostDir();
+    const ws = createWorkspace();
+    const state = createMockHostState('sess-scm-07', ['src/core']);
+    await saveHostState(state);
+
+    // Test normal approve
+    const inApprove = Readable.from(['y\n']);
+    const outApprove = new Writable({ write(chunk, _enc, cb) { cb(); } });
+    const manager1 = new ScopeAmendmentManager(state, ws, {
+      input: inApprove,
+      output: outApprove,
+      isTTY: true,
+      promptTimeoutMs: 5000,
+    });
+
+    const approved = await manager1.evaluateMutationTarget('src/new_feature.ts', 'fitur baru', true);
+    assert.equal(approved, true, 'Normal approve should work');
+    assert.ok(manager1.getState().approvalScope?.allowedPaths.includes('src/new_feature.ts'));
+
+    // Test normal reject
+    const inReject = Readable.from(['n\n']);
+    const outReject = new Writable({ write(chunk, _enc, cb) { cb(); } });
+    const manager2 = new ScopeAmendmentManager(state, ws, {
+      input: inReject,
+      output: outReject,
+      isTTY: true,
+      promptTimeoutMs: 5000,
+    });
+
+    const rejected = await manager2.evaluateMutationTarget('src/another.ts', 'fitur lain', true);
+    assert.equal(rejected, false, 'Normal reject should work');
+    assert.equal(manager2.getState().approvalScope?.allowedPaths.includes('src/another.ts'), false);
+  });
+});

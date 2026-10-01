@@ -25,6 +25,20 @@ Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tun
 - Subtree auto-approval dan terminal micro-prompt `[Y/n]` untuk amandemen scope dinamis.
 - Identifikasi repositori tepercaya berbasis Git Remote Origin kanonis dan UID kepemilikan.
 
+### [req.md Fixes] Stabilisasi Eksekusi Model & Token Safety — 2026-10-01
+- **UI Streaming Buffer (Fase V):** `RevealFilter` menampung potongan token saat `{` terdeteksi hingga JSON tool call tervalidasi/timeout, mencegah kebocoran payload mentah `{"tool":"write_file",...}` ke terminal sebelum badge aksi dirender.
+- **Active Loop Intervention (Fase II):** Loop detector menyuntikkan *synthetic tool result* eksplisit saat deteksi ulang: soft warning → "Dilarang membaca ulang berkas/printf, segera jalankan patch_file", hard stop → `[detesi loop] — eksekusi dihentikan, berikan respons akhir`.
+- **Context Sanitization/Rollback (Fase IV):** Middleware `maybeRollbackContext` mendeteksi token collapse (spam Mandarin, ChatML leak, repetisi ekstrem) dan rollback otomatis pesan asisten gagal dari history setelah 2 turn gagal berturut-turut.
+- **Bash Scope Restriction (Blueprint §2.7):** System prompt `TOOL_RULES` dibatasi: `exec` hanya untuk kompilasi (tsc, cargo build), test runner (npm test, pytest), dan git — operasi file baca/tulis wajib lewat tool resmi.
+- File: `src/core/ui.ts` (RevealFilter), `src/agent/agent.ts` (loop guard, rollback, detectTokenCollapse), `src/agent/roles.ts` (TOOL_RULES).
+- Delta test: 1164 (1163 pass / 0 fail / 1 skip) → 1171 (1170 pass / 0 fail / 1 skip) = +7.
+
+### [TC-FSM-01 & TC-SCM-05] Circuit Breaker Anti-DoS & Scope Contraction — 2026-10-01
+- **TC-FSM-01 Circuit Breaker:** Lacak penolakan berturut-turut per canonical path (pakai `realpathSync` konsisten dengan TC-SCM-03). Trigger pada 3x penolakan identik berturut-turut → blokir amandemen berikutnya ke path itu untuk sisa sesi (non-punitif, pesan jelas). Counter reset saat user approve path LAIN di antaranya.
+- **TC-SCM-05 Scope Contraction:** Method `contractScope()` reset `allowedPaths` ke snapshot awal sesi (tanpa sesi baru), clear circuit breaker state. Dipanggil manual (command eksplisit) atau otomatis pasca-breaker.
+- File: `src/core/approval/scopeAmendment.ts`, `src/tests/fase2_scopeAmendment.test.ts`.
+- Delta test: 1171 (1170 pass / 0 fail / 1 skip) → 1178 (1177 pass / 0 fail / 1 skip) = +7.
+
 ### [Fase 1 Hardening] TC-STA-01 & TC-STA-02 Corrupted State Fail-Closed & Directory Fsync — 2026-10-01
 - Eliminasi reset state diam-diam saat parsing berkas state gagal akibat crash atau simulasi ENOSPC; melempar `CorruptedStateError` eksplisit halt secara fail-closed (TC-STA-01). Ditambahkan best-effort directory fsync pada POSIX dengan graceful fallback EINVAL untuk lingkungan OverlayFS/WSL (TC-STA-02).
 - File: `src/core/state/hostState.ts`, `src/tests/fase1_hostState.test.ts`.
