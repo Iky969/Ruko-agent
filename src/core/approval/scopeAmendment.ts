@@ -1,5 +1,5 @@
 /**
- * scopeAmendment.ts — F2-T2 (Fase 2, Blueprint v2.0.0 §2.6)
+ * scopeAmendment.ts — F2-T2 + F3 TC-SCM-03 (Fase 2-3, Blueprint v2.0.0 §2.6)
  *
  * Kontrak Scope & Amandemen Terkendali:
  * Mengizinkan ekspansi otomatis pada subtree berkas yang sudah disetujui, dan
@@ -16,12 +16,17 @@
  *     TTY interaktif, amandemen otomatis ditolak tanpa menggantung sesi.
  *  4. Interactive Timeout 30 detik untuk sesi lokal agar tidak menggantung.
  *  5. Perlindungan atomic FileLock saat memperbarui host state di ~/.ruko/sessions/.
+ *  6. TC-SCM-03 Symlink Hardening: Resolusi fisik (realpathSync) pada parent
+ *     directory target dan setiap entry allowedPaths untuk mendeteksi symlink
+ *     escape. Fail-closed jika realpathSync gagal (dangling symlink dll).
+ *     Pengecualian untuk symlink monorepo legit via monorepoRoots.
  *
  * ZERO dependency — hanya `node:*`.
  */
 
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import * as fsSync from 'node:fs';
 import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { HostState, saveHostState, loadHostState } from '../state/hostState.js';
@@ -33,6 +38,13 @@ export interface ScopeAmendmentOptions {
   output?: NodeJS.WritableStream;
   isTTY?: boolean;
   promptTimeoutMs?: number;
+  /**
+   * TC-SCM-03: Daftar root monorepo yang diizinkan sebagai pengecualian
+   * symlink traversal. Symlink yang secara fisik mengarah ke salah satu
+   * root monorepo ini (atau subfoldernya) dianggap legit dan tidak ditolak.
+   * Contoh: ['/repo/packages', '/repo/node_modules/.pnpm']
+   */
+  monorepoRoots?: string[];
 }
 
 export function normalizeCasePath(p: string): string {
@@ -58,6 +70,37 @@ export function computePlanHash(plan: any, allowedPaths: string[], workspaceRoot
   return crypto.createHash('sha256').update(canonicalize(payload)).digest('hex');
 }
 
+/**
+ * Mencoba resolusi fisik (realpath) sebuah path secara sinkron.
+ * Mengembalikan null jika gagal (ENOENT / dangling symlink / izin dll).
+ * Fail-closed: pemanggil wajib menolak akses jika hasilnya null.
+ */
+function safeRealpathSync(p: string): string | null {
+  try {
+    return fsSync.realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * TC-SCM-03: Memeriksa apakah `canonicalParent` berada di dalam salah satu
+ * monorepo root yang terdaftar. Digunakan sebagai pengecualian untuk symlink
+ * internal monorepo yang legit (pnpm store, npm workspace, dll).
+ */
+function isInsideMonorepoRoot(canonicalParent: string, monorepoRoots: string[]): boolean {
+  for (const root of monorepoRoots) {
+    const canonicalRoot = safeRealpathSync(root);
+    if (!canonicalRoot) continue;
+    const normParent = normalizeCasePath(canonicalParent);
+    const normRoot = normalizeCasePath(canonicalRoot);
+    if (normParent === normRoot || normParent.startsWith(normRoot + path.sep)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export class ScopeAmendmentManager {
   constructor(
     private state: HostState,
@@ -69,6 +112,115 @@ export class ScopeAmendmentManager {
     const normTarget = normalizeCasePath(path.resolve(this.workspaceRoot, target));
     const normParent = normalizeCasePath(path.resolve(this.workspaceRoot, parentSubtree));
     return normTarget === normParent || normTarget.startsWith(normParent + path.sep);
+  }
+
+  /**
+   * TC-SCM-03: Validasi fisik realpath pada parent directory target terhadap
+   * setiap entry allowedPaths. Mendeteksi symlink yang secara visual berada
+   * di subtree yang disetujui tetapi secara fisik mengarah ke luar workspace.
+   *
+   * Fail-closed: Jika realpathSync gagal pada parent target ATAU pada semua
+   * entry allowedPaths, mutasi otomatis ditolak.
+   *
+   * Pengecualian: Symlink monorepo legit (pnpm store, npm workspace)
+   * diizinkan jika path fisik berada di dalam salah satu monorepoRoots.
+   */
+  private isPhysicallyContained(targetPath: string): boolean {
+    // Resolve target absolut, lalu ambil parent directory-nya
+    const absTarget = path.resolve(this.workspaceRoot, targetPath);
+    const parentDir = path.dirname(absTarget);
+
+    // Resolve canonical parent via realpathSync.
+    // Jika parent belum ada (ENOENT normal — file/dir baru), walk up ke
+    // ancestor terdekat yang eksis. Jika komponen yang gagal adalah symlink
+    // (dangling), tetap fail-closed.
+    let canonicalParent = safeRealpathSync(parentDir);
+    if (canonicalParent === null) {
+      // Walk up: cari ancestor terdekat yang bisa di-resolve
+      let current = parentDir;
+      const segments: string[] = [];
+      while (current !== path.dirname(current)) {
+        // Cek apakah current path yang gagal adalah symlink (dangling)
+        try {
+          const stat = fsSync.lstatSync(current);
+          if (stat.isSymbolicLink()) {
+            // Ini dangling symlink — fail-closed
+            return false;
+          }
+        } catch {
+          // lstatSync juga gagal (ENOENT) — belum ada, naik ke parent
+        }
+        segments.unshift(path.basename(current));
+        current = path.dirname(current);
+        const resolved = safeRealpathSync(current);
+        if (resolved !== null) {
+          // Ditemukan ancestor yang bisa di-resolve.
+          // Canonical parent = ancestor fisik + sisa segments (yang belum ada)
+          canonicalParent = path.join(resolved, ...segments);
+          break;
+        }
+      }
+      if (canonicalParent === null) {
+        // Tidak ada ancestor yang bisa di-resolve — fail-closed
+        return false;
+      }
+    }
+
+    // Resolve canonical workspace root
+    const canonicalRoot = safeRealpathSync(this.workspaceRoot);
+    if (canonicalRoot === null) {
+      return false;
+    }
+
+    // Verifikasi bahwa canonical parent masih di dalam workspace root fisik
+    const normParent = normalizeCasePath(canonicalParent);
+    const normRoot = normalizeCasePath(canonicalRoot);
+    if (normParent !== normRoot && !normParent.startsWith(normRoot + path.sep)) {
+      // Parent fisik keluar dari workspace root — cek pengecualian monorepo
+      const monorepoRoots = this.options.monorepoRoots ?? [];
+      if (monorepoRoots.length > 0 && isInsideMonorepoRoot(canonicalParent, monorepoRoots)) {
+        return true;
+      }
+      return false;
+    }
+
+    // Verifikasi bahwa canonical parent ATAU canonical target berada di dalam
+    // canonical form dari setidaknya satu entry allowedPaths.
+    // Kita perlu memeriksa keduanya karena:
+    //  - Untuk file target (misal src/core/main.ts): parent (src/core) harus di dalam allowed
+    //  - Untuk target yang = allowed path itu sendiri (misal src/core): target sendiri yang cocok
+    if (!this.state.approvalScope) return false;
+
+    // Resolve canonical target — bisa jadi target sendiri belum ada (file baru),
+    // jadi ini opsional (null = file belum ada, periksa parent saja).
+    const canonicalTarget = safeRealpathSync(absTarget);
+
+    for (const allowed of this.state.approvalScope.allowedPaths) {
+      const absAllowed = path.resolve(this.workspaceRoot, allowed);
+      const canonicalAllowed = safeRealpathSync(absAllowed);
+      // Jika allowedPath sendiri tidak bisa di-resolve, skip entry ini
+      // (fail-closed per entry, coba entry lainnya)
+      if (canonicalAllowed === null) continue;
+
+      const normAllowed = normalizeCasePath(canonicalAllowed);
+
+      // Cek 1: Parent target berada di dalam atau sama dengan allowedPath
+      if (normParent === normAllowed || normParent.startsWith(normAllowed + path.sep)) {
+        return true;
+      }
+
+      // Cek 2: Target sendiri berada di dalam atau sama dengan allowedPath
+      // (menangani kasus target = direktori yang disetujui sendiri)
+      if (canonicalTarget !== null) {
+        const normTarget = normalizeCasePath(canonicalTarget);
+        if (normTarget === normAllowed || normTarget.startsWith(normAllowed + path.sep)) {
+          return true;
+        }
+      }
+    }
+
+    // Tidak ada entry allowedPaths yang secara fisik mengandung parent/target
+    return false;
   }
 
   async evaluateMutationTarget(targetPath: string, reason: string, isInteractive: boolean): Promise<boolean> {
@@ -93,6 +245,16 @@ export class ScopeAmendmentManager {
       this.isWithinSubtree(targetPath, allowed),
     );
     if (inSubtree) {
+      // 2b. TC-SCM-03 — Symlink Hardening: Verifikasi fisik realpath
+      // Meskipun secara visual target berada di subtree yang disetujui,
+      // resolusi fisik parent directory wajib juga berada di dalam subtree.
+      // Ini mendeteksi symlink pra-eksisting yang mengarah ke /tmp, root, dll.
+      if (!this.isPhysicallyContained(targetPath)) {
+        // Symlink escape terdeteksi — tolak mutasi (fail-closed).
+        // TIDAK memunculkan prompt; ini bukan amandemen scope biasa,
+        // ini adalah upaya pelarian hierarki.
+        return false;
+      }
       return true;
     }
 

@@ -1,25 +1,24 @@
 /**
- * tieredGate.ts — F2-T4 (Fase 2, Blueprint v2.0.0 §2.12)
+ * tieredGate.ts — F2-T4 (Fase 2, Blueprint v2.0.0 §2.12 / QA.md §1.9)
  *
  * Verifikasi Kompilator Mandiri (Direct Binary Tier 0 Compiler Gate):
- * Mengeksekusi kompilator TypeScript (./node_modules/.bin/tsc) langsung tanpa
- * wrapper skrip manifest package.json untuk mencegah pemalsuan kode keluar
- * (exit-code spoofing).
+ * Mengeksekusi kompilator TypeScript (node_modules/typescript/bin/tsc) langsung via
+ * process.execPath tanpa wrapper skrip .bin/tsc.cmd atau manifest package.json
+ * untuk mencegah pemalsuan kode keluar (exit-code spoofing) dan eksekusi batch
+ * wrapper palsu di Windows (TC-GOV-03, TC-GOV-04).
  *
- * Invarian (PROGRESS2.md / Blueprint §2.12):
- *  1. Direct Binary Execution: Menggunakan spawnIsolated langsung pada biner tsc.
+ * Invarian (PROGRESS2.md / Blueprint §2.12 / QA.md §1.9):
+ *  1. Direct Binary Execution: Menggunakan process.execPath langsung menjalankan
+ *     file JavaScript compiler asli di node_modules/typescript (anti-tsc.cmd spoofing).
  *  2. Lockfile Protection: Modifikasi lockfile (package-lock, pnpm, yarn) wajib
  *     ditolak dan memerlukan review manual.
  *  3. Tier 0 Typecheck: Menjalankan typecheck fail-closed sebelum kode disetujui.
+ *  4. Argv Locking: Parameter kompilator dikunci secara absolut ke ['--noEmit'].
  *
  * ZERO dependency — hanya `node:*`.
  */
 
-import { spawnIsolated } from '../executor/resourceGovernor.js';
-import * as path from 'node:path';
-import * as fs from 'node:fs';
-
-const IS_WIN = process.platform === 'win32';
+import { runCompilerGate } from '../executor/resourceGovernor.js';
 
 export interface TieredGateResult {
   allowed: boolean;
@@ -32,28 +31,9 @@ export class TieredGate {
     private workspaceRoot: string,
   ) {}
 
-  private resolveTscBinary(): string {
-    const localBin = path.resolve(this.workspaceRoot, 'node_modules', '.bin', IS_WIN ? 'tsc.cmd' : 'tsc');
-    if (fs.existsSync(localBin)) {
-      return localBin;
-    }
-    const localBinNoExt = path.resolve(this.workspaceRoot, 'node_modules', '.bin', 'tsc');
-    if (fs.existsSync(localBinNoExt)) {
-      return localBinNoExt;
-    }
-    // Fallback ke tsc sistem jika ada
-    return IS_WIN ? 'tsc.cmd' : 'tsc';
-  }
-
-  async runTier0(): Promise<boolean> {
-    const tscBin = this.resolveTscBinary();
+  async runTier0(customArgs?: string[]): Promise<boolean> {
     try {
-      const result = await spawnIsolated(
-        tscBin,
-        ['--noEmit', '--skipLibCheck', 'true'],
-        this.workspaceRoot,
-        { timeoutMs: 45_000 },
-      );
+      const result = await runCompilerGate(this.workspaceRoot, customArgs, { timeoutMs: 45_000 });
       return result.exitCode === 0;
     } catch {
       return false;

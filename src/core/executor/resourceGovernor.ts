@@ -13,12 +13,16 @@
  *     saat timeout atau overflow (TC-GOV-01).
  *  4. Streaming Byte Counter: Memutus stream seketika bila total output
  *     melebihi batas tanpa memory spike.
+ *  5. Windows Compiler Gate Anti-Spoofing & Argv Locking: Mengabaikan .bin/tsc.cmd,
+ *     mengeksekusi JS compiler langsung via process.execPath, dan mengunci argv ke ['--noEmit']
+ *     (TC-GOV-03, TC-GOV-04).
  *
  * ZERO dependency — hanya `node:*`.
  */
 
 import { spawn, execSync } from 'node:child_process';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 
 const IS_WIN = process.platform === 'win32';
 
@@ -190,3 +194,107 @@ export function spawnIsolated(
     });
   });
 }
+
+export const SAFE_COMPILER_ARGS: readonly string[] = Object.freeze(['--noEmit']);
+
+/**
+ * Memvalidasi dan menyaring argumen baris perintah kompilator (TC-GOV-04).
+ * Menolak seluruh parameter tambahan atau berbahaya (seperti --outDir, --outFile, dsb.)
+ * dan mengunci parameter secara absolut hanya pada flag aman ['--noEmit'].
+ */
+export function sanitizeCompilerArgs(rawArgs?: string[]): string[] {
+  if (!rawArgs || !Array.isArray(rawArgs) || rawArgs.length === 0) {
+    return [...SAFE_COMPILER_ARGS];
+  }
+  const filtered = rawArgs.filter((arg) => SAFE_COMPILER_ARGS.includes(arg));
+  return filtered.length > 0 ? filtered : [...SAFE_COMPILER_ARGS];
+}
+
+/**
+ * Menyelesaikan path entrypoint JavaScript TypeScript secara aman (TC-GOV-03).
+ * Mem-bypass direktori `.bin/` (seperti `tsc.cmd` pada Windows) untuk mencegah eksekusi
+ * wrapper batch / skrip arbitrer berbahaya dari repositori pihak ketiga.
+ */
+export function resolveTscJsPath(workspaceRoot: string): string | null {
+  // 1. Cek langsung node_modules/typescript/bin/tsc di workspace
+  const directBin = path.join(workspaceRoot, 'node_modules', 'typescript', 'bin', 'tsc');
+  if (fs.existsSync(directBin)) return directBin;
+
+  // 2. Cek langsung node_modules/typescript/lib/tsc.js di workspace
+  const directLib = path.join(workspaceRoot, 'node_modules', 'typescript', 'lib', 'tsc.js');
+  if (fs.existsSync(directLib)) return directLib;
+
+  // 3. Walk-up ke ancestor directories (untuk monorepo / workspace bertingkat)
+  let currentDir = workspaceRoot;
+  while (true) {
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir) break;
+    currentDir = parentDir;
+
+    const parentBin = path.join(currentDir, 'node_modules', 'typescript', 'bin', 'tsc');
+    if (fs.existsSync(parentBin)) return parentBin;
+
+    const parentLib = path.join(currentDir, 'node_modules', 'typescript', 'lib', 'tsc.js');
+    if (fs.existsSync(parentLib)) return parentLib;
+  }
+
+  // 4. Fallback ke Node module resolution jika terpasang di path resolusi global/induk
+  try {
+    return require.resolve('typescript/bin/tsc', { paths: [workspaceRoot] });
+  } catch {}
+
+  try {
+    return require.resolve('typescript/lib/tsc.js', { paths: [workspaceRoot] });
+  } catch {}
+
+  return null;
+}
+
+export interface CompilerGateOptions {
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+}
+
+export interface CompilerGateResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  executedBin: string;
+  executedArgs: string[];
+}
+
+/**
+ * Menjalankan Compiler Gate (Tier 0 verification) secara aman (TC-GOV-03, TC-GOV-04).
+ * - Mengeksekusi process.execPath (Node.js) langsung terhadap file JS kompilator
+ * - Mengabaikan berkas batch wrapper .bin/tsc.cmd di Windows
+ * - Mengunci argumen kompilasi hanya ke flag aman ['--noEmit']
+ */
+export async function runCompilerGate(
+  workspaceRoot: string,
+  userArgs?: string[],
+  options: CompilerGateOptions = {},
+): Promise<CompilerGateResult> {
+  const tscJsPath = resolveTscJsPath(workspaceRoot);
+  if (!tscJsPath) {
+    throw new Error(
+      'COMPILER_NOT_FOUND: Biner JavaScript TypeScript tidak ditemukan di node_modules/typescript. Eksekusi wrapper .bin/ diblokir demi keamanan (anti-spoofing).',
+    );
+  }
+
+  const sanitizedArgs = sanitizeCompilerArgs(userArgs);
+  const spawnArgs = [tscJsPath, ...sanitizedArgs];
+
+  const limits: Partial<ResourceLimits> = {
+    timeoutMs: options.timeoutMs ?? 45_000,
+    maxOutputBytes: options.maxOutputBytes,
+  };
+
+  const spawnResult = await spawnIsolated(process.execPath, spawnArgs, workspaceRoot, limits);
+
+  return {
+    ...spawnResult,
+    executedBin: process.execPath,
+    executedArgs: sanitizedArgs,
+  };
+}
+
