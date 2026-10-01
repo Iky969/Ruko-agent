@@ -10,7 +10,7 @@
  *  - Fungsi hash plan kanonis computePlanHash
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
@@ -72,6 +72,11 @@ describe('F2-T2 Scope Amendment Manager', () => {
   test('TC-SCM-01: Perubahan di dalam subfolder yang disetujui (Subtree Auto-Approve) langsung diizinkan', async () => {
     createHostDir();
     const ws = createWorkspace();
+
+    // Buat struktur direktori riil (TC-SCM-03 memerlukan resolusi fisik realpathSync)
+    mkdirSync(join(ws, 'src', 'core', 'utils'), { recursive: true });
+    mkdirSync(join(ws, 'docs', 'guide'), { recursive: true });
+
     const state = createMockHostState('sess-scm-01', ['src/core', 'docs']);
     await saveHostState(state);
 
