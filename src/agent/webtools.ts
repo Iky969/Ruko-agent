@@ -617,7 +617,7 @@ export function pinnedHttpFetch(
         ...options.headers,
       },
       // Native IP Pinning: connect socket directly to pre-verified safe IP without DNS query
-      lookup: (_hostname, lookupOpts, cb) => {
+      lookup: (_hostname: any, lookupOpts: any, cb: any) => {
         const callback = typeof lookupOpts === 'function' ? lookupOpts : cb;
         const opts = typeof lookupOpts === 'object' && lookupOpts !== null ? lookupOpts : {};
         if (opts.all) {

@@ -5,6 +5,8 @@ import { AgentConfig } from '../types.js';
 import { LLMProvider } from './llm.js';
 import { Confirmer, decodePathSafely } from '../core/approval.js';
 import { listSnapshots } from '../core/undo.js';
+import type { HostState } from '../core/state/hostState.js';
+import type { ScopeAmendmentManager } from '../core/approval/scopeAmendment.js';
 
 /**
  * Subagent delegation runner (Roadmap #3).
@@ -37,6 +39,10 @@ export interface SubagentDeps {
   signal?: AbortSignal;
   /** Parent's live activity tray (feedback §4) — inherited, never replaced. */
   activityTray?: ActivityTray;
+  /** v2.0.0: Scope inheritance - parent's authoritative HostState */
+  hostState?: HostState | null;
+  /** v2.0.0: Scope inheritance - parent's ScopeAmendmentManager instance */
+  scopeAmendmentManager?: ScopeAmendmentManager | null;
 }
 
 /**
@@ -91,6 +97,13 @@ export async function runSubagent(
   );
   if (options.planMode) {
     subAgent.planMode = true;
+  }
+  // Scope inheritance: subagent inherits HostState & ScopeAmendmentManager from parent
+  if (deps.hostState) {
+    subAgent.setHostState(deps.hostState);
+  }
+  if (deps.scopeAmendmentManager) {
+    subAgent.setScopeAmendmentManager(deps.scopeAmendmentManager);
   }
   // Feedback §4: the subagent's running tools show up in the PARENT's tray,
   // so delegation is visible live instead of silently occupying the terminal.

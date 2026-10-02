@@ -1972,7 +1972,10 @@ function malformedPrefixHold(text: string): number {
  * the sink while hiding tool blocks:
  *   - ```tool ... ```
  *   - <|DSML|... / <｜DSML｜... / <|DSML||calls>... / <｜｜DSML｜｜ calls>...
- *   - <tool_call>...</tool_call>
+ *   - 
+ *
+ * Also buffers potential JSON tool calls (starting with `{`) to prevent
+ * raw JSON leaking to terminal before the badge renders (req.md Fase V).
  */
 export class RevealFilter {
   private buffer = '';
@@ -1985,6 +1988,10 @@ export class RevealFilter {
     | 'tool_tag'
     | null = null;
   private skipNextNewline = false;
+  /** Buffer for potential JSON tool call detection (req.md Fase V). */
+  private jsonBuffer = '';
+  /** Whether we're currently buffering a potential JSON tool call. */
+  private inJsonBuffer = false;
 
   constructor(private readonly sink: (text: string) => void) {}
 
@@ -1995,6 +2002,20 @@ export class RevealFilter {
 
   /** Flush any pending visible text once the stream has ended. */
   end(): void {
+    // Flush any buffered JSON tool call
+    if (this.inJsonBuffer && this.jsonBuffer) {
+      try {
+        const parsed = JSON.parse(this.jsonBuffer);
+        if (!(parsed && typeof parsed === 'object' && typeof parsed.tool === 'string' && parsed.tool.length > 0)) {
+          this.sink(this.jsonBuffer);
+        }
+      } catch {
+        this.sink(this.jsonBuffer);
+      }
+      this.inJsonBuffer = false;
+      this.jsonBuffer = '';
+    }
+
     if (!this.hiddenType && this.buffer) {
       if (!/[<＜]\s*[^\s>]+\s+[^>]*?\b(?:name|tool|query|path|command|action)\s*=/i.test(this.buffer)) {
         this.sink(this.buffer);
@@ -2006,6 +2027,67 @@ export class RevealFilter {
   }
 
   private drain(): void {
+    // Buffer potential JSON tool calls to prevent raw JSON leaking (req.md Fase V)
+    if (!this.hiddenType && !this.inJsonBuffer) {
+      const openBraceIdx = this.buffer.indexOf('{');
+      if (openBraceIdx !== -1) {
+        // Check if there's a potential JSON tool call starting
+        const beforeBrace = this.buffer.slice(0, openBraceIdx);
+        // Only buffer if not inside markdown code block or other tool syntax
+        if (!beforeBrace.includes('```') && !beforeBrace.includes('<tool') && !beforeBrace.includes('<invoke')) {
+          this.inJsonBuffer = true;
+          this.jsonBuffer = this.buffer.slice(openBraceIdx);
+          // Emit content before the potential JSON
+          if (openBraceIdx > 0) {
+            this.sink(beforeBrace);
+          }
+          this.buffer = '';
+        }
+      }
+    }
+
+    // If we're buffering a potential JSON tool call, accumulate and validate
+    if (this.inJsonBuffer) {
+      if (this.buffer) {
+        this.jsonBuffer += this.buffer;
+        this.buffer = '';
+      }
+
+      // Fast lookahead rollback: if it doesn't look like a tool call after 32 chars, flush immediately
+      if (this.jsonBuffer.length > 32 && !/["'](?:tool|action|name|query|command|path)["']\s*:/i.test(this.jsonBuffer)) {
+        this.sink(this.jsonBuffer);
+        this.inJsonBuffer = false;
+        this.jsonBuffer = '';
+      } else {
+        // Try to parse as JSON to check if it's a complete tool call
+        try {
+          const parsed = JSON.parse(this.jsonBuffer);
+          if (parsed && typeof parsed === 'object' && typeof (parsed.tool || parsed.action || parsed.name) === 'string' && (parsed.tool || parsed.action || parsed.name).length > 0) {
+            // Valid JSON tool call detected - don't emit, it'll be handled by badge
+            this.inJsonBuffer = false;
+            this.jsonBuffer = '';
+            return;
+          }
+          // Valid JSON but not a tool call - emit it
+          this.sink(this.jsonBuffer);
+          this.inJsonBuffer = false;
+          this.jsonBuffer = '';
+        } catch {
+          // Incomplete JSON - cap at 4096 chars if it looks like tool, or 256 chars otherwise
+          const maxCap = /["'](?:tool|action|name|query|command|path)["']\s*:/i.test(this.jsonBuffer) ? 4096 : 256;
+          if (this.jsonBuffer.length > maxCap) {
+            // Too large, probably not a tool call - emit buffered content
+            this.sink(this.jsonBuffer);
+            this.inJsonBuffer = false;
+            this.jsonBuffer = '';
+          } else {
+            // Otherwise keep buffering
+            return;
+          }
+        }
+      }
+    }
+
     if (this.skipNextNewline) {
       if (this.buffer.startsWith('\r\n')) {
         this.buffer = this.buffer.slice(2);

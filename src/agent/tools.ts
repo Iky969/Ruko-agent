@@ -10,6 +10,9 @@ import { codeSearchTool, globTool, listDirTool, readFileTool } from './filetools
 import { appendMemory } from '../core/memory.js';
 import { deleteSkill, listSkills, readSkill, saveSkill } from '../core/skills.js';
 import { searchSessions } from '../core/session.js';
+import { evaluateDispatcherGate } from '../core/dispatcher/dispatcherGate.js';
+import type { HostState } from '../core/state/hostState.js';
+import type { ScopeAmendmentManager } from '../core/approval/scopeAmendment.js';
 import { runSubagent } from './subagent.js';
 import { webFetchTool } from './webtools.js';
 import { defaultProcessManager } from './processManager.js';
@@ -389,6 +392,10 @@ export interface ToolDeps {
    * spawning a second, invisible one.
    */
   activityTray?: ActivityTray;
+  /** v2.0.0: Authoritative HostState from ~/.ruko/sessions/ */
+  hostState?: HostState | null;
+  /** v2.0.0: ScopeAmendmentManager instance for evaluating mutation scope */
+  scopeAmendmentManager?: ScopeAmendmentManager | null;
 }
 
 /** Tools refused while plan mode is active (read_file stays available). */
@@ -483,6 +490,105 @@ export function assertInsideWorkspace(abs: string, workspaceRoot: string = getWo
       throw err;
     }
   }
+}
+
+export class SecurityBoundaryError extends Error {
+  readonly code = 'SECURITY_BOUNDARY_VIOLATION';
+  constructor(message: string) {
+    super(message);
+    this.name = 'SecurityBoundaryError';
+  }
+}
+
+/**
+ * Memvalidasi bahwa targetPath beserta seluruh rantai direktori induknya
+ * secara fisik berada di dalam batas workspaceRoot kanonis (anti-symlink traversal).
+ * CVSS 9.3 — Menutup celah parent directory symlink escape (CWE-59 / CWE-61).
+ */
+export function assertPhysicalContainment(targetPath: string, workspaceRoot: string = getWorkspaceRoot()): string {
+  const stripPrefix = (p: string): string => (p.startsWith('\\\\?\\') ? p.slice(4) : p);
+  let canonicalWs: string;
+  try {
+    canonicalWs = stripPrefix(realpathSync(path.resolve(workspaceRoot)));
+  } catch {
+    canonicalWs = stripPrefix(path.resolve(workspaceRoot));
+  }
+
+  const absTarget = path.isAbsolute(targetPath)
+    ? path.resolve(targetPath)
+    : path.resolve(workspaceRoot, targetPath);
+
+  const isInside = (childPath: string, parentPath: string): boolean => {
+    const c = stripPrefix(childPath);
+    const p = stripPrefix(parentPath);
+    const normChild = process.platform === 'win32' ? c.toLowerCase() : c;
+    const normParent = process.platform === 'win32' ? p.toLowerCase() : p;
+    if (normChild === normParent) return true;
+    const rel = path.relative(normParent, normChild);
+    return !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
+
+  // 1. Cek target file itu sendiri jika sudah eksis
+  try {
+    const targetLst = lstatSync(absTarget);
+    if (targetLst.isSymbolicLink()) {
+      let realTarget: string;
+      try {
+        realTarget = stripPrefix(realpathSync(absTarget));
+      } catch {
+        const target = readlinkSync(absTarget);
+        realTarget = stripPrefix(path.isAbsolute(target) ? path.resolve(target) : path.resolve(path.dirname(absTarget), target));
+      }
+      if (!isInside(realTarget, canonicalWs)) {
+        throw new SecurityBoundaryError(
+          `Akses ditolak: target '${targetPath}' adalah symbolic link yang mengarah ke luar workspace ('${realTarget}').`
+        );
+      }
+    } else {
+      const realTarget = stripPrefix(realpathSync(absTarget));
+      if (!isInside(realTarget, canonicalWs)) {
+        throw new SecurityBoundaryError(
+          `Akses ditolak: target '${targetPath}' secara fisik berada di luar direktori kerja sah ('${realTarget}').`
+        );
+      }
+    }
+  } catch (err: any) {
+    if (err instanceof SecurityBoundaryError) throw err;
+    if (err?.code !== 'ENOENT') throw err;
+  }
+
+  // 2. Walk-up ancestor traversal: Cek seluruh rantai direktori induk
+  let current = path.dirname(absTarget);
+  while (current && current !== path.dirname(current)) {
+    try {
+      const lst = lstatSync(current);
+      if (lst.isSymbolicLink()) {
+        const real = stripPrefix(realpathSync(current));
+        if (!isInside(real, canonicalWs)) {
+          throw new SecurityBoundaryError(
+            `Akses ditolak: direktori '${current}' adalah symbolic link yang mengarah ke luar workspace ('${real}').`
+          );
+        }
+      }
+      // Direktori eksis ditemukan, verifikasi resolusi kanonis seluruh rantai
+      const canonicalParent = stripPrefix(realpathSync(current));
+      if (!isInside(canonicalParent, canonicalWs)) {
+        throw new SecurityBoundaryError(
+          `Akses ditolak: direktori induk '${current}' berakar di luar direktori kerja sah ('${canonicalParent}').`
+        );
+      }
+      break;
+    } catch (err: any) {
+      if (err instanceof SecurityBoundaryError) throw err;
+      if (err?.code === 'ENOENT') {
+        current = path.dirname(current);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  return absTarget;
 }
 
 /**
@@ -792,6 +898,7 @@ function resolveToolPath(p: string, workspaceRoot: string = getWorkspaceRoot()):
   const cwd = path.resolve(workspaceRoot);
   const abs = path.resolve(cwd, p);
   assertInsideWorkspace(abs, cwd);
+  assertPhysicalContainment(abs, cwd);
   assertNotSensitivePath(abs, cwd);
   return abs;
 }
@@ -805,6 +912,7 @@ async function writeWithDiff(
   workspaceRoot: string = getWorkspaceRoot(),
   toolName: string = 'edit_file',
 ): Promise<string> {
+  assertPhysicalContainment(abs, workspaceRoot);
   // PERBAIKAN (Windows — temuan CI): O_NOFOLLOW DIABAIKAN libuv di Windows
   // (open tetap mengikuti symlink), sehingga edit_file lewat symlink file yang
   // menunjuk DI LUAR workspace BERHASIL MENULIS di luar sandbox (test keamanan
@@ -1538,14 +1646,22 @@ export function resolveExecTimeout(call: Record<string, any>, fallbackMs: number
 
 /** Executes a parsed tool call; the result is char-capped before re-entering context. */
 export async function runToolCall(call: ToolCall, deps: ToolDeps = {}): Promise<string> {
-  // §6: plan mode is a CODE guarantee, not a prompt request.
-  if (deps.planMode && PLAN_MODE_BLOCKED.has(call.tool)) {
-    return capToolResult(
-      JSON.stringify({
-        error: `plan mode aktif: tool "${call.tool}" diblok (hanya baca yang boleh). Matikan dengan /plan off setelah rencana disetujui.`,
-      }),
-    );
+  const ws = deps.workspaceRoot ?? getWorkspaceRoot();
+  const decision = await evaluateDispatcherGate({
+    tool: call.tool,
+    args: call,
+    hostState: deps.hostState,
+    planMode: deps.planMode,
+    yoloMode: deps.config ? !deps.config.approvalEnabled : false,
+    scopeManager: deps.scopeAmendmentManager,
+    isInteractive: (deps.subagentDepth ?? 0) === 0 && deps.confirm !== undefined,
+    workspaceRoot: ws,
+  });
+
+  if (!decision.allowed) {
+    return capToolResult(JSON.stringify({ error: decision.reason }));
   }
+
   return capToolResult(await runToolCallRaw(call, deps));
 }
 
@@ -1792,6 +1908,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       try {
         assertNotSecurityCore(file, ws);
         abs = resolveToolPath(file, ws);
+        assertPhysicalContainment(abs, ws);
         assertNotSecurityCore(abs, ws);
         rel = path.relative(ws, abs) || file;
       } catch (err) {
@@ -2234,6 +2351,8 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
             onLog: deps.onLog,
             signal: deps.signal,
             activityTray: deps.activityTray,
+            hostState: deps.hostState,
+            scopeAmendmentManager: deps.scopeAmendmentManager,
           },
           {
             planMode: deps.planMode,

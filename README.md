@@ -1,10 +1,10 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-1.9.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-1063%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-1217%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-Linux%20%7C%20Windows%20%7C%20macOS-blue.svg)](.github/workflows/ci.yml)
 [![Security](https://img.shields.io/badge/security-CodeQL%20%7C%20Secret%20Scanning%20%7C%20Dependabot-success.svg)](.github/SECURITY.md)
@@ -19,7 +19,7 @@ cd /proyek-anda
 ruko
 ```
 
-> Installer mem-pin tag release immutable `v1.9.0`, build dari source, memasang `ruko` global, dan otomatis mem-backup instalasi lama. Windows & Jupyter/Colab: lihat bagian [Instalasi per Platform](#-instalasi--memulai-cepat).
+> Installer mem-pin tag release immutable `v2.0.0`, build dari source, memasang `ruko` global, dan otomatis mem-backup instalasi lama. Windows & Jupyter/Colab: lihat bagian [Instalasi per Platform](#-instalasi--memulai-cepat).
 
 ---
 
@@ -68,7 +68,7 @@ Opsi lanjutan (supply-chain strict mode):
 
 ```bash
 # Tag versi lain
-RUKO_VERSION=v1.9.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh)"
+RUKO_VERSION=v2.0.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh)"
 # Pin commit SHA spesifik
 RUKO_COMMIT_SHA=<sha> bash -c "$(curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh)"
 ```
@@ -408,7 +408,6 @@ MIT License — lihat [LICENSE](LICENSE)
 
 - **Security Policy**: [.github/SECURITY.md](.github/SECURITY.md) — Secret Scanning enabled, Push Protection enabled, Dependabot enabled, CodeQL enabled
 - **Contributors**: [CONTRIBUTORS.md](CONTRIBUTORS.md)
-- **Changelog**: [CHANGELOG.md](CHANGELOG.md) (ringkasan harian di [PROGRESS.md](PROGRESS.md))
-- **Audit Report**: [AUDIT_REPORT.md](AUDIT_REPORT.md)
+- **Changelog**: [CHANGELOG.md](CHANGELOG.md) & [CHANGELOGv2.md](CHANGELOGv2.md) (ringkasan kerja detail di [PROGRESS.md](PROGRESS.md) & [PROGRESS2.md](PROGRESS2.md))
 
 Laporkan kerentanan via GitHub Advisory (jangan buka Issue publik).

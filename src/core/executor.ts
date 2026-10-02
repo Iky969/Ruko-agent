@@ -29,16 +29,31 @@ export const DEFAULT_MAX_BUFFER = 10 * 1024 * 1024;
 
 /**
  * Environment variables that a POSIX shell evaluates at STARTUP or before
- * every prompt (M4). They are stripped together with the `BASH_FUNC_*`
+ * every prompt (M4), as well as runtime loader/process injection variables
+ * (ADIT.md §1.3, UCUP.md §1.3). They are stripped together with the `BASH_FUNC_*`
  * exports, because a caller-supplied value can hijack every command Ruko runs
  * (`BASH_ENV=/tmp/evil.sh sh -c "true"` executes the payload first).
  */
-const DANGEROUS_ENV_VARS = new Set([
+export const DANGEROUS_ENV_VARS = new Set([
+  // POSIX shell startup hooks
   'BASH_ENV', // sourced by bash for every non-interactive shell
   'ENV', // sourced by sh/ksh at startup
   'PROMPT_COMMAND', // executed by bash before each prompt
   'CDPATH', // silently redirects `cd` to an attacker-controlled directory
   'BASH_RCFILE', // alternative bash rc file
+  'ZDOTDIR',
+
+  // Node runtime injection
+  'NODE_OPTIONS',
+  'NODE_EXTRA_CA_CERTS',
+  'NODE_PATH',
+  'NODE_V8_COVERAGE',
+
+  // OS dynamic linker / loader injection
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
 ]);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -140,7 +155,7 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
     const cleanEnv: NodeJS.ProcessEnv = {};
     for (const [k, v] of Object.entries(rawEnv)) {
       if (k.startsWith('BASH_FUNC_')) continue;
-      if (DANGEROUS_ENV_VARS.has(k)) continue;
+      if (DANGEROUS_ENV_VARS.has(k) || k.startsWith('DYLD_')) continue;
       cleanEnv[k] = v;
     }
 

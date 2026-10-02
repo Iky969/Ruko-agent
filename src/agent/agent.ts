@@ -39,6 +39,8 @@ import {
 import { getEnvProfile } from '../core/env.js';
 import { readMemorySafe } from '../core/memory.js';
 import { formatSkillsForPrompt, initDefaultSkills, loadSkillsContext, scanSkills } from '../core/skills.js';
+import type { HostState } from '../core/state/hostState.js';
+import type { ScopeAmendmentManager } from '../core/approval/scopeAmendment.js';
 
 /** Safety cap on how many tool iterations one instruction may trigger (default 30). */
 export const DEFAULT_MAX_TOOL_ITERATIONS = 30;
@@ -143,6 +145,10 @@ export class Agent {
   private consecutiveRepeatCount = 0;
   /** Sliding window history of recent tool call signatures for N-gram cycle detection. */
   private callHistory: string[] = [];
+  /** Tracks consecutive failed turns for context rollback (req.md Fase IV). */
+  private consecutiveFailedTurns = 0;
+  /** Maximum consecutive failed turns before rollback (default 2). */
+  private readonly maxConsecutiveFailedTurns = 2;
   /** Fase 3: panel Reasoning aktif saat ini (null di luar turn). */
   private reasoningPanel: ReasoningPanel | null = null;
   /** Fase 3: mode expand/collapse panel Reasoning untuk turn berjalan. */
@@ -205,6 +211,30 @@ export class Agent {
     public readonly subagentDepth: number = 0,
   ) {
     this.confirm = confirm ?? null;
+  }
+
+  private hostState: HostState | null = null;
+  private scopeAmendmentManager: ScopeAmendmentManager | null = null;
+
+  /** Mengikat HostState v2.0.0 (dual-plane state kanonis di ~/.ruko/sessions/). */
+  setHostState(state: HostState | null): void {
+    this.hostState = state;
+    if (state) {
+      this.planMode = state.mode === 'plan';
+    }
+  }
+
+  getHostState(): HostState | null {
+    return this.hostState;
+  }
+
+  /** Mengikat ScopeAmendmentManager v2.0.0 (subtree auto-approval & circuit breaker). */
+  setScopeAmendmentManager(manager: ScopeAmendmentManager | null): void {
+    this.scopeAmendmentManager = manager;
+  }
+
+  getScopeAmendmentManager(): ScopeAmendmentManager | null {
+    return this.scopeAmendmentManager;
   }
 
   /** Replaces the approval prompt hook (wired by the loop once stdin is open). */
@@ -410,6 +440,8 @@ export class Agent {
 
     let emptyFollowUpSent = false;
     let actionNudgeSent = false;
+    let lastRawResponse = '';
+    let lastHadToolCalls = false;
     const executedMutatingTools = new Set<string>();
     const MUTATING_TOOLS = new Set([
       'write_file',
@@ -609,6 +641,8 @@ export class Agent {
             process.stdout.write('\n');
           }
           this.lastResponseStreamed = iterStreamed;
+          lastRawResponse = raw;
+          lastHadToolCalls = tree.currentStep > 0;
           return finalText;
         }
 
@@ -708,12 +742,12 @@ export class Agent {
               ? `siklus pemanggilan ${cycle.cycleLength} tool berulang ${cycle.count}×`
               : `tool "${call.tool}" dengan argumen sama sudah dipanggil > ${loopParams.loopThreshold}×`;
             return (
-              `[deteksi loop] ${cycleInfo} — eksekusi dihentikan. Silakan simpulkan atau lanjutkan ke respons akhir berdasarkan data yang sudah ada di riwayat.`
+              `[deteksi loop] ${cycleInfo} — eksekusi dihentikan paksa. Dilarang melanjutkan pembacaan berulang atau printf. Berikan respons akhir sekarang berdasarkan data yang sudah terkumpul.`
             );
           }
 
           // 2. Jika perintah terdeteksi identik berturut-turut atau duplikat dalam batch yang sama,
-          // cegah eksekusi ulang I/O dan kirim warning terstandarisasi.
+          // cegah eksekusi ulang I/O dan kirim warning terstandarisasi dengan intervensi aktif.
           if (
             this.consecutiveRepeatCount === loopParams.softWarningThreshold ||
             (isBatchDuplicate && !loopParams.readOnlyRelaxed)
@@ -782,6 +816,8 @@ export class Agent {
               workspaceRoot: this.workspaceRoot,
               subagentDepth: this.subagentDepth,
               activityTray: this.activityTray,
+              hostState: this.hostState ?? undefined,
+              scopeAmendmentManager: this.scopeAmendmentManager ?? undefined,
             });
           } finally {
             const toolElapsedMs = Date.now() - toolStart;
@@ -821,8 +857,13 @@ export class Agent {
         tree.finish('Mencapai batas iterasi tool');
       }
 
+      lastRawResponse = '[agent] reached max tool iterations without a final answer; stopping.';
+      lastHadToolCalls = tree.currentStep > 0;
       return '[agent] reached max tool iterations without a final answer; stopping.';
     } finally {
+      // Context sanitization / rollback (req.md Fase IV)
+      this.maybeRollbackContext(lastRawResponse, lastHadToolCalls);
+      
       this.reasoningPanel = null;
       if (usage.promptChars > 0 || usage.completionChars > 0) {
         const pTok = Math.round(usage.promptChars / 4);
@@ -892,6 +933,63 @@ export class Agent {
       }
     }
     return null;
+  }
+
+  /**
+   * Detects anomalous token patterns in model output (token collapse, spam, etc.)
+   * per req.md Fase IV - Context Contamination & Token Collapse.
+   */
+  private detectTokenCollapse(text: string): boolean {
+    if (!text) return false;
+    // Detect Mandarin spam tokens (from req.md)
+    const mandarinSpam = /网彩票|大发娱乐|天天中彩票|彩票怎样/i;
+    // Detect ChatML token leakage
+    const chatmlLeak = /<\|channel\|>|commentary to=functions/;
+    // Detect excessive repetition of same characters/tokens
+    const excessiveRepeat = /(.)\1{50,}/; // same char 50+ times
+    // Detect malformed analysis tags
+    const malformedAnalysis = /<\/analysis>\s*[🎮\?\s]*<\/analysis>/i;
+    
+    return mandarinSpam.test(text) || chatmlLeak.test(text) || excessiveRepeat.test(text) || malformedAnalysis.test(text);
+  }
+
+  /**
+   * Rolls back the last assistant message from context if turn failed
+   * (req.md Fase IV: Context Sanitization / Rollback Middleware).
+   */
+  private maybeRollbackContext(rawResponse: string, hadToolCalls: boolean): void {
+    const isFailedTurn = !hadToolCalls && (
+      rawResponse.trim().length === 0 ||
+      this.detectTokenCollapse(rawResponse) ||
+      rawResponse.includes('[agent] reached max tool iterations')
+    );
+
+    if (isFailedTurn) {
+      this.consecutiveFailedTurns += 1;
+      if (this.consecutiveFailedTurns >= this.maxConsecutiveFailedTurns) {
+        // Rollback: remove last assistant message from context
+        const ctxMessages = this.ctx.toJSON();
+        let lastIdx = -1;
+        for (let i = ctxMessages.length - 1; i >= 0; i--) {
+          if (ctxMessages[i].role === 'assistant') {
+            lastIdx = i;
+            break;
+          }
+        }
+        if (lastIdx !== -1) {
+          ctxMessages.splice(lastIdx, 1);
+          // Rebuild context without the failed assistant message
+          this.ctx.clear();
+          for (const msg of ctxMessages) {
+            this.ctx.add(msg.role, msg.content);
+          }
+        }
+        this.consecutiveFailedTurns = 0;
+      }
+    } else {
+      // Reset counter on successful turn
+      this.consecutiveFailedTurns = 0;
+    }
   }
 }
 
