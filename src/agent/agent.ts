@@ -39,6 +39,7 @@ import {
 import { getEnvProfile } from '../core/env.js';
 import { readMemorySafe } from '../core/memory.js';
 import { formatSkillsForPrompt, initDefaultSkills, loadSkillsContext, scanSkills } from '../core/skills.js';
+import { detectPlanOptionSelection } from '../core/plan.js';
 
 /** Safety cap on how many tool iterations one instruction may trigger (default 30). */
 export const DEFAULT_MAX_TOOL_ITERATIONS = 30;
@@ -336,6 +337,22 @@ export class Agent {
     this.lastCallSignature = null;
     this.consecutiveRepeatCount = 0;
     this.lastUsage = null;
+
+    // Plan Mode Auto-Off: jika Plan Mode aktif dan pengguna memilih salah satu opsi bernomor,
+    // matikan plan mode otomatis dan arahkan instruksi untuk mengeksekusi opsi tersebut.
+    if (this.planMode) {
+      const lastAssistant = this.ctx
+        .getMessages()
+        .slice()
+        .reverse()
+        .find((m) => m.role === 'assistant');
+      const planSelection = detectPlanOptionSelection(lastAssistant?.content, instruction);
+      if (planSelection) {
+        this.planMode = false;
+        instruction = planSelection.augmentedInstruction;
+      }
+    }
+
     try {
       return await (this.llmProvider.isConfigured
         ? this.runWithLlm(instruction, signal)

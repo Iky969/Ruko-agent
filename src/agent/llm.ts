@@ -79,69 +79,71 @@ export interface ChatOptions {
  * ============================================================================
  */
 
-/** Urutan kekuatan reasoning: high < xhigh < max < extreme. */
-export const REASONING_LEVELS: ReasoningLevel[] = ['high', 'xhigh', 'max', 'extreme'];
+/** Urutan kekuatan reasoning: low < medium < high. */
+export const REASONING_LEVELS: ReasoningLevel[] = ['low', 'medium', 'high'];
 
 /**
  * OpenAI-compatible: field top-level `reasoning_effort` di body /chat/completions.
- * Nilai yang didukung API: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
- * (model-dependent). 'extreme' BUKAN nilai API → di-CLAMP ke 'max'.
+ * Nilai yang didukung API OpenAI: 'low' | 'medium' | 'high'.
  */
-export function toOpenAiReasoningEffort(level: ReasoningLevel): 'high' | 'xhigh' | 'max' {
+export function toOpenAiReasoningEffort(level: ReasoningLevel): 'low' | 'medium' | 'high' {
   switch (level) {
+    case 'low':
+      return 'low';
     case 'high':
       return 'high';
-    case 'xhigh':
-      return 'xhigh';
-    case 'max':
-    case 'extreme':
+    case 'medium':
     default:
-      return 'max';
+      return 'medium';
   }
 }
 
 /**
  * Anthropic: field top-level `thinking: { type: 'enabled', budget_tokens }`.
- * Range API: 1024–32768 (integer). Mapping: 4096 / 8192 / 16384 / 32768.
+ * Range API: 1024–128000 (integer). Mapping: 2048 (low) / 8192 (medium) / 16384 (high).
  */
 export function toAnthropicBudgetTokens(level: ReasoningLevel): number {
   switch (level) {
+    case 'low':
+      return 2048;
     case 'high':
-      return 4096;
-    case 'xhigh':
-      return 8192;
-    case 'max':
       return 16384;
-    case 'extreme':
+    case 'medium':
     default:
-      return 32768;
+      return 8192;
   }
 }
 
 /**
  * Gemini: field top-level `thinkingConfig: { thinkingBudget }`.
- * Range API: 0–24576 → budget Extreme (32768) di-CLAMP ke 24576.
+ * Range API: 0–24576. Mapping: 2048 (low) / 8192 (medium) / 24576 (high).
  */
 export function toGeminiThinkingBudget(level: ReasoningLevel): number {
-  return Math.min(toAnthropicBudgetTokens(level), 24576);
+  switch (level) {
+    case 'low':
+      return 2048;
+    case 'high':
+      return 24576;
+    case 'medium':
+    default:
+      return 8192;
+  }
 }
 
 /**
- * Fallback prompt-injection (footer feedback.txt): dipakai HANYA jika provider
+ * Fallback prompt-injection: dipakai HANYA jika provider
  * TIDAK punya parameter reasoning native atau menolaknya (400).
- * Template per level: High / XHigh / Max / Extreme.
+ * Template per level: Low / Medium / High.
  */
 export function reasoningPromptAddendum(level: ReasoningLevel): string {
   switch (level) {
+    case 'low':
+      return 'REASONING DEPTH — LOW: think briefly before acting; state a concise plan and proceed directly.';
     case 'high':
-      return 'REASONING DEPTH — HIGH: think carefully before acting; state a brief plan and verify assumptions, but keep the reasoning concise.';
-    case 'xhigh':
-      return 'REASONING DEPTH — XHIGH: reason step by step before every action; consider alternatives and edge cases explicitly before choosing a tool or answer.';
-    case 'max':
-      return 'REASONING DEPTH — MAX: analyze the problem exhaustively before acting; enumerate options, weigh trade-offs, and verify each assumption against evidence.';
-    case 'extreme':
+      return 'REASONING DEPTH — HIGH: analyze the problem thoroughly before acting; consider alternatives, edge cases, and verify assumptions carefully.';
+    case 'medium':
     default:
-      return 'REASONING DEPTH — EXTREME: perform maximal deliberation; explore every relevant angle, simulate failure modes, double-check conclusions against evidence, then act.';
+      return 'REASONING DEPTH — MEDIUM: reason step by step before acting; state a clear plan and verify assumptions, keeping reasoning focused.';
   }
 }
 
@@ -552,21 +554,32 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       });
     };
 
-    const buildRequestBody = (withNative: boolean): string => {
+    const buildRequestBody = (withNative: boolean, omitTemperature = false): string => {
       // Fallback prompt injection: dipakai saat parameter native tidak didukung.
       const source =
         reasoningLevel && !withNative ? withReasoningDirective(messages, reasoningLevel) : messages;
-      return JSON.stringify({
-        model: options?.model ?? this.currentModel,
+      const model = options?.model ?? this.currentModel;
+      const isExplicitReasoningModel = /^(?:o1|o3|o4)/i.test(model);
+
+      const body: Record<string, unknown> = {
+        model,
         messages: formatMessages(source),
-        temperature: options?.temperature ?? 0.3,
         max_tokens: options?.maxTokens ?? 2048,
         stream: true,
-        // Mapping PASTI Fase 2: field top-level `reasoning_effort` (clamped ke enum API).
-        ...(withNative && reasoningLevel
-          ? { reasoning_effort: toOpenAiReasoningEffort(reasoningLevel) }
-          : {}),
-      });
+      };
+
+      // Model dengan reasoning bawaan (seperti o1, o3-mini) atau saat reasoning_effort native aktif
+      // tidak mendukung parameter 'temperature' di API OpenAI (mengakibatkan error 400).
+      if (!omitTemperature && !isExplicitReasoningModel && !(withNative && reasoningLevel)) {
+        body.temperature = options?.temperature ?? 0.3;
+      }
+
+      // Mapping level reasoning → parameter API reasoning_effort
+      if (withNative && reasoningLevel) {
+        body.reasoning_effort = toOpenAiReasoningEffort(reasoningLevel);
+      }
+
+      return JSON.stringify(body);
     };
 
     let response = await this.requestWithRetry(`${this.baseUrl}/chat/completions`, {
@@ -576,18 +589,27 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       signal: options?.signal,
     });
 
-    // Endpoint menolak `reasoning_effort` (mis. Ollama standar tanpa thinking):
-    // JANGAN gagalkan request — strip parameter native, retry SEKALI dengan
-    // fallback prompt injection, lalu log sekali di level debug.
-    if (!response.ok && useNativeReasoning && reasoningLevel && response.status === 400) {
+    // Penanganan error 400:
+    // 1. Endpoint menolak `temperature` (mis. model dengan reasoning native yang belum terfilter di atas):
+    //    Retry sekali tanpa menyertakan parameter `temperature`.
+    // 2. Endpoint menolak `reasoning_effort` (mis. Ollama standar tanpa thinking):
+    //    Strip parameter native, retry sekali dengan fallback prompt injection.
+    if (!response.ok && response.status === 400) {
       const errBody = await response.text();
-      if (/reasoning/i.test(errBody)) {
+      if (/temperature/i.test(errBody)) {
+        response = await this.requestWithRetry(`${this.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: this.authHeaders(),
+          body: buildRequestBody(useNativeReasoning, true),
+          signal: options?.signal,
+        });
+      } else if (/reasoning/i.test(errBody) && useNativeReasoning && reasoningLevel) {
         this.reasoningParamUnsupported = true;
         this.reasoningFallbackLog.note('reasoning_effort');
         response = await this.requestWithRetry(`${this.baseUrl}/chat/completions`, {
           method: 'POST',
           headers: this.authHeaders(),
-          body: buildRequestBody(false),
+          body: buildRequestBody(false, false),
           signal: options?.signal,
         });
       } else {

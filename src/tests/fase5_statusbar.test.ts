@@ -40,11 +40,11 @@ test('Status panel memuat indikator mode:<aktif> dan reasoning:<level>', () => {
     usedChars: 1000,
     budgetChars: 30_000,
     mode: 'research',
-    reasoning: 'xhigh',
+    reasoning: 'medium',
   });
   const plain = stripAnsi(panel);
   assert.ok(plain.includes('mode:research'), 'indikator mode tampil');
-  assert.ok(plain.includes('reasoning:xhigh'), 'indikator reasoning tampil');
+  assert.ok(plain.includes('reasoning:medium'), 'indikator reasoning tampil');
 });
 
 test('Status panel default: mode:default tampil dim, tetap satu baris responsif', () => {
@@ -72,11 +72,11 @@ test('Indikator mode/reasoning hidup di status bar gelap juga (buildStatusBar)',
       usedChars: 1000,
       budgetChars: 20_000,
       mode: 'build',
-      reasoning: 'max',
+      reasoning: 'high',
     }),
   );
   assert.ok(bar.includes('mode:build'), 'bar memuat mode:build');
-  assert.ok(bar.includes('reasoning:max'), 'bar memuat reasoning:max');
+  assert.ok(bar.includes('reasoning:high'), 'bar memuat reasoning:high');
 });
 
 test('Panel tanpa mode/reasoning (field opsional) tetap ter-render normal', () => {
@@ -99,15 +99,15 @@ test('Layar sempit: indikator turun mengikuti kandidat kolom sebelum model terpo
     usedChars: 500,
     budgetChars: 10_000,
     mode: 'code',
-    reasoning: 'extreme',
+    reasoning: 'high',
   });
   for (const l of lines) {
     assert.ok(visibleLength(stripAnsi(l)) <= 45, `baris muat di 46 cols: ${stripAnsi(l)}`);
   }
 });
 
-test('SessionState default menyediakan nilai awal indikator (mode default, reasoning xhigh)', () => {
+test('SessionState default menyediakan nilai awal indikator (mode default, reasoning medium)', () => {
   const s = createDefaultSessionState();
   assert.equal(s.mode, 'default');
-  assert.equal(s.reasoningLevel, 'xhigh');
+  assert.equal(s.reasoningLevel, 'medium');
 });
