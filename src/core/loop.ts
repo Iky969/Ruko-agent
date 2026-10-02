@@ -35,8 +35,10 @@ import { appendHistory, defaultHistoryPath, loadHistory } from './history.js';
 import { getWorkspaceRoot } from '../agent/tools.js';
 import { defaultProcessManager } from '../agent/processManager.js';
 import { detectPlanOptionSelection, parseNumberedOptions } from './plan.js';
+import { saveHostState } from './state/hostState.js';
 // Fase B (v1.9.0): EnvProfile singleton (deteksi murni, Fase A).
 import { getEnvProfile } from './env.js';
+import type { SecurityPipeline } from './securityPipeline.js';
 
 /** Prompt line shown under the status bar (placeholder until the user types). */
 const PROMPT_HINT = '/? untuk bantuan, tanya apa saja...';
@@ -80,7 +82,12 @@ export class SystemLoop {
     private readonly agent: Agent,
     private readonly config: AgentConfig,
     private readonly configPath: string,
-  ) {}
+    private readonly securityPipeline?: SecurityPipeline | null,
+  ) {
+    if (this.securityPipeline) {
+      this.sessionId = this.securityPipeline.sessionId;
+    }
+  }
 
   /** Starts the loop. Blocks (TTY: until exit) or wires piped line events. */
   start(): void {
@@ -339,6 +346,7 @@ export class SystemLoop {
     this.agent.activityTray.clear();
     this.editor?.close();
     this.rl?.close();
+    void this.securityPipeline?.releaseLock().catch(() => {});
   }
 
   private saveSession(): void {
@@ -451,6 +459,11 @@ export class SystemLoop {
           const planSelection = detectPlanOptionSelection(lastAssistant?.content, input);
           if (planSelection) {
             this.agent.planMode = false;
+            const hs = this.agent.getHostState();
+            if (hs && hs.mode === 'plan') {
+              hs.mode = 'act';
+              void saveHostState(hs).catch(() => {});
+            }
             console.log(renderPlanAutoExecuteBox(planSelection.selectedNumber, planSelection.optionText));
             turnInstruction = planSelection.augmentedInstruction;
           }

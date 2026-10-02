@@ -83,14 +83,29 @@ export interface ChatOptions {
 export const REASONING_LEVELS: ReasoningLevel[] = ['low', 'medium', 'high'];
 
 /**
+ * Normalizes reasoning level string (with backward compatibility for legacy
+ * 'xhigh', 'max', 'extreme' clamped to 'high').
+ */
+export function normalizeReasoningLevel(raw: unknown): ReasoningLevel {
+  if (typeof raw !== 'string') return 'medium';
+  const lower = raw.trim().toLowerCase();
+  if (lower === 'low') return 'low';
+  if (lower === 'high' || lower === 'xhigh' || lower === 'max' || lower === 'extreme') return 'high';
+  return 'medium';
+}
+
+/**
  * OpenAI-compatible: field top-level `reasoning_effort` di body /chat/completions.
  * Nilai yang didukung API OpenAI: 'low' | 'medium' | 'high'.
  */
-export function toOpenAiReasoningEffort(level: ReasoningLevel): 'low' | 'medium' | 'high' {
+export function toOpenAiReasoningEffort(level: ReasoningLevel | string): 'low' | 'medium' | 'high' {
   switch (level) {
     case 'low':
       return 'low';
     case 'high':
+    case 'xhigh':
+    case 'max':
+    case 'extreme':
       return 'high';
     case 'medium':
     default:
@@ -102,11 +117,14 @@ export function toOpenAiReasoningEffort(level: ReasoningLevel): 'low' | 'medium'
  * Anthropic: field top-level `thinking: { type: 'enabled', budget_tokens }`.
  * Range API: 1024–128000 (integer). Mapping: 2048 (low) / 8192 (medium) / 16384 (high).
  */
-export function toAnthropicBudgetTokens(level: ReasoningLevel): number {
+export function toAnthropicBudgetTokens(level: ReasoningLevel | string): number {
   switch (level) {
     case 'low':
       return 2048;
     case 'high':
+    case 'xhigh':
+    case 'max':
+    case 'extreme':
       return 16384;
     case 'medium':
     default:
@@ -118,11 +136,14 @@ export function toAnthropicBudgetTokens(level: ReasoningLevel): number {
  * Gemini: field top-level `thinkingConfig: { thinkingBudget }`.
  * Range API: 0–24576. Mapping: 2048 (low) / 8192 (medium) / 24576 (high).
  */
-export function toGeminiThinkingBudget(level: ReasoningLevel): number {
+export function toGeminiThinkingBudget(level: ReasoningLevel | string): number {
   switch (level) {
     case 'low':
       return 2048;
     case 'high':
+    case 'xhigh':
+    case 'max':
+    case 'extreme':
       return 24576;
     case 'medium':
     default:
@@ -135,11 +156,14 @@ export function toGeminiThinkingBudget(level: ReasoningLevel): number {
  * TIDAK punya parameter reasoning native atau menolaknya (400).
  * Template per level: Low / Medium / High.
  */
-export function reasoningPromptAddendum(level: ReasoningLevel): string {
+export function reasoningPromptAddendum(level: ReasoningLevel | string): string {
   switch (level) {
     case 'low':
       return 'REASONING DEPTH — LOW: think briefly before acting; state a concise plan and proceed directly.';
     case 'high':
+    case 'xhigh':
+    case 'max':
+    case 'extreme':
       return 'REASONING DEPTH — HIGH: analyze the problem thoroughly before acting; consider alternatives, edge cases, and verify assumptions carefully.';
     case 'medium':
     default:

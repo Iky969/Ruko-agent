@@ -32,7 +32,7 @@ export function parseNumberedOptions(content: string): PlanOption[] {
   // "[1] kerjakan ABCD"
   // "- 1. kerjakan ABCD"
   // "Opsi 1: kerjakan ABCD"
-  const optionRegex = /^\s*(?:[-*]\s*)?(?:(?:opsi|option|pilihan|nomor|no\.?)\s*)?(?:\[(\d+)\]|(\d+)[\.\)\:\-]|(\d+)\s*[-:])\s*(.+)$/i;
+  const optionRegex = /^\s*(?:[-*]\s*)?(?:(?:opsi|option|pilihan|nomor|no\.?)\s*)?(?:\[(\d+)\]\s*|(\d+)[\.\)]\s+|(\d+)\s*[-:]\s+)\s*(.+)$/i;
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -43,6 +43,9 @@ export function parseNumberedOptions(content: string): PlanOption[] {
       const rawNum = match[1] || match[2] || match[3];
       const num = parseInt(rawNum, 10);
       const text = match[4].trim();
+
+      // Guard against semantic versions (e.g. "1.2.3" or remaining text starting with a version digit like "2.3")
+      if (/^\d+\./.test(text)) continue;
 
       // Only valid positive numbers with non-empty descriptions
       if (!Number.isNaN(num) && num > 0 && text.length > 0 && !seenNumbers.has(num)) {

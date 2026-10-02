@@ -70,6 +70,8 @@ describe('Issue #27: parseNumberedOptions', () => {
     assert.deepEqual(parseNumberedOptions(''), []);
     assert.deepEqual(parseNumberedOptions('Hanya teks biasa tanpa angka list.'), []);
     assert.deepEqual(parseNumberedOptions('Ada angka 2026 di teks tapi bukan list.'), []);
+    assert.deepEqual(parseNumberedOptions('1.2.3 version released'), []);
+    assert.deepEqual(parseNumberedOptions('version 1.2.3 is out'), []);
   });
 });
 
@@ -136,6 +138,8 @@ describe('Issue #27: detectPlanOptionSelection', () => {
       'kenapa opsi 1 begitu?',
       'bagaimana kalau opsi 2 diubah?',
       '1 dan 2 dijalankan bersama',
+      '1.2.3',
+      'v1.2.3',
       'tidak ada yang cocok',
       'halo ruko',
       'apakah opsi 1 aman?',
