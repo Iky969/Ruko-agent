@@ -334,11 +334,8 @@ describe('TC-FSM-01 Circuit Breaker: Consecutive Identical Rejections', () => {
     const state = createMockHostState('sess-fsm-04', ['src/core']);
     await saveHostState(state);
 
-    // Use separate input for each call to track if prompt was shown
-    let promptCount = 0;
-    const createInput = () => Readable.from(['n\n']); // fresh stream each call
     const outStream = new Writable({
-      write(chunk, _enc, cb) { cb(); },
+      write(_chunk, _enc, cb) { cb(); },
     });
 
     const manager = new ScopeAmendmentManager(state, ws, {

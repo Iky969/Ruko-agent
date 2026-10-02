@@ -15,7 +15,7 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import { FileLock } from './state/fileLock.js';
-import { HostState, loadHostState, saveHostState } from './state/hostState.js';
+import { HostState, loadHostState } from './state/hostState.js';
 import { ScopeAmendmentManager } from './approval/scopeAmendment.js';
 import { evaluateDispatcherGate, DispatcherGateDecision } from './dispatcher/dispatcherGate.js';
 

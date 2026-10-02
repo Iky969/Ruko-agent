@@ -1,7 +1,7 @@
-import { constants as fsConstants, promises as fs, realpathSync } from 'node:fs';
+import { promises as fs, realpathSync } from 'node:fs';
 import { Buffer } from 'node:buffer';
 import * as path from 'node:path';
-import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isPathInsideWorkspace, isSensitivePath, assertPhysicalContainment, SecurityBoundaryError } from './tools.js';
+import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isPathInsideWorkspace, isSensitivePath, assertPhysicalContainment } from './tools.js';
 import { secureReadFile, SecurityViolation } from '../core/tools/secureRead.js';
 
 export { assertNotSecurityCore, isSecurityCoreFile, assertPhysicalContainment, SecurityBoundaryError } from './tools.js';

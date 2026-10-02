@@ -25,7 +25,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { tryCreateSymlink } from './helpers/platform.js';
 import {

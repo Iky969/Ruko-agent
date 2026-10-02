@@ -99,6 +99,10 @@ export class FileLock {
     return this.lockPath;
   }
 
+  getCurrentNonce(): string | null {
+    return this.currentNonce;
+  }
+
   /**
    * Membaca dan memvalidasi metadata berkas lock saat ini di disk.
    * Mengembalikan null jika berkas tidak ada atau format tidak valid.
@@ -258,7 +262,7 @@ export class FileLock {
         }
 
         // Invarian 3: Periksa apakah PID pemilik lock masih hidup
-        let ownerAlive = true;
+        let ownerAlive: boolean;
         try {
           ownerAlive = isPidAlive(meta.pid);
         } catch {
