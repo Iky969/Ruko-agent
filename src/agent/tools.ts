@@ -506,20 +506,23 @@ export class SecurityBoundaryError extends Error {
  * CVSS 9.3 — Menutup celah parent directory symlink escape (CWE-59 / CWE-61).
  */
 export function assertPhysicalContainment(targetPath: string, workspaceRoot: string = getWorkspaceRoot()): string {
+  const stripPrefix = (p: string): string => (p.startsWith('\\\\?\\') ? p.slice(4) : p);
   let canonicalWs: string;
   try {
-    canonicalWs = realpathSync(path.resolve(workspaceRoot));
+    canonicalWs = stripPrefix(realpathSync(path.resolve(workspaceRoot)));
   } catch {
-    canonicalWs = path.resolve(workspaceRoot);
+    canonicalWs = stripPrefix(path.resolve(workspaceRoot));
   }
 
   const absTarget = path.isAbsolute(targetPath)
     ? path.resolve(targetPath)
-    : path.resolve(canonicalWs, targetPath);
+    : path.resolve(workspaceRoot, targetPath);
 
   const isInside = (childPath: string, parentPath: string): boolean => {
-    const normChild = process.platform === 'win32' ? childPath.toLowerCase() : childPath;
-    const normParent = process.platform === 'win32' ? parentPath.toLowerCase() : parentPath;
+    const c = stripPrefix(childPath);
+    const p = stripPrefix(parentPath);
+    const normChild = process.platform === 'win32' ? c.toLowerCase() : c;
+    const normParent = process.platform === 'win32' ? p.toLowerCase() : p;
     if (normChild === normParent) return true;
     const rel = path.relative(normParent, normChild);
     return !rel.startsWith('..') && !path.isAbsolute(rel);
@@ -531,10 +534,10 @@ export function assertPhysicalContainment(targetPath: string, workspaceRoot: str
     if (targetLst.isSymbolicLink()) {
       let realTarget: string;
       try {
-        realTarget = realpathSync(absTarget);
+        realTarget = stripPrefix(realpathSync(absTarget));
       } catch {
         const target = readlinkSync(absTarget);
-        realTarget = path.isAbsolute(target) ? path.resolve(target) : path.resolve(path.dirname(absTarget), target);
+        realTarget = stripPrefix(path.isAbsolute(target) ? path.resolve(target) : path.resolve(path.dirname(absTarget), target));
       }
       if (!isInside(realTarget, canonicalWs)) {
         throw new SecurityBoundaryError(
@@ -542,7 +545,7 @@ export function assertPhysicalContainment(targetPath: string, workspaceRoot: str
         );
       }
     } else {
-      const realTarget = realpathSync(absTarget);
+      const realTarget = stripPrefix(realpathSync(absTarget));
       if (!isInside(realTarget, canonicalWs)) {
         throw new SecurityBoundaryError(
           `Akses ditolak: target '${targetPath}' secara fisik berada di luar direktori kerja sah ('${realTarget}').`
@@ -560,7 +563,7 @@ export function assertPhysicalContainment(targetPath: string, workspaceRoot: str
     try {
       const lst = lstatSync(current);
       if (lst.isSymbolicLink()) {
-        const real = realpathSync(current);
+        const real = stripPrefix(realpathSync(current));
         if (!isInside(real, canonicalWs)) {
           throw new SecurityBoundaryError(
             `Akses ditolak: direktori '${current}' adalah symbolic link yang mengarah ke luar workspace ('${real}').`
@@ -568,7 +571,7 @@ export function assertPhysicalContainment(targetPath: string, workspaceRoot: str
         }
       }
       // Direktori eksis ditemukan, verifikasi resolusi kanonis seluruh rantai
-      const canonicalParent = realpathSync(current);
+      const canonicalParent = stripPrefix(realpathSync(current));
       if (!isInside(canonicalParent, canonicalWs)) {
         throw new SecurityBoundaryError(
           `Akses ditolak: direktori induk '${current}' berakar di luar direktori kerja sah ('${canonicalParent}').`

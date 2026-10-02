@@ -18,12 +18,23 @@ const O_NOFOLLOW = fsSync.constants.O_NOFOLLOW ?? 0;
 const O_RDONLY = fsSync.constants.O_RDONLY;
 const O_CLOEXEC = (fsSync.constants as any).O_CLOEXEC ?? 0;
 
+function stripExtendedPrefix(p: string): string {
+  return p.startsWith('\\\\?\\') ? p.slice(4) : p;
+}
+
 /**
  * Memvalidasi apakah target berada di dalam workspace root secara kanonikal.
  */
 export function isInsideWorkspace(workspaceRoot: string, target: string): boolean {
-  const relative = path.relative(workspaceRoot, target);
-  return (relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)) || target === workspaceRoot;
+  const normWs = process.platform === 'win32'
+    ? stripExtendedPrefix(path.resolve(workspaceRoot)).toLowerCase()
+    : stripExtendedPrefix(path.resolve(workspaceRoot));
+  const normTarget = process.platform === 'win32'
+    ? stripExtendedPrefix(path.resolve(target)).toLowerCase()
+    : stripExtendedPrefix(path.resolve(target));
+  if (normWs === normTarget) return true;
+  const relative = path.relative(normWs, normTarget);
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
 export interface SecureReadOptions {
@@ -54,8 +65,29 @@ export async function secureReadFile(
     throw new SecurityViolation('NULL_BYTE', 'Null byte injection terdeteksi');
   }
 
-  const workspaceReal = await fs.realpath(workspaceRoot);
-  const resolved = path.resolve(workspaceReal, userPath);
+  const rawWsReal = await fs.realpath(workspaceRoot);
+  const workspaceReal = stripExtendedPrefix(rawWsReal);
+  const workspaceLex = stripExtendedPrefix(path.resolve(workspaceRoot));
+  const cleanUserPath = stripExtendedPrefix(userPath);
+
+  let resolved: string;
+  if (!path.isAbsolute(cleanUserPath)) {
+    resolved = path.resolve(workspaceReal, cleanUserPath);
+  } else {
+    const isInsideRel = (rel: string) => rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+    const relReal = path.relative(workspaceReal, cleanUserPath);
+    const relLex = path.relative(workspaceLex, cleanUserPath);
+
+    if (cleanUserPath === workspaceReal || cleanUserPath === workspaceLex) {
+      resolved = workspaceReal;
+    } else if (isInsideRel(relReal)) {
+      resolved = path.resolve(workspaceReal, relReal);
+    } else if (isInsideRel(relLex)) {
+      resolved = path.resolve(workspaceReal, relLex);
+    } else {
+      resolved = cleanUserPath;
+    }
+  }
 
   // Containment check visual/awal
   if (!isInsideWorkspace(workspaceReal, resolved)) {
@@ -118,14 +150,18 @@ export async function secureReadFile(
     }
 
     // 5. Post-open cross-check: resolusi realpath dan inode/device matching
-    const realPath = await fs.realpath(resolved);
+    const rawReal = await fs.realpath(resolved);
+    const realPath = stripExtendedPrefix(rawReal);
     if (!isInsideWorkspace(workspaceReal, realPath)) {
       throw new SecurityViolation('SYMLINK_ESCAPE', 'Jalur fisik symlink keluar dari workspace root');
     }
 
     const realStat = await fs.lstat(realPath, { bigint: true });
-    if (stat.ino !== realStat.ino || stat.dev !== realStat.dev) {
-      throw new SecurityViolation('TOCTOU_RACE', 'Inode/device mismatch (indikasi race condition)');
+    const isWindowsZeroIno = process.platform === 'win32' && stat.ino === 0n;
+    if (!isWindowsZeroIno) {
+      if (stat.ino !== realStat.ino || stat.dev !== realStat.dev) {
+        throw new SecurityViolation('TOCTOU_RACE', 'Inode/device mismatch (indikasi race condition)');
+      }
     }
 
     // 6. Pembacaan data dari file descriptor yang sudah terverifikasi

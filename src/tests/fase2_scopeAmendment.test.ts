@@ -342,8 +342,10 @@ describe('TC-FSM-01 Circuit Breaker: Consecutive Identical Rejections', () => {
     });
 
     const manager = new ScopeAmendmentManager(state, ws, {
+      input: Readable.from(['n\n', 'n\n', 'n\n']),
+      output: outStream,
       isTTY: true,
-      promptTimeoutMs: 5000,
+      promptTimeoutMs: 500,
     });
 
     // We need to simulate the prompt being shown - use getCircuitBreakerStatus

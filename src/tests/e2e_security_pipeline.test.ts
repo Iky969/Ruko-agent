@@ -65,6 +65,9 @@ test('E2E Security Pipeline: Lifecycle startup, 0600 authoritative state, dan se
       env: {
         ...process.env,
         HOME: tmpHome,
+        USERPROFILE: tmpHome,
+        HOMEDRIVE: path.parse(tmpHome).root,
+        HOMEPATH: tmpHome.slice(path.parse(tmpHome).root.length),
         NODE_ENV: 'test',
       },
       stdio: ['pipe', 'pipe', 'pipe'],

@@ -119,4 +119,10 @@ describe('PR-C1: secureReadFile & SecurityViolation', () => {
     assert.equal(isInsideWorkspace(tempWs, outsideDir), false);
     assert.equal(isInsideWorkspace(tempWs, path.join(outsideDir, 'secret.txt')), false);
   });
+
+  test('Absolute path di dalam workspace terbaca aman tanpa keliru dianggap escape', async () => {
+    const absPath = path.join(tempWs, 'normal.txt');
+    const buf = await secureReadFile(tempWs, absPath);
+    assert.equal(buf.toString('utf8'), 'NORMAL_SAFE_CONTENT');
+  });
 });

@@ -89,7 +89,7 @@ describe('Resource Governor Subprocess Isolation', () => {
   });
 
   test('DX-Preserving PATH: sanitasi menyaring traversal ".." dan menjaga direktori sah', () => {
-    const rawPath = ['/usr/bin', '/tmp/../etc/bad', '/home/user/.nvm/versions/node/v20/bin'].join(':');
+    const rawPath = ['/usr/bin', '/tmp/../etc/bad', '/home/user/.nvm/versions/node/v20/bin'].join(path.delimiter);
     const sanitized = sanitizePathEnv(rawPath);
     assert.ok(sanitized.includes('/usr/bin'));
     assert.ok(sanitized.includes('.nvm'));
