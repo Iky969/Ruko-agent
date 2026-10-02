@@ -318,8 +318,8 @@ export function formatEnvironmentContext(ctx: EnvironmentContextInput): string {
 export function planModeAddendum(): string {
   return (
     'ACTIVE MODE — PLAN: You may ONLY read and propose. Do not call exec/start_process/write_file/edit_file/patch_file/delete_file/move_file/revert_file/remember/save_skill/delete_skill ' +
-    '(the CLI blocks them anyway). Output a numbered step plan for user approval; the user runs it after ' +
-    'exiting plan mode with /plan off.'
+    '(the CLI blocks them anyway). When proposing options or a plan, present clear numbered choices (1. ..., 2. ..., 3. ...) and conclude with "Apa yang kamu pilih?" so the user can select an option directly by number. ' +
+    'When the user replies with the option number, the CLI automatically exits plan mode and executes the chosen option directly.'
   );
 }
 

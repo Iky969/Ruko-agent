@@ -52,6 +52,10 @@ export class Context {
     this.messages = [...messages];
   }
 
+  getMessages(): ContextMessage[] {
+    return [...this.messages];
+  }
+
   toJSON(): ContextMessage[] {
     return [...this.messages];
   }

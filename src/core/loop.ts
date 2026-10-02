@@ -21,6 +21,8 @@ import {
   renderApprovalBox,
   renderApprovalDecision,
   renderDivider,
+  renderPlanAutoExecuteBox,
+  renderPlanGateBox,
   renderStatusPanel,
   STATUS_PANEL_HINT,
   stripAnsi,
@@ -32,6 +34,8 @@ import { checkMemoryWarning, initMemoryFile } from './memory.js';
 import { appendHistory, defaultHistoryPath, loadHistory } from './history.js';
 import { getWorkspaceRoot } from '../agent/tools.js';
 import { defaultProcessManager } from '../agent/processManager.js';
+import { detectPlanOptionSelection, parseNumberedOptions } from './plan.js';
+import { saveHostState } from './state/hostState.js';
 // Fase B (v1.9.0): EnvProfile singleton (deteksi murni, Fase A).
 import { getEnvProfile } from './env.js';
 import type { SecurityPipeline } from './securityPipeline.js';
@@ -445,7 +449,26 @@ export class SystemLoop {
           });
         }
       } else {
-        await this.runTurn(input);
+        let turnInstruction = input;
+        if (this.agent.planMode) {
+          const lastAssistant = this.ctx
+            .getMessages()
+            .slice()
+            .reverse()
+            .find((m) => m.role === 'assistant');
+          const planSelection = detectPlanOptionSelection(lastAssistant?.content, input);
+          if (planSelection) {
+            this.agent.planMode = false;
+            const hs = this.agent.getHostState();
+            if (hs && hs.mode === 'plan') {
+              hs.mode = 'act';
+              void saveHostState(hs).catch(() => {});
+            }
+            console.log(renderPlanAutoExecuteBox(planSelection.selectedNumber, planSelection.optionText));
+            turnInstruction = planSelection.augmentedInstruction;
+          }
+        }
+        await this.runTurn(turnInstruction);
         // §7.47/§8: per-turn stats moved into the status bar (statusBarLine),
         // so only the proactive >50% warning stays as an output line.
         if (
@@ -510,6 +533,15 @@ export class SystemLoop {
         this.ctx.add('assistant', response);
         // With streaming the text was already revealed live by the agent.
         if (!this.agent.lastResponseStreamed) console.log(formatTerminalMarkdown(response));
+
+        // Jika Plan Mode aktif dan respons model menyajikan opsi bernomor (>= 2 opsi),
+        // tampilkan Gate box terstruktur di terminal (UX Issue #27 rekomendasi).
+        if (this.agent.planMode) {
+          const options = parseNumberedOptions(response);
+          if (options.length >= 2) {
+            console.log(renderPlanGateBox(options, 'Apa yang kamu pilih? (Ketik nomor opsi untuk langsung eksekusi)'));
+          }
+        }
       }
     } finally {
       this.busy = false;

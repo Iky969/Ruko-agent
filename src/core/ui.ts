@@ -391,6 +391,69 @@ export function renderApprovalBox(command: string, reason: string): string {
 }
 
 /**
+ * Renders a gate-style ANSI bordered box presenting numbered plan options.
+ * Matches Issue #27 UX recommendation.
+ */
+export function renderPlanGateBox(
+  options: Array<{ number: number; text: string }>,
+  promptQuestion = 'Apa yang kamu pilih?',
+): string {
+  const cols = terminalWidth();
+  const maxInner = Math.max(20, cols - 4);
+  const border = (s: string) => cyan(s);
+  const headerText = 'PLAN';
+
+  const rowsText: string[] = options.map((opt) => `${opt.number}. ${opt.text}`);
+  const lengths = [
+    visibleLength(headerText),
+    visibleLength(promptQuestion),
+    ...rowsText.map((r) => visibleLength(r)),
+  ];
+  const needed = Math.max(...lengths) + 4;
+  const inner = Math.min(Math.max(needed, 30), maxInner);
+
+  const fit = (t: string): string => truncateVisible(t, inner - 2);
+
+  const top = border(`┌${'─'.repeat(inner)}┐`);
+  const headerRow = `${border('│')} ${padVisible(fit(bold(cyan(headerText))), inner - 2)} ${border('│')}`;
+  const sep = border(`├${'─'.repeat(inner)}┤`);
+  const optionRows = rowsText.map(
+    (row) => `${border('│')} ${padVisible(fit(row), inner - 2)} ${border('│')}`,
+  );
+  const promptSep = border(`├${'─'.repeat(inner)}┤`);
+  const promptRow = `${border('│')} ${padVisible(fit(yellow(promptQuestion)), inner - 2)} ${border('│')}`;
+  const bottom = border(`└${'─'.repeat(inner)}┘`);
+
+  return [top, headerRow, sep, ...optionRows, promptSep, promptRow, bottom].join('\n');
+}
+
+/**
+ * Renders a notification box when Plan Mode is automatically disabled to execute the selected option.
+ */
+export function renderPlanAutoExecuteBox(optionNumber: number, optionText: string): string {
+  const cols = terminalWidth();
+  const maxInner = Math.max(20, cols - 4);
+  const border = (s: string) => green(s);
+  const headerText = '⚡ PLAN: AUTO-EXECUTE';
+  const line1 = '✔ Plan mode dinonaktifkan otomatis';
+  const line2 = `Menjalankan opsi ${optionNumber}: ${optionText}`;
+
+  const needed = Math.max(visibleLength(headerText), visibleLength(line1), visibleLength(line2)) + 4;
+  const inner = Math.min(Math.max(needed, 32), maxInner);
+
+  const fit = (t: string): string => truncateVisible(t, inner - 2);
+
+  const top = border(`┌${'─'.repeat(inner)}┐`);
+  const headerRow = `${border('│')} ${padVisible(fit(bold(green(headerText))), inner - 2)} ${border('│')}`;
+  const sep = border(`├${'─'.repeat(inner)}┤`);
+  const row1 = `${border('│')} ${padVisible(fit(green(line1)), inner - 2)} ${border('│')}`;
+  const row2 = `${border('│')} ${padVisible(fit(bold(line2)), inner - 2)} ${border('│')}`;
+  const bottom = border(`└${'─'.repeat(inner)}┘`);
+
+  return [top, headerRow, sep, row1, row2, bottom].join('\n');
+}
+
+/**
  * In-place redraw helper for ANIMATED multi-row blocks (splash aquarium).
  * `draw()` prints the block on the first call and rewinds + overwrites it on
  * every later call, so frames update in place instead of stacking. `clear()`
@@ -677,7 +740,7 @@ export interface StatusPanelInput {
   hint?: string;
   /** Fase 5: mode sesi aktif (default/research/code/build) — indikator status bar. */
   mode?: string;
-  /** Fase 5: level reasoning aktif (high/xhigh/max/extreme) — indikator status bar. */
+  /** Level reasoning aktif (low/medium/high) — indikator status bar. */
   reasoning?: string;
   /**
    * Fase B (v1.9.0): flavor lingkungan runtime — badge dim di panel status.

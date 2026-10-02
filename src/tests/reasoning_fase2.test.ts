@@ -76,6 +76,8 @@ const geminiOk = () =>
 
 const rejectReasoning = () =>
   jsonResponse({ error: { message: 'Unknown parameter: reasoning_effort' } }, 400);
+const rejectTemperature = () =>
+  jsonResponse({ error: { message: "Unsupported parameter: 'temperature' is not supported with this model." } }, 400);
 const rejectThinking = () =>
   jsonResponse({ error: { message: 'thinking: field not supported by this model' } }, 400);
 const rejectThinkingBudget = () =>
@@ -95,51 +97,47 @@ testCfg['apiKey'] = 'test-key';
 // Mapping level → parameter provider (harus match 100% dengan llm.ts)
 // ============================================================================
 
-test('Fase 2: mapping OpenAI-compatible — reasoning_effort, Extreme clamp ke max', () => {
+test('Fase 2: mapping OpenAI-compatible — reasoning_effort low/medium/high', () => {
+  assert.equal(toOpenAiReasoningEffort('low'), 'low');
+  assert.equal(toOpenAiReasoningEffort('medium'), 'medium');
   assert.equal(toOpenAiReasoningEffort('high'), 'high');
-  assert.equal(toOpenAiReasoningEffort('xhigh'), 'xhigh');
-  assert.equal(toOpenAiReasoningEffort('max'), 'max');
-  assert.equal(toOpenAiReasoningEffort('extreme'), 'max', 'Extreme clamp ke nilai API tertinggi');
 });
 
-test('Fase 2: mapping Anthropic — budget_tokens 4096/8192/16384/32768', () => {
-  assert.equal(toAnthropicBudgetTokens('high'), 4096);
-  assert.equal(toAnthropicBudgetTokens('xhigh'), 8192);
-  assert.equal(toAnthropicBudgetTokens('max'), 16384);
-  assert.equal(toAnthropicBudgetTokens('extreme'), 32768);
-  for (const level of ['high', 'xhigh', 'max', 'extreme'] as ReasoningLevel[]) {
+test('Fase 2: mapping Anthropic — budget_tokens 2048/8192/16384', () => {
+  assert.equal(toAnthropicBudgetTokens('low'), 2048);
+  assert.equal(toAnthropicBudgetTokens('medium'), 8192);
+  assert.equal(toAnthropicBudgetTokens('high'), 16384);
+  for (const level of ['low', 'medium', 'high'] as ReasoningLevel[]) {
     const budget = toAnthropicBudgetTokens(level);
     assert.ok(budget >= 1024 && budget <= 32768, 'budget dalam range API 1024–32768');
   }
 });
 
-test('Fase 2: mapping Gemini — thinkingBudget, Extreme clamp ke 24576', () => {
-  assert.equal(toGeminiThinkingBudget('high'), 4096);
-  assert.equal(toGeminiThinkingBudget('xhigh'), 8192);
-  assert.equal(toGeminiThinkingBudget('max'), 16384);
-  assert.equal(toGeminiThinkingBudget('extreme'), 24576, 'Extreme clamp ke batas API 24576');
+test('Fase 2: mapping Gemini — thinkingBudget 2048/8192/24576', () => {
+  assert.equal(toGeminiThinkingBudget('low'), 2048);
+  assert.equal(toGeminiThinkingBudget('medium'), 8192);
+  assert.equal(toGeminiThinkingBudget('high'), 24576);
 });
 
 test('Fase 2: template fallback prompt injection tersedia per level', () => {
   const seen = new Set<string>();
-  for (const level of ['high', 'xhigh', 'max', 'extreme'] as ReasoningLevel[]) {
+  for (const level of ['low', 'medium', 'high'] as ReasoningLevel[]) {
     const addendum = reasoningPromptAddendum(level);
     assert.ok(addendum.includes('REASONING DEPTH'), 'teridentifikasi sebagai instruksi reasoning');
     seen.add(addendum);
   }
-  assert.equal(seen.size, 4, 'empat template berbeda untuk empat level');
+  assert.equal(seen.size, 3, 'tiga template berbeda untuk tiga level (low, medium, high)');
 });
 
 // ============================================================================
 // Payload provider menerima parameter yang sesuai per level
 // ============================================================================
 
-test('Fase 2: payload OpenAI-compatible membawa reasoning_effort sesuai level', async () => {
+test('Fase 2: payload OpenAI-compatible membawa reasoning_effort dan tidak mengirim temperature saat reasoning aktif', async () => {
   const cases: Array<[ReasoningLevel, string | undefined]> = [
+    ['low', 'low'],
+    ['medium', 'medium'],
     ['high', 'high'],
-    ['xhigh', 'xhigh'],
-    ['max', 'max'],
-    ['extreme', 'max'],
   ];
   try {
     for (const [level, expected] of cases) {
@@ -147,12 +145,38 @@ test('Fase 2: payload OpenAI-compatible membawa reasoning_effort sesuai level', 
       const provider = new OpenAiCompatibleProvider(testCfg, { retries: 0 });
       await provider.chat(msgs(), { reasoning: level });
       assert.equal(calls[0].body.reasoning_effort, expected, `level ${level}`);
+      assert.equal('temperature' in calls[0].body, false, 'temperature dihilangkan saat reasoning aktif untuk mencegah error 400');
     }
-    // Tanpa opsi reasoning: field tidak dikirim sama sekali.
+    // Tanpa opsi reasoning: field reasoning_effort tidak dikirim, temperature dikirim normal.
     const calls = stubFetchResponders([openAiOk]);
     const provider = new OpenAiCompatibleProvider(testCfg, { retries: 0 });
     await provider.chat(msgs());
     assert.equal('reasoning_effort' in calls[0].body, false, 'tanpa level → tanpa parameter');
+    assert.equal(calls[0].body.temperature, 0.3, 'tanpa reasoning → temperature dikirim default');
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('Fase 2: OpenAI-compatible model dengan prefix reasoning (o1/o3/o4) tidak mengirim temperature', async () => {
+  try {
+    const calls = stubFetchResponders([openAiOk]);
+    const provider = new OpenAiCompatibleProvider({ ...testCfg, model: 'o3-mini' }, { retries: 0 });
+    await provider.chat(msgs());
+    assert.equal('temperature' in calls[0].body, false, 'model o3-mini tidak menyertakan temperature');
+  } finally {
+    restoreFetch();
+  }
+});
+
+test('Fase 2: fallback OpenAI-compatible — 400 temperature error → retry tanpa temperature', async () => {
+  try {
+    const calls = stubFetchResponders([rejectTemperature, openAiOk]);
+    const provider = new OpenAiCompatibleProvider(testCfg, { retries: 0 });
+    const result = await provider.chat(msgs());
+    assert.equal(result, 'ok', 'request retry berhasil');
+    assert.equal(calls.length, 2, 'tepat satu retry');
+    assert.equal('temperature' in calls[1].body, false, 'retry kedua tidak mengirim temperature');
   } finally {
     restoreFetch();
   }
@@ -162,7 +186,7 @@ test('Fase 2: payload Anthropic membawa thinking.budget_tokens + guard API', asy
   try {
     const calls = stubFetchResponders([anthropicOk]);
     const provider = new AnthropicProvider(testCfg, { retries: 0 });
-    await provider.chat(msgs(), { reasoning: 'xhigh' });
+    await provider.chat(msgs(), { reasoning: 'medium' });
     const body = calls[0].body;
     assert.deepEqual(body.thinking, { type: 'enabled', budget_tokens: 8192 });
     assert.equal(body.temperature, 1, 'thinking hanya kompatibel dengan temperature 1');
@@ -183,10 +207,9 @@ test('Fase 2: payload Anthropic membawa thinking.budget_tokens + guard API', asy
 test('Fase 2: payload Gemini membawa thinkingConfig.thinkingBudget sesuai level', async () => {
   try {
     const cases: Array<[ReasoningLevel, number]> = [
-      ['high', 4096],
-      ['xhigh', 8192],
-      ['max', 16384],
-      ['extreme', 24576],
+      ['low', 2048],
+      ['medium', 8192],
+      ['high', 24576],
     ];
     for (const [level, expected] of cases) {
       const calls = stubFetchResponders([geminiOk]);
@@ -207,10 +230,10 @@ test('Fase 2: fallback OpenAI-compatible — 400 reasoning_effort → retry tanp
   try {
     const calls = stubFetchResponders([rejectReasoning, openAiOk]);
     const provider = new OpenAiCompatibleProvider(testCfg, { retries: 0 });
-    const result = await provider.chat(msgs(), { reasoning: 'max' });
+    const result = await provider.chat(msgs(), { reasoning: 'high' });
     assert.equal(result, 'ok', 'request tetap berhasil (tidak gagal)');
     assert.equal(calls.length, 2, 'tepat satu retry');
-    assert.equal(calls[0].body.reasoning_effort, 'max');
+    assert.equal(calls[0].body.reasoning_effort, 'high');
     assert.equal('reasoning_effort' in calls[1].body, false, 'param native di-strip');
     const messages = calls[1].body.messages as Array<{ role: string; content: string }>;
     const systemMsg = messages.find((m) => m.role === 'system');
@@ -218,7 +241,7 @@ test('Fase 2: fallback OpenAI-compatible — 400 reasoning_effort → retry tanp
     assert.ok(systemMsg.content.includes('REASONING DEPTH'), 'template per level terpasang');
 
     // Flag persisten: call berikutnya langsung fallback tanpa 400 lagi.
-    await provider.chat(msgs('lagi'), { reasoning: 'high' });
+    await provider.chat(msgs('lagi'), { reasoning: 'medium' });
     assert.equal(calls.length, 3);
     assert.equal('reasoning_effort' in calls[2].body, false, 'flag persisten per provider');
   } finally {
@@ -230,10 +253,10 @@ test('Fase 2: fallback Anthropic — 400 thinking → retry tanpa thinking + pro
   try {
     const calls = stubFetchResponders([rejectThinking, anthropicOk]);
     const provider = new AnthropicProvider(testCfg, { retries: 0 });
-    const result = await provider.chat(msgs(), { reasoning: 'extreme' });
+    const result = await provider.chat(msgs(), { reasoning: 'high' });
     assert.equal(result, 'ok', 'request tetap berhasil (tidak gagal)');
     assert.equal(calls.length, 2, 'tepat satu retry');
-    assert.deepEqual(calls[0].body.thinking, { type: 'enabled', budget_tokens: 32768 });
+    assert.deepEqual(calls[0].body.thinking, { type: 'enabled', budget_tokens: 16384 });
     assert.equal('thinking' in calls[1].body, false, 'param native di-strip');
     assert.ok(
       String(calls[1].body.system ?? '').includes('REASONING DEPTH'),
@@ -251,7 +274,7 @@ test('Fase 2: fallback Gemini — 400 thinkingConfig → retry tanpa thinkingCon
     const result = await provider.chat(msgs(), { reasoning: 'high' });
     assert.equal(result, 'ok', 'request tetap berhasil (tidak gagal)');
     assert.equal(calls.length, 2, 'tepat satu retry');
-    assert.deepEqual(calls[0].body.thinkingConfig, { thinkingBudget: 4096 });
+    assert.deepEqual(calls[0].body.thinkingConfig, { thinkingBudget: 24576 });
     assert.equal('thinkingConfig' in calls[1].body, false, 'param native di-strip');
     const systemInstruction = calls[1].body.systemInstruction as
       | { parts: Array<{ text: string }> }
@@ -272,25 +295,25 @@ test('Fase 2: withReasoningDirective menyisipkan ke system prompt yang sudah ada
       { role: 'system', content: 'Kamu asisten.', timestamp: new Date().toISOString() },
       { role: 'user', content: 'halo', timestamp: new Date().toISOString() },
     ],
-    'max',
+    'high',
   );
   assert.equal(withSystem.length, 2, 'tidak menambah jumlah pesan');
   assert.ok(withSystem[0].content.startsWith('Kamu asisten.'));
   assert.ok(withSystem[0].content.includes('REASONING DEPTH'));
 
-  const withoutSystem = withReasoningDirective(msgs(), 'extreme');
+  const withoutSystem = withReasoningDirective(msgs(), 'medium');
   assert.equal(withoutSystem.length, 2);
   assert.equal(withoutSystem[0].role, 'system');
   assert.ok(withoutSystem[0].content.includes('REASONING DEPTH'));
 });
 
 // ============================================================================
-// State per-sesi: default XHigh, /reasoning popup & argumen, reset /new
+// State per-sesi: default Medium, /reasoning popup & argumen, reset /new
 // ============================================================================
 
-test('Fase 2: default sesi baru reasoningLevel = xhigh', () => {
+test('Fase 2: default sesi baru reasoningLevel = medium', () => {
   const state = createDefaultSessionState();
-  assert.equal(state.reasoningLevel, 'xhigh', 'Default sesi baru: XHigh');
+  assert.equal(state.reasoningLevel, 'medium', 'Default sesi baru: Medium');
   assert.equal(state.mode, 'default');
   assert.equal(state.buildPhase, 'explore');
 });
@@ -336,24 +359,24 @@ class MockReplyProvider implements LLMProvider {
   }
 }
 
-test('Fase 2: /reasoning popup selector update SessionState in-memory (4 opsi + deskripsi)', async () => {
+test('Fase 2: /reasoning popup selector update SessionState in-memory (3 opsi: Low, Medium, High)', async () => {
   let captured: any = null;
   const { env, agent } = mockCommandEnv({
     select: async (options: any) => {
       captured = options;
-      return 'extreme';
+      return 'high';
     },
   });
 
   await handleCommand('/reasoning', env);
   assert.ok(captured, 'popup selector dijalankan');
   assert.equal(captured.title, 'Pilih Level Reasoning');
-  assert.equal(captured.defaultId, 'xhigh', 'default highlight = level aktif');
-  assert.equal(captured.items.length, 4, 'empat pilihan: High, XHigh, Max, Extreme');
+  assert.equal(captured.defaultId, 'medium', 'default highlight = level aktif');
+  assert.equal(captured.items.length, 3, 'tiga pilihan: Low, Medium, High');
   for (const item of captured.items) {
     assert.ok(item.description.length > 0, `deskripsi 1 baris untuk ${item.label}`);
   }
-  assert.equal(agent.sessionState.reasoningLevel, 'extreme', 'level diperbarui in-memory');
+  assert.equal(agent.sessionState.reasoningLevel, 'high', 'level diperbarui in-memory');
   assert.equal((env as any).config.reasoningLevel, undefined, 'config.json tidak ditulis');
 });
 
@@ -361,9 +384,9 @@ test('Fase 2: /reasoning dibatalkan (Esc) tanpa side effect', async () => {
   const { env, agent } = mockCommandEnv({
     select: async () => null,
   });
-  agent.sessionState.reasoningLevel = 'max';
+  agent.sessionState.reasoningLevel = 'high';
   await handleCommand('/reasoning', env);
-  assert.equal(agent.sessionState.reasoningLevel, 'max', 'level tidak berubah saat cancel');
+  assert.equal(agent.sessionState.reasoningLevel, 'high', 'level tidak berubah saat cancel');
 });
 
 test('Fase 2: /reasoning argumen langsung + argumen invalid', async () => {
@@ -372,18 +395,18 @@ test('Fase 2: /reasoning argumen langsung + argumen invalid', async () => {
   await handleCommand('/reasoning HIGH', env);
   assert.equal(agent.sessionState.reasoningLevel, 'high', 'argumen case-insensitive');
 
-  await handleCommand('/reasoning max', env);
-  assert.equal(agent.sessionState.reasoningLevel, 'max');
+  await handleCommand('/reasoning low', env);
+  assert.equal(agent.sessionState.reasoningLevel, 'low');
 
   await handleCommand('/reasoning ultra', env);
-  assert.equal(agent.sessionState.reasoningLevel, 'max', 'argumen invalid tidak mengubah state');
+  assert.equal(agent.sessionState.reasoningLevel, 'low', 'argumen invalid tidak mengubah state');
 });
 
-test('Fase 2: /new reset reasoningLevel ke xhigh', async () => {
+test('Fase 2: /new reset reasoningLevel ke medium', async () => {
   const { env, agent } = mockCommandEnv();
-  agent.sessionState.reasoningLevel = 'extreme';
+  agent.sessionState.reasoningLevel = 'high';
   await handleCommand('/new', env);
-  assert.equal(agent.sessionState.reasoningLevel, 'xhigh', 'reset ke default tiap sesi baru');
+  assert.equal(agent.sessionState.reasoningLevel, 'medium', 'reset ke default tiap sesi baru');
 });
 
 test('Fase 2: Agent meneruskan reasoningLevel dari SessionState ke ChatOptions provider', async () => {
@@ -393,9 +416,9 @@ test('Fase 2: Agent meneruskan reasoningLevel dari SessionState ke ChatOptions p
   const agent = new Agent(ctx, provider, config);
 
   await agent.handleInstruction('halo');
-  assert.equal(provider.receivedOptions[0]?.reasoning, 'xhigh', 'default XHigh terkirim');
+  assert.equal(provider.receivedOptions[0]?.reasoning, 'medium', 'default Medium terkirim');
 
-  agent.sessionState.reasoningLevel = 'extreme';
+  agent.sessionState.reasoningLevel = 'high';
   await agent.handleInstruction('lagi');
-  assert.equal(provider.receivedOptions[1]?.reasoning, 'extreme', 'level aktif terkirim');
+  assert.equal(provider.receivedOptions[1]?.reasoning, 'high', 'level aktif terkirim');
 });

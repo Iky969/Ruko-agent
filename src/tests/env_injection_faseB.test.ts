@@ -90,7 +90,7 @@ describe('faseB: SessionState default', () => {
     // Field existing tidak berubah (regresi Fase 1/2):
     assert.equal(s.mode, 'default');
     assert.equal(s.buildPhase, 'explore');
-    assert.equal(s.reasoningLevel, 'xhigh');
+    assert.equal(s.reasoningLevel, 'medium');
   });
 
   test('field opsional: tidak wajib — objek tanpa envProfile tetap SessionState valid', () => {
@@ -99,7 +99,7 @@ describe('faseB: SessionState default', () => {
     // Hanya field inti yang wajib; envProfile opsional (undefined default).
     assert.equal(s.mode, 'default');
     assert.equal(s.buildPhase, 'explore');
-    assert.equal(s.reasoningLevel, 'xhigh');
+    assert.equal(s.reasoningLevel, 'medium');
     assert.equal(s.envProfile, undefined);
   });
 });
