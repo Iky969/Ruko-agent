@@ -65,6 +65,12 @@ export function isPrivateIP(ip: string): boolean {
     normalized = normalized.substring(7);
   }
 
+  // TC-NET-04: Blokir literal IPv4 non-standar (hex 0x..., octal 0..., dword integer)
+  // yang bisa disalahartikan oleh resolver OS legacy getaddrinfo / inet_aton
+  if (/^0x[0-9a-f]+(\.|$)/i.test(normalized) || /^0[0-7]+(\.|$)/.test(normalized) || /^\d+$/.test(normalized)) {
+    return true;
+  }
+
   if (net.isIP(normalized) === 4) {
     const long = ipToLong(normalized);
     return PRIVATE_CIDRS.some((cidr) => {
@@ -176,9 +182,16 @@ export class HostFetch {
               },
               servername: isHttps ? stripBrackets(url.hostname) : undefined, // SNI TLS
               timeout: REQUEST_TIMEOUT_MS,
-              // IP pinning: suplai hasil verifikasi pertama langsung ke soket,
-              // mencegah lookup sekunder di level kernel (DNS rebinding TOCTOU).
-              lookup: (_hostname: any, _opts: any, cb: any) => cb(null, pinnedIP, net.isIP(pinnedIP) as 4 | 6),
+              // QA.md §4.A.1: Runtime DNS lookup diblokir mutlak.
+              // Seluruh koneksi wajib langsung terikat ke pinnedIP terverifikasi.
+              lookup: (_hostname: any, _opts: any, cb: any) => {
+                const err = new SSRFError('Runtime DNS lookup diblokir: seluruh koneksi wajib menggunakan pinnedIP');
+                if (typeof cb === 'function') {
+                  cb(err);
+                } else {
+                  throw err;
+                }
+              },
             },
             (res) => {
               let body = '';

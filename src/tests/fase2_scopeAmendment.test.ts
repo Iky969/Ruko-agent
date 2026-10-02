@@ -467,4 +467,31 @@ describe('TC-SCM-05 Scope Contraction Utility', () => {
     assert.equal(rejected, false, 'Normal reject should work');
     assert.equal(manager2.getState().approvalScope?.allowedPaths.includes('src/another.ts'), false);
   });
+
+  test('TC-SCM-04: Sibling directory prefix collision (src-patch vs src) ditolak otomatis', async () => {
+    // QA.md §4.B TC-SCM-04: target /repo/src-patch/x vs scope /repo/src
+    createHostDir();
+    const ws = createWorkspace();
+    mkdirSync(join(ws, 'src'), { recursive: true });
+    mkdirSync(join(ws, 'src-patch'), { recursive: true });
+    mkdirSync(join(ws, 'src_extra'), { recursive: true });
+
+    const state = createMockHostState('sess-scm-04', ['src']);
+    await saveHostState(state);
+
+    const manager = new ScopeAmendmentManager(state, ws, {
+      isTTY: false, // Non-TTY -> fail-closed jika bukan subtree
+    });
+
+    // Mutasi di dalam allowed subtree 'src' harus lolos
+    const insideAllowed = await manager.evaluateMutationTarget('src/valid.ts', 'file sah', false);
+    assert.equal(insideAllowed, true, 'Target di dalam src harus auto-approve');
+
+    // Mutasi pada direktori tetangga dengan prefiks sama (sibling prefix) HARUS DITOLAK
+    const sibling1 = await manager.evaluateMutationTarget('src-patch/evil.ts', 'sibling collision', false);
+    assert.equal(sibling1, false, 'Sibling prefix src-patch tidak boleh lolos under scope src');
+
+    const sibling2 = await manager.evaluateMutationTarget('src_extra/evil.ts', 'sibling underscore', false);
+    assert.equal(sibling2, false, 'Sibling prefix src_extra tidak boleh lolos under scope src');
+  });
 });

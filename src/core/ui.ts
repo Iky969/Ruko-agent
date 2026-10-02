@@ -2039,41 +2039,52 @@ export class RevealFilter {
           this.jsonBuffer = this.buffer.slice(openBraceIdx);
           // Emit content before the potential JSON
           if (openBraceIdx > 0) {
-            this.sink(this.buffer.slice(0, openBraceIdx));
+            this.sink(beforeBrace);
           }
-          this.buffer = this.buffer.slice(0, openBraceIdx);
+          this.buffer = '';
         }
       }
     }
 
     // If we're buffering a potential JSON tool call, accumulate and validate
     if (this.inJsonBuffer) {
-      this.jsonBuffer += this.buffer;
-      this.buffer = '';
-      
-      // Try to parse as JSON to check if it's a complete tool call
-      try {
-        const parsed = JSON.parse(this.jsonBuffer);
-        if (parsed && typeof parsed === 'object' && typeof parsed.tool === 'string' && parsed.tool.length > 0) {
-          // Valid JSON tool call detected - don't emit, it'll be handled by badge
-          this.inJsonBuffer = false;
-          this.jsonBuffer = '';
-          return;
-        }
-        // Valid JSON but not a tool call - emit it
+      if (this.buffer) {
+        this.jsonBuffer += this.buffer;
+        this.buffer = '';
+      }
+
+      // Fast lookahead rollback: if it doesn't look like a tool call after 32 chars, flush immediately
+      if (this.jsonBuffer.length > 32 && !/["'](?:tool|action|name|query|command|path)["']\s*:/i.test(this.jsonBuffer)) {
         this.sink(this.jsonBuffer);
         this.inJsonBuffer = false;
         this.jsonBuffer = '';
-      } catch {
-        // Incomplete JSON - check if it's getting too large (likely not a tool call)
-        if (this.jsonBuffer.length > 5000) {
-          // Too large, probably not a tool call - emit buffered content
+      } else {
+        // Try to parse as JSON to check if it's a complete tool call
+        try {
+          const parsed = JSON.parse(this.jsonBuffer);
+          if (parsed && typeof parsed === 'object' && typeof (parsed.tool || parsed.action || parsed.name) === 'string' && (parsed.tool || parsed.action || parsed.name).length > 0) {
+            // Valid JSON tool call detected - don't emit, it'll be handled by badge
+            this.inJsonBuffer = false;
+            this.jsonBuffer = '';
+            return;
+          }
+          // Valid JSON but not a tool call - emit it
           this.sink(this.jsonBuffer);
           this.inJsonBuffer = false;
           this.jsonBuffer = '';
+        } catch {
+          // Incomplete JSON - cap at 4096 chars if it looks like tool, or 256 chars otherwise
+          const maxCap = /["'](?:tool|action|name|query|command|path)["']\s*:/i.test(this.jsonBuffer) ? 4096 : 256;
+          if (this.jsonBuffer.length > maxCap) {
+            // Too large, probably not a tool call - emit buffered content
+            this.sink(this.jsonBuffer);
+            this.inJsonBuffer = false;
+            this.jsonBuffer = '';
+          } else {
+            // Otherwise keep buffering
+            return;
+          }
         }
-        // Otherwise keep buffering
-        return;
       }
     }
 

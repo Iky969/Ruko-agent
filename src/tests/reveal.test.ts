@@ -39,3 +39,26 @@ test('reveal filter drops an unterminated tool block at end of stream', () => {
   const out = runFeed(['Hi\n```tool\n{"tool":"exec"']);
   assert.equal(out, 'Hi\n');
 });
+
+test('TC-REV-01: RevealFilter does not duplicate text prefix on prose with braces (ADIT.md 2.1)', () => {
+  const out = runFeed(['Analisis: { timeout: 30 } selesai.']);
+  assert.equal(out, 'Analisis: { timeout: 30 } selesai.');
+});
+
+test('TC-REV-02: RevealFilter fast-path rollbacks non-tool JSON lookahead live before end() (ADIT.md 2.2)', () => {
+  let liveOut = '';
+  const f = new RevealFilter((t) => {
+    liveOut += t;
+  });
+  f.feed('Ketik { contoh ');
+  assert.equal(liveOut, 'Ketik ');
+  f.feed('teks biasa tanpa penutup yang cukup panjang untuk melebihi threshold 32 karakter');
+  assert.equal(liveOut, 'Ketik { contoh teks biasa tanpa penutup yang cukup panjang untuk melebihi threshold 32 karakter');
+  f.end();
+  assert.equal(liveOut, 'Ketik { contoh teks biasa tanpa penutup yang cukup panjang untuk melebihi threshold 32 karakter');
+});
+
+test('TC-REV-03: RevealFilter suppresses raw JSON tool calls from streaming', () => {
+  const out = runFeed(['Langkah 1: ', '{"tool":"exec","command":"ls -la"}', ' Selesai.']);
+  assert.equal(out, 'Langkah 1:  Selesai.');
+});

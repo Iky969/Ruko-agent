@@ -72,6 +72,25 @@ describe('F1-T0 HostFetch (validasi pra-koneksi)', () => {
     await assert.rejects(() => HostFetch.fetch('http://10.9.8.7/'), SSRFError);
     await assert.rejects(() => HostFetch.fetch('http://169.254.169.254/latest/meta-data'), SSRFError);
   });
+
+  test('TC-NET-04: URL literal IPv4 non-standar (0x7f.0.0.1, 0.0.0.0) ditolak seketika', async () => {
+    // QA.md §4.B TC-NET-04: hex literal, 0.0.0.0, octal literal
+    await assert.rejects(() => HostFetch.fetch('http://0x7f.0.0.1:3000'), SSRFError);
+    await assert.rejects(() => HostFetch.fetch('http://0.0.0.0:80'), SSRFError);
+    assert.equal(isPrivateIP('0x7f.0.0.1'), true);
+    assert.equal(isPrivateIP('0177.0.0.1'), true);
+    assert.equal(isPrivateIP('2130706433'), true);
+  });
+
+  test('TC-NET-05: Loopback IPv6 [::1] dan cloud metadata 169.254.169.254 / link-local ditolak', async () => {
+    // QA.md §4.B TC-NET-05: [::1], 169.254.169.254, fe80::1
+    await assert.rejects(() => HostFetch.fetch('http://[::1]:8080/api'), SSRFError);
+    await assert.rejects(() => HostFetch.fetch('http://169.254.169.254/latest/meta-data'), SSRFError);
+    await assert.rejects(() => HostFetch.fetch('http://[fe80::1]:8080/'), SSRFError);
+    assert.equal(isPrivateIP('169.254.169.254'), true);
+    assert.equal(isPrivateIP('::1'), true);
+    assert.equal(isPrivateIP('fe80::1'), true);
+  });
 });
 
 describe('F1-T0 HostFetch (server loopback nyata → harus diblokir)', () => {

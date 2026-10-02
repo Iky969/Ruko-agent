@@ -26,12 +26,12 @@
   - Status: SELESAI (Fase 1 — F1-T3, commit `f7c516c`)
 
 ### Fase C: Boundary I/O & Network Guard (P0)
-- [ ] **PR-C1: TOCTOU-Safe File Reader** (`src/core/tools/secureRead.ts`)
-  - Status: Pending
-  - Tests: `test/secureRead.test.ts` (symlink escape, fstat descriptor, inode match)
-- [ ] **PR-C2: SSRF & IP Pinning Fetch** (`src/core/network/hostFetch.ts`)
-  - Status: Pending
-  - Tests: `test/hostFetch.test.ts` (private CIDRs, redirect DNS check, no-socket-reuse)
+- [x] **PR-C1: TOCTOU-Safe File Reader** (`src/core/tools/secureRead.ts`)
+  - Status: SELESAI (`src/core/tools/secureRead.ts`, `src/tests/secureRead.test.ts`)
+  - Tests: `src/tests/secureRead.test.ts` (TC-SEC-01..03, null byte, traversal, symlink segment, not a file, file size)
+- [x] **PR-C2: SSRF & IP Pinning Fetch** (`src/core/network/hostFetch.ts`)
+  - Status: SELESAI (`src/core/network/hostFetch.ts`, `src/tests/fase1_hostFetch.test.ts`)
+  - Tests: `src/tests/fase1_hostFetch.test.ts` (TC-NET-01..05, IPv4 non-standard literal, link-local, loopback IPv6, lookup lock)
 
 ### Fase D: Scope Contract & Execution Governor (P1)
 - [x] **PR-D1: Scope Amendment Manager** (`src/core/approval/scopeAmendment.ts`)
@@ -51,8 +51,8 @@
 ---
 
 ## 3. Active Task / Next Focus
-- **Current Step:** Subagent Scope Inheritance & P0 Remediation — [status: DISETUJUI]
-- **Action Item:** Push perubahan yang telah disetujui (P0-1, P0-2, P0-3, Subagent Scope Inheritance, .gitignore) ke branch remote `V2.0.0-dev-Unreleased`.
+- **Current Step:** Sisa Audit Remediasi (Section 15: UI Streaming Glitch, Subprocess Env Harmonization, E2E CLI Integration Harness) — [status: SELESAI-nunggu review]
+- **Action Item:** Menunggu review persetujuan untuk seluruh perbaikan Fase C, Section 14, dan Section 15 sebelum commit dan tagging rilis.
 
 ---
 
@@ -176,6 +176,67 @@
   - Sebelum: 1194 tests (1193 pass / 0 fail / 1 skip win32, 59 suites).
   - Sesudah: 1198 tests (1197 pass / 0 fail / 1 skip win32, 60 suites).
   - Delta: +4 test baru di suite `subagent_scope_inheritance.test.ts` (1197 pass / 0 fail / 1 skip win32, 60 suites).
-- **Next step:** Push perubahan yang telah disetujui ke branch remote `V2.0.0-dev-Unreleased`.
+- **Next step:** Selesai; lanjut ke Fase C Boundary I/O & Network Guard (Section 14).
+
+
+## 14. Fase C — PR-C1 TOCTOU-Safe File Reader & Network / Scope Boundary Hardening [status: SELESAI-nunggu review]
+- **Objective:** Menutup kerentanan TOCTOU pada pembacaan berkas (PR-C1, Blueprint §2.4), mengamankan callback lookup DNS soket pada `hostFetch.ts` dari celah DNS rebinding bypass, melengkapi suite uji TC-NET-04 & TC-NET-05, serta memverifikasi penolakan collision direktori tetangga (sibling prefix) pada TC-SCM-04 (`feedback.txt`, `QA.md`).
+- **Keputusan teknis penting + alasan:**
+  1. **Modul Defensif `secureReadFile` (`src/core/tools/secureRead.ts`)**:
+     - Memvalidasi null byte (`\0`) dan pemblokiran NTFS Alternate Data Streams (`:`) pada lingkungan Windows.
+     - Pengecekan segmen berkas bertahap (`fs.lstat`) untuk memblokir symlink di tengah jalur dan tipe berkas tak aman (FIFO/socket).
+     - Pembukaan file descriptor kernel atomik menggunakan flag `O_RDONLY | O_NOFOLLOW | O_CLOEXEC` (dengan graceful fallback di Windows).
+     - Validasi File Descriptor via `handle.stat({ bigint: true })` memastikan `isFile() === true` dan ukuran berkas maksimal 5MB.
+     - Post-open cross-check: resolusi `realpath` dan verifikasi integritas pasangan `stat.ino === realStat.ino` dan `stat.dev === realStat.dev` (anti-swap race).
+     - Verifikasi post-read stat (`mtimeNs` dan `size`) mendeteksi mutasi berkas bersamaan selama proses baca.
+  2. **Hardening Callback Lookup Soket & Deteksi Literal IPv4 Non-Standar (`src/core/network/hostFetch.ts`)**:
+     - Callback opsi `lookup` pada `http(s).request` diubah menjadi fail-closed (`throw new SSRFError('Runtime DNS lookup diblokir...')`). Seluruh koneksi dipaksa terikat langsung ke `pinnedIP` yang telah diverifikasi pada hop pertama, menutup celah DNS rebinding kernel TOCTOU (feedback.txt item #3).
+     - Penambahan deteksi literal IPv4 non-standar (format hex `0x...`, octal `0...`, dan integer dword) pada `isPrivateIP` untuk mencegah interpretasi ganda oleh resolver legacy OS `getaddrinfo` / `inet_aton` (TC-NET-04).
+     - Verifikasi penolakan IPv6 loopback literal `[::1]` dan metadata link-local `169.254.169.254` / `fe80::1` (TC-NET-05).
+  3. **Penolakan Sibling Prefix Collision (`src/core/approval/scopeAmendment.ts`)**:
+     - Verifikasi uji adversarial `TC-SCM-04`: upaya mutasi pada direktori tetangga dengan awalan nama serupa (misal target `src-patch/evil.ts` vs scope `src`) ditolak otomatis secara fail-closed berkat validasi pemisah segmen `path.sep`.
+  4. **Hasil Evaluasi Model Auditor (`alex.py` vs `py.py`)**:
+     - `py.py` (DeepSeek v4.1 Flash via b.ai) memberikan analisis arsitektur terdalam, menangani corner-case NTFS ADS Windows, `FileHandle.stat({ bigint: true })`, bounded memory stream, dan `openat` runtime reality dengan presisi kode yang tinggi.
+     - `alex.py` (Nemotron via OpenRouter) memberikan struktur ringkas tetapi terpotong token limit dan menggunakan API `require('node:fs').promises.fstat(fd)` yang tidak valid untuk `FileHandle`.
+- **File yang dimodifikasi / dibuat:**
+  - `src/core/tools/secureRead.ts` (baru) — Implementasi `secureReadFile`, `SecurityViolation`, dan `isInsideWorkspace`.
+  - `src/core/network/hostFetch.ts` — Hardening socket `lookup` callback dan filtrasi IPv4 non-standar di `isPrivateIP`.
+  - `src/tests/secureRead.test.ts` (baru) — 9 adversarial tests: TC-SEC-01, TC-SEC-02, TC-SEC-03, traversal, symlink segment, file size, not regular file, workspace containment.
+  - `src/tests/fase1_hostFetch.test.ts` — Penambahan 2 tests: TC-NET-04 (IPv4 hex/octal/dword) dan TC-NET-05 (IPv6 loopback & link-local metadata).
+  - `src/tests/fase2_scopeAmendment.test.ts` — Penambahan 1 test: TC-SCM-04 (sibling prefix collision).
+- **Rekonsiliasi test (sebelum/sesudah/delta):**
+  - Sebelum: 1198 tests (1197 pass / 0 fail / 1 skip win32, 60 suites).
+  - Sesudah: 1210 tests (1209 pass / 0 fail / 1 skip win32, 61 suites).
+  - Delta: +12 test baru (1209 pass / 0 fail / 1 skip win32, 61 suites).
+## 15. UI Streaming Glitch Remediation, Subprocess Env Harmonization & E2E CLI Integration Harness [status: SELESAI-nunggu review]
+- **Objective:** Menuntaskan sisa temuan audit ADIT.md/UCUP.md dan feedback.txt:
+  1. Memperbaiki bug duplikasi teks (buffer ownership inversion) dan streaming freeze 5000 karakter pada `RevealFilter` (`src/core/ui.ts`, ADIT.md §2.1 & §2.2, feedback.txt #5) via pola non-destructive speculative parsing dan fast lookahead rollback yang dikonsultasikan dengan DeepSeek (`py.py`).
+  2. Menyelaraskan pembersihan environment subprocess di `src/core/executor.ts` (ADIT.md §1.3, UCUP.md §1.3) agar `DANGEROUS_ENV_VARS` mencakup `NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`, `NODE_PATH`, `NODE_V8_COVERAGE`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, dan `DYLD_*`.
+  3. Membangun harness pengujian E2E integrasi CLI v2.0.0 di `src/tests/e2e_security_pipeline.test.ts` (ADIT.md §4.3, UCUP.md §4.3, feedback.txt #8) untuk memvalidasi siklus hidup startup biner, state sesi 0600 di `~/.ruko/sessions/`, penolakan mutasi Plan Mode di level DispatcherGate/Agent, dan fail-safe resume reset ke mode 'plan'.
+- **Keputusan teknis penting + alasan:**
+  1. **Non-Destructive Speculative Parsing (`RevealFilter` di `src/core/ui.ts`)**:
+     - Menghapus pemotongan destruktif `this.buffer = this.buffer.slice(0, openBraceIdx)` yang sebelumnya menyebabkan prefix teks sebelum `{` di-sink dua kali (terduplikasi).
+     - Menambahkan fast lookahead rollback: jika akumulasi teks melebihi 32 karakter dan tidak memuat pola kunci tool call (`"tool":`, `"action":`, `"name":`, dll.), buffer spekulatif seketika dialirkan ke terminal tanpa menunggu streaming berakhir atau mencapai 5000 karakter.
+     - Membatasi batas maksimum penahanan incomplete JSON non-tool menjadi 256 karakter (eliminasi total streaming freeze).
+  2. **Harmonisasi Sanitasi Subprocess (`src/core/executor.ts`)**:
+     - Memperluas `DANGEROUS_ENV_VARS` dengan menyertakan variabel injeksi proses Node (`NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`, `NODE_PATH`, `NODE_V8_COVERAGE`) dan pembajak library loader (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, serta awalan `DYLD_*`).
+     - Menutup asimetri keamanan antara `resourceGovernor.ts` dan eksekutor shell umum.
+  3. **E2E Integration Test Harness (`src/tests/e2e_security_pipeline.test.ts`)**:
+     - Menguji biner kompilasi `dist/index.js` dengan `spawn` subprocess dan isolasi direktori `HOME` sementara.
+     - Memvalidasi pembentukan direktori sesi, hak akses 0600 pada berkas kanonis `state.json`, inisiasi awal dalam Plan Mode, blokir mutasi disk oleh `DispatcherGate`, dan reset otomatis mode ke `plan` saat pemulihan sesi.
+- **File yang dimodifikasi / dibuat:**
+  - `src/core/ui.ts` — Perbaikan `RevealFilter` buffer ownership dan streaming lookahead.
+  - `src/core/executor.ts` — Penambahan `NODE_OPTIONS`, `LD_PRELOAD`, `DYLD_*` ke `DANGEROUS_ENV_VARS`.
+  - `src/tests/reveal.test.ts` — 3 regression tests: TC-REV-01 (anti-duplikasi), TC-REV-02 (fast lookahead live streaming), TC-REV-03 (raw JSON tool suppression).
+  - `src/tests/executor.test.ts` — 1 regression test: TC-ENV-01 (sanitasi environment subprocess).
+  - `src/tests/e2e_security_pipeline.test.ts` (baru) — 3 E2E test cases: startup lifecycle 0600 state, Plan Mode mutation blocking, dan deterministic session resume reset.
+- **Rekonsiliasi test (sebelum/sesudah/delta):**
+  - Sebelum: 1210 tests (1209 pass / 0 fail / 1 skip win32, 61 suites).
+  - Sesudah: 1217 tests (1216 pass / 0 fail / 1 skip win32, 61 suites).
+  - Delta: +7 test baru (1216 pass / 0 fail / 1 skip win32, 61 suites).
+- **Belum di-commit.**
+- **Next step:** Menunggu review persetujuan dari pengguna sebelum commit.
+
+
 
 

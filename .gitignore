@@ -23,8 +23,7 @@ ADIT.md
 UCUP.md
 alex.py
 Red.md
-# Audit reports yang di-generate lokal tapi tidak untuk repo utama
-# (AUDIT_REPORT.md & CHANGELOG.md sekarang di-track untuk transparansi)
-# LAPORAN_AUDIT* — diizinkan jika untuk dokumentasi resmi
-# AUDIT_REPORT.md — diizinkan untuk audit resmi
+# Berkas internal QA & Blueprint perencanaan
+QA.md
+v2.0.0-blueprint
 

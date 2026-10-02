@@ -3,9 +3,9 @@ set -e
 
 REPO="https://github.com/Iky969/Ruko-agent.git"
 INSTALL_DIR="$HOME/.ruko-agent"
-# v1.9.0: pin utama = release tag immutable. Pin SHA tambahan tetap tersedia
+# v2.0.0: pin utama = release tag immutable. Pin SHA tambahan tetap tersedia
 # untuk supply-chain strict mode via RUKO_COMMIT_SHA (opsional).
-TAG="${RUKO_VERSION:-v1.9.0}"
+TAG="${RUKO_VERSION:-v2.0.0}"
 TARGET_SHA="${RUKO_COMMIT_SHA:-}"
 
 # Parse args
@@ -28,7 +28,7 @@ fi
 if [ "$TAG" = "main" ] || [ "$TAG" = "master" ] || [ "$TAG" = "HEAD" ]; then
   if [ "${RUKO_ALLOW_MUTABLE:-0}" -ne 1 ]; then
     echo "Error: Menargetkan branch mutable ('$TAG') ditolak demi keamanan supply chain."
-    echo "  Gunakan release tag immutable (misal: v1.9.0) atau commit SHA spesifik via RUKO_COMMIT_SHA."
+    echo "  Gunakan release tag immutable (misal: v2.0.0) atau commit SHA spesifik via RUKO_COMMIT_SHA."
     echo "  Jika Anda sengaja ingin menggunakan branch mutable untuk pengembangan, set RUKO_ALLOW_MUTABLE=1"
     exit 1
   fi

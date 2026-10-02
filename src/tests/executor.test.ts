@@ -62,6 +62,24 @@ test('M4: env var biasa tetap diteruskan ke child process', async () => {
   assert.equal(result.stdout.trim(), 'kept');
 });
 
+test('TC-ENV-01: execute() membuang NODE_OPTIONS, LD_PRELOAD, dan DYLD_* (ADIT.md 1.3)', async () => {
+  if (isWin) return;
+
+  const result = await execute(
+    'printf "%s|%s|%s|%s" "$NODE_OPTIONS" "$LD_PRELOAD" "$LD_LIBRARY_PATH" "$DYLD_INSERT_LIBRARIES"',
+    {
+      env: {
+        NODE_OPTIONS: '--require /tmp/malicious.js',
+        LD_PRELOAD: '/tmp/malicious.so',
+        LD_LIBRARY_PATH: '/tmp/lib',
+        DYLD_INSERT_LIBRARIES: '/tmp/dyld.dylib',
+      },
+    },
+  );
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout.trim(), '|||', 'semua injection env var harus dibuang dari child environment');
+});
+
 test('execute summarizes huge output via the log summarizer', async () => {
   const script =
     "console.log(Array.from({ length: 5000 }, (_, i) => 'line ' + i).join('\\n'))";

@@ -25,6 +25,16 @@ Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tun
 - Subtree auto-approval dan terminal micro-prompt `[Y/n]` untuk amandemen scope dinamis.
 - Identifikasi repositori tepercaya berbasis Git Remote Origin kanonis dan UID kepemilikan.
 
+### [Fase C & Boundary Hardening] PR-C1 TOCTOU-Safe File Reader & Network Guard — 2026-10-02
+- Implementasi pembacaan berkas TOCTOU-safe (`secureReadFile`), validasi segmen lstat bertahap, pembukaan via file descriptor kernel `O_RDONLY | O_NOFOLLOW | O_CLOEXEC`, post-open inode/dev matching, serta mitigasi NTFS Alternate Data Streams (PR-C1). Hardening soket `lookup` fail-closed dan blokir IPv4 non-standar / IPv6 loopback / metadata link-local (TC-NET-04 & TC-NET-05). Validasi penolakan sibling prefix collision pada amandemen scope (TC-SCM-04).
+- File: `src/core/tools/secureRead.ts`, `src/core/network/hostFetch.ts`, `src/tests/secureRead.test.ts`, `src/tests/fase1_hostFetch.test.ts`, `src/tests/fase2_scopeAmendment.test.ts`.
+- Delta test: 1198 (1197 pass / 0 fail / 1 skip win32) → 1210 (1209 pass / 0 fail / 1 skip win32) = +12.
+
+### [P0 Critical Triage & Subagent Confinement] Pipeline Wiring & Isolation — 2026-10-01
+- Fasad tunggal `bootstrapSecurityPipeline()` mengikat FileLock, HostState, ScopeAmendmentManager, dan DispatcherGate ke CLI nyata (`index.ts`, `agent.ts`, `loop.ts`). Remediasi parent symlink directory traversal (`assertPhysicalContainment`) pada operasi file I/O (CVSS 9.3). Denylist `DANGEROUS_WORKSPACE_ENV_VARS` di `loadDotenv()` menutup celah injeksi RCE/SSRF. Pengurungan non-interaktif dan pewarisan batas subtree pada subagent delegation.
+- File: `src/core/securityPipeline.ts`, `src/agent/agent.ts`, `src/agent/subagent.ts`, `src/agent/tools.ts`, `src/agent/filetools.ts`, `src/core/dotenv.ts`, `src/core/loop.ts`, `src/core/state/hostState.ts`, `src/index.ts`, 4 test suites.
+- Delta test: 1178 (1177 pass / 0 fail / 1 skip win32) → 1198 (1197 pass / 0 fail / 1 skip win32) = +20.
+
 ### [req.md Fixes] Stabilisasi Eksekusi Model & Token Safety — 2026-10-01
 - **UI Streaming Buffer (Fase V):** `RevealFilter` menampung potongan token saat `{` terdeteksi hingga JSON tool call tervalidasi/timeout, mencegah kebocoran payload mentah `{"tool":"write_file",...}` ke terminal sebelum badge aksi dirender.
 - **Active Loop Intervention (Fase II):** Loop detector menyuntikkan *synthetic tool result* eksplisit saat deteksi ulang: soft warning → "Dilarang membaca ulang berkas/printf, segera jalankan patch_file", hard stop → `[detesi loop] — eksekusi dihentikan, berikan respons akhir`.
