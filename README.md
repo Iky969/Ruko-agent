@@ -202,6 +202,11 @@ Ruko menerapkan defense-in-depth:
 - **Context Compression**: rangkum percakapan lama saat mendekati limit, adjustable via `/setctx`, `/settoken`, `/context set`
 - **Multi-Profil**: `.ruko/config.json` dengan alias `hemat`, `kuat`, `lokal` — ganti via `/profile`
 
+### Plan Mode & Reasoning
+- **`/plan on`**: agent hanya baca & usulkan langkah; write/exec diblok di kode
+- Saat model menampilkan menu bernomor (`1. … / 2. …`), balas dengan nomor (atau `pilih 1`, `opsi 2`) → Plan Mode **otomatis off** dan opsi dieksekusi (tanpa `/plan off` manual)
+- **`/reasoning low|medium|high`**: atur tingkat reasoning native (default `medium`); level lama `xhigh`/`max`/`extreme` sudah diseragamkan
+
 ---
 
 ## 🛠️ Daftar Tool Terintegrasi
@@ -256,12 +261,13 @@ Ruko menerapkan defense-in-depth:
 | `/export [json\|md]` | Ekspor trajectory |
 | `/clear` | Bersihkan memori percakapan |
 | `/compact` | Paksa kompresi history |
-| `/plan on\|off` | Mode rencana (blokir write/exec) |
+| `/plan on\|off` | Mode rencana (blokir write/exec); balas nomor opsi → auto-off + eksekusi |
+| `/mode [default\|research\|code\|build]` | Mode kerja agen (loop detector & fase build) |
+| `/reasoning [low\|medium\|high]` | Tingkat reasoning native (default medium) |
 | `/yolo on\|off` | Mode auto-approve |
 | `/undo [path]` | Batalkan perubahan file |
 | `/settings` | Dashboard terpadu (context, tokens, role, mode, approval) |
 | `/role [nama]` | Ganti role AI |
-| `/mode beginner\|pro` | Mode pengguna |
 | `/profile [alias]` | Ganti profil LLM |
 | `/exec <cmd>` | Shell langsung |
 | `/history [n]` | n pesan terakhir |
@@ -410,4 +416,4 @@ MIT License — lihat [LICENSE](LICENSE)
 - **Contributors**: [CONTRIBUTORS.md](CONTRIBUTORS.md)
 - **Changelog**: [CHANGELOG.md](CHANGELOG.md) & [CHANGELOGv2.md](CHANGELOGv2.md) (ringkasan kerja detail di [PROGRESS.md](PROGRESS.md) & [PROGRESS2.md](PROGRESS2.md))
 
-Laporkan kerentanan via GitHub Advisory (jangan buka Issue publik).
+Issue publik **diperbolehkan** (bug, fitur, diskusi). Untuk kerentanan keamanan yang butuh perbaikan lebih cepat dan aman, hubungi privat lewat **GitHub Security Advisory** atau profil maintainer — detail di [SECURITY.md](.github/SECURITY.md).

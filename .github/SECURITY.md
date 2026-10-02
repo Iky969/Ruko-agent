@@ -14,11 +14,14 @@
 
 Kami menghargai laporan keamanan komunitas.
 
-1. **JANGAN** buka GitHub Issue publik untuk vulnerability
-2. Laporkan privat via **GitHub Security > Advisories > New draft advisory** di repo ini
-3. Atau email maintainer via GitHub profile
-4. Respons: 1x24 jam untuk verifikasi
-5. Kredit reporter dicantumkan setelah patch rilis (jika diizinkan)
+1. **Issue publik diperbolehkan** untuk diskusi, pertanyaan, bug, dan laporan non-sensitif.
+2. Untuk **kerentanan keamanan** (terutama yang berisiko dieksploitasi sebelum ada patch):
+   - Boleh dilapor lewat **Issue publik** jika kamu nyaman, **atau**
+   - **Untuk perbaikan lebih cepat dan aman**: hubungi privat via **GitHub Security → Advisories → New draft advisory** di repo ini, atau lewat kontak maintainer di profil GitHub.
+3. Respons target: **1×24 jam** untuk verifikasi awal.
+4. Kredit reporter dicantumkan setelah patch rilis (jika diizinkan).
+
+> Hindari menempel credential, secret, atau rantai exploit lengkap di Issue publik sebelum mitigasi tersedia.
 
 ---
 
