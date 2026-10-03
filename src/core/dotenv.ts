@@ -95,8 +95,75 @@ export interface DotenvOptions {
 }
 
 /**
+ * Denylist variabel lingkungan berbahaya dari berkas .env workspace (repo asing).
+ * (CVSS 9.1 — ADIT.md §1.2, UCUP.md §1.2)
+ *
+ * Mencegah RCE instan via Node/loader hooks, pembajakan traffic LLM via proxy,
+ * dan pembajakan endpoint LLM via *_BASE_URL.
+ */
+export const DANGEROUS_WORKSPACE_ENV_VARS = new Set([
+  // RCE & Process / Loader Injection
+  'NODE_OPTIONS',
+  'NODE_EXTRA_CA_CERTS',
+  'NODE_V8_COVERAGE',
+  'NODE_PATH',
+  'NODE_DEBUG',
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'PYTHONPATH',
+  'PERL5LIB',
+  'RUBYLIB',
+  'JAVA_TOOL_OPTIONS',
+  '_JAVA_OPTIONS',
+
+  // Network & Proxy Hijacking (kredensial / API Key exfiltration)
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'SOCKS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+  'socks_proxy',
+  'no_proxy',
+
+  // Shell execution / Startup hooks
+  'BASH_ENV',
+  'ENV',
+  'PROMPT_COMMAND',
+  'CDPATH',
+  'IFS',
+  'BASH_RCFILE',
+  'ZDOTDIR',
+  'SHELL',
+]);
+
+/**
+ * Memeriksa apakah nama variabel env termasuk berbahaya jika dimuat dari .env workspace.
+ * Memblokir seluruh variabel di denylist serta semua varian *_BASE_URL dan *_API_BASE.
+ */
+export function isDangerousWorkspaceEnvVar(key: string): boolean {
+  const upper = key.toUpperCase();
+  if (DANGEROUS_WORKSPACE_ENV_VARS.has(key) || DANGEROUS_WORKSPACE_ENV_VARS.has(upper)) {
+    return true;
+  }
+  if (upper.startsWith('DYLD_') || upper.startsWith('LD_')) {
+    return true;
+  }
+  if (upper.endsWith('_BASE_URL') || upper.endsWith('_API_BASE')) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Loads environment variables from a .env file into process.env.
- * Returns the parsed dictionary of loaded variables.
+ * Sanitizes entries against DANGEROUS_WORKSPACE_ENV_VARS to prevent RCE,
+ * proxy redirection, and base URL hijacking from untrusted repositories.
+ * Returns the parsed dictionary of safe loaded variables.
  */
 export function loadDotenv(options: DotenvOptions = {}): Record<string, string> {
   const filePath = options.path ?? join(process.cwd(), '.env');
@@ -107,13 +174,21 @@ export function loadDotenv(options: DotenvOptions = {}): Record<string, string> 
   try {
     const content = readFileSync(filePath, 'utf8');
     const parsed = parseEnv(content);
+    const safeLoaded: Record<string, string> = {};
+
     for (const [key, value] of Object.entries(parsed)) {
+      if (isDangerousWorkspaceEnvVar(key)) {
+        // Blokir mutlak variabel berbahaya agar tidak mencemari process.env
+        continue;
+      }
+      safeLoaded[key] = value;
       if (options.override || process.env[key] === undefined) {
         process.env[key] = value;
       }
     }
-    return parsed;
+    return safeLoaded;
   } catch {
     return {};
   }
 }
+

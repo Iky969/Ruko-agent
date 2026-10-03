@@ -12,6 +12,7 @@ import { needsSetup, runSetupWizard } from './core/wizard.js';
 import { loadDotenv } from './core/dotenv.js';
 import { isWorkspaceTrusted, promptWorkspaceTrust } from './core/trust.js';
 import { initDefaultSkills } from './core/skills.js';
+import { bootstrapSecurityPipeline, SecurityPipeline } from './core/securityPipeline.js';
 import {
   colorsEnabled,
   bold,
@@ -581,13 +582,33 @@ async function main(): Promise<void> {
   const ctx = new Context(config);
   const llm = createProvider(config);
   const agent = new Agent(ctx, llm, config);
-  const loop = new SystemLoop(ctx, agent, config, configPath);
+
+  // Bootstrap v2.0.0 security pipeline (FileLock -> HostState -> ScopeAmendmentManager -> DispatcherGate)
+  let pipeline: SecurityPipeline | null = null;
+  try {
+    pipeline = await bootstrapSecurityPipeline({
+      workspaceRoot: process.cwd(),
+      resume: true,
+      isTTY: process.stdin.isTTY,
+    });
+    activePipeline = pipeline;
+    agent.setHostState(pipeline.hostState);
+    agent.setScopeAmendmentManager(pipeline.scopeManager);
+  } catch (err) {
+    console.error(red(`\n⛔ KEGAGALAN BOOTSTRAP KEAMANAN: ${(err as Error).message}`));
+    console.error(yellow('Sesi dihentikan demi menjaga integritas host (fail-closed).\n'));
+    process.exit(1);
+  }
+
+  const loop = new SystemLoop(ctx, agent, config, configPath, pipeline);
   loop.start();
 }
 
 // ─────────────────────────────────────────────────────────────
 // Global Error Handling — hardened (Tugas 10)
 // ─────────────────────────────────────────────────────────────
+
+let activePipeline: SecurityPipeline | null = null;
 
 /** Returns true when debug output is enabled via environment. */
 function isDebugMode(): boolean {
@@ -600,6 +621,10 @@ function isDebugMode(): boolean {
  */
 function emergencyCleanup(): void {
   try {
+    if (activePipeline) {
+      void activePipeline.releaseLock().catch(() => {});
+      activePipeline = null;
+    }
     if (process.stdin.isTTY && process.stdin.isRaw) {
       process.stdin.setRawMode(false);
     }

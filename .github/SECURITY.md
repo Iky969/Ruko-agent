@@ -4,8 +4,9 @@
 
 | Versi | Didukung | Catatan |
 |---|---:|---|
-| 1.7.x | ✅ | Aktif, patch keamanan reguler |
-| < 1.7.0 | ❌ | Tidak didukung, upgrade ke 1.7.7 |
+| 2.0.x | ✅ | Versi stabil aktif saat ini |
+| 1.9.x | ⚠️ | Patch keamanan esensial |
+| < 1.9.0 | ❌ | Tidak didukung, wajib upgrade ke 2.0.0 |
 
 ---
 
@@ -104,17 +105,49 @@ Untuk fork atau self-hosted runner, aktifkan di **Settings > Code security and a
 
 ---
 
-## Security Boundaries & Known Limitations
+## Model Ancaman & Keterbatasan Keamanan (Threat Model & Realistic Limitations)
 
-Lihat README bagian **Security Boundaries** (8 poin) untuk batasan inheren: approval gate bergantung user, redaksi best-effort, TOCTOU micro-window, single-user trusted env, prompt injection via read-only, memory/skills writable by design, rekomendasi container isolasi, dan API key plaintext awareness.
+Ruko dirancang secara spesifik sebagai **Deterministic Local Policy Enforcer** untuk membantu melindungi workstation lokal milik pengembang (*single-user developer workstation*) dari repositori pihak ketiga yang beritikad jahat (*untrusted workspace*) dan serangan *Indirect Prompt Injection* (IPI).
+
+Keamanan sistem ini memiliki batasan arsitektur nyata yang harus dipahami oleh pengguna apa adanya:
+
+1. **Bukan Isolasi Tingkat Kernel atau Hipervisor (Bukan Multi-Tenant SaaS):**
+   - Ruko berjalan murni sebagai proses aplikasi Node.js di ruang pengguna (*user-space*) dengan hak akses sistem (UID/GID) pengguna yang menjalankannya di OS.
+   - Ruko **tidak menyediakan** isolasi tingkat perangkat keras (seperti MicroVM AWS Firecracker), virtualisasi kernel (gVisor/Kata), ataupun cgroups/chroot namespace bawaan.
+   - Segala operasi yang dieksekusi atau disetujui oleh pengguna akan berjalan dengan hak akses penuh akun pengguna tersebut di sistem operasi host.
+
+2. **Eksekusi Shell Arbitrer Tidak Dapat Dijamin Kebal 100%:**
+   - Perintah shell (`exec`) dijalankan oleh shell sistem host (`/bin/sh` di POSIX atau `cmd.exe`/`PowerShell` di Windows).
+   - Ruko menyaring variabel environment berbahaya (`NODE_OPTIONS`, `LD_PRELOAD`, `DYLD_*`, hook startup shell) dan memblokir pola perintah destruktif yang dikenal.
+   - Namun, shell adalah lingkungan *Turing-complete*. Pola perintah yang disamarkan (*obfuscated*), di-encode secara dinamis (misalnya via base64 runtime), atau dievaluasi tidak langsung tidak dapat diproteksi secara absolut hanya dengan inspeksi pola string. Jika pengguna menyetujui eksekusi perintah shell berbahaya, proses tersebut akan berjalan di komputer host.
+
+3. **Penyimpanan Kredensial & State Tanpa Enkripsi Saat Diam (At-Rest):**
+   - Berkas konfigurasi (`.ruko/config.json`) dan direktori sesi otoritatif (`~/.ruko/sessions/`) diamankan dengan izin sistem berkas POSIX `0600` (hanya dapat dibaca/ditulis oleh pemilik akun).
+   - Izin berkas `0600` ini **bukan enkripsi**. Kunci API dan riwayat percakapan tersimpan dalam format teks biasa (*plaintext*).
+   - Berkas ini tetap rentan terekspos jika pengguna membuat cadangan (*backup*) disk yang tidak terenkripsi, memindahkan snapshot kontainer, atau jika komputer telah terinfeksi proses berbahaya lain yang berjalan di bawah pengguna yang sama.
+
+4. **Keterbatasan Semantik Filesystem Lintas Platform:**
+   - **Windows (Win32):** Flag kernel anti-symlink `O_NOFOLLOW` tidak didukung oleh kernel Windows. Ruko menerapkan verifikasi segmen direktori bertahap (`fs.lstat`) dan resolusi `fs.realpathSync` pasca-buka di lapisan aplikasi, tetapi tidak memiliki jaminan atomik setara kernel POSIX.
+   - **Filesystem Tertentu (OverlayFS / FAT32 / Network Mounts):** Operasi `fsync` pada direktori induk tidak didukung oleh driver filesystem tertentu. Ruko menangani kegagalan ini secara *graceful fallback* (`EINVAL`), sehingga ketahanan pemulihan setelah pemadaman listrik mendadak bergantung pada karakteristik filesystem host.
+
+5. **Luaran LLM Selalu Berstatus Data Tidak Tepercaya (Tainted Data):**
+   - Prompt engineering **bukan** batas keamanan (*security boundary*). Model AI dapat mengalami halusinasi, salah membaca konteks, atau terpengaruh oleh injeksi teks tersembunyi (*Indirect Prompt Injection*) di dalam file kode sumber yang sedang dibaca.
+   - Oleh karena itu, Ruko mengandalkan aturan deterministik di hulu (seperti penolakan mutasi disk secara mekanis saat Plan Mode aktif dan penguncian boundary subtree). Namun kecerdasan buatan itu sendiri tidak dapat menjamin ketiadaan kesalahan logika.
+
+6. **Keputusan Akhir Berada pada Pengguna (Human-in-the-Loop):**
+   - Dialog amandemen cakupan (`[Y/n]`) dan persetujuan eksekusi bergantung pada ketelitian pengguna. Jika pengguna secara keliru menyetujui permintaan amandemen path ke direktori di luar proyek atau mengaktifkan flag bypass (`--yes` / YOLO), sistem akan mematuhi persetujuan pengguna tersebut.
+
+7. **Rekomendasi Lingkungan Terisolasi untuk Kode Tidak Dikenal:**
+   - Untuk menguji, mengaudit, atau menjalankan kode dari repositori pihak ketiga yang sama sekali tidak Anda percayai, Anda **tidak boleh** hanya mengandalkan proteksi level proses Ruko. Anda disarankan menjalankan Ruko di dalam lingkungan terisolasi penuh (seperti Docker Container tanpa bind-mount folder pribadi, DevContainer terisolasi, atau Virtual Machine).
 
 ---
 
-## Audit Trail
+## Audit Trail & State Isolation
 
-- Guardian LLM evaluations: `.ruko/guardian-audit.log` (0600)
-- Undo snapshots: `.ruko/undo/` (0700 dir, 0600 files)
-- Config: `.ruko/config.json` (0600)
-- Session: `.ruko/sessions/` (0600)
+- State sesi otoritatif: `~/.ruko/sessions/<sessionId>/state.json` (0600) — terisolasi dari workspace.
+- Proyeksi rencana workspace: `.ruko/plan.json` — murni proyeksi baca (read-only).
+- Guardian LLM evaluations: `.ruko/guardian-audit.log` (0600).
+- Undo snapshots: `.ruko/undo/` (0700 dir, 0600 files).
+- Config: `.ruko/config.json` (0600).
 
-Semua file sensitif dilindungi `isSensitivePath()` & `assertNotSensitivePath()` di level tool dispatcher.
+Semua file sensitif dan state kanonis dilindungi oleh `isSensitivePath()`, `assertNotSensitivePath()`, `assertPhysicalContainment()`, dan `DispatcherGate` di level tool dispatcher.

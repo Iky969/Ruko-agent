@@ -59,13 +59,13 @@ export type UiMode = 'beginner' | 'pro';
 export type AgentMode = 'default' | 'research' | 'code' | 'build';
 export type BuildPhase = 'explore' | 'mutate';
 
-/** Reasoning depth level (Fase 2: /reasoning). Urutan: high < xhigh < max < extreme. */
-export type ReasoningLevel = 'high' | 'xhigh' | 'max' | 'extreme';
+/** Reasoning depth level: low < medium < high. */
+export type ReasoningLevel = 'low' | 'medium' | 'high';
 
 export interface SessionState {
   mode: AgentMode;
   buildPhase?: BuildPhase;
-  /** Level reasoning per-sesi in-memory (Fase 2). Default sesi baru: 'xhigh'. */
+  /** Level reasoning per-sesi in-memory. Default sesi baru: 'medium'. */
   reasoningLevel: ReasoningLevel;
   /**
    * Fase B (v1.9.0): profil lingkungan runtime (os/shellFamily/flavor/TTY).
@@ -80,7 +80,7 @@ export function createDefaultSessionState(): SessionState {
   return {
     mode: 'default',
     buildPhase: 'explore',
-    reasoningLevel: 'xhigh',
+    reasoningLevel: 'medium',
     // Fase B: default kosong — loop memutakhirkan via getEnvProfile() saat start.
     envProfile: undefined,
   };

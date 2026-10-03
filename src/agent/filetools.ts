@@ -1,9 +1,11 @@
-import { constants as fsConstants, promises as fs, realpathSync } from 'node:fs';
+import { promises as fs, realpathSync } from 'node:fs';
 import { Buffer } from 'node:buffer';
 import * as path from 'node:path';
-import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isPathInsideWorkspace, isSensitivePath } from './tools.js';
+import { assertInsideWorkspace, assertNotSensitivePath, getWorkspaceRoot, isPathInsideWorkspace, isSensitivePath, assertPhysicalContainment } from './tools.js';
+import { secureReadFile, SecurityViolation } from '../core/tools/secureRead.js';
 
-export { assertNotSecurityCore, isSecurityCoreFile } from './tools.js';
+export { assertNotSecurityCore, isSecurityCoreFile, assertPhysicalContainment, SecurityBoundaryError } from './tools.js';
+export { secureReadFile, SecurityViolation } from '../core/tools/secureRead.js';
 
 /** Default number of lines a `read_file` call returns when not asked for. */
 export const DEFAULT_READ_LIMIT = 200;
@@ -127,6 +129,7 @@ export async function readFileTool(
   try {
     abs = path.resolve(cwd, filePath);
     assertInsideWorkspace(abs, cwd);
+    assertPhysicalContainment(abs, cwd);
     assertNotSensitivePath(filePath, cwd);
     assertNotSensitivePath(abs, cwd);
   } catch (err) {
@@ -134,75 +137,70 @@ export async function readFileTool(
   }
   const limit = clampInt(opts.limit, 1, MAX_READ_LIMIT, DEFAULT_READ_LIMIT);
   const offset = Math.max(1, Math.trunc(opts.offset ?? 1));
+  const cacheKey = `${abs}::${offset}::${limit}`;
 
+  let stat: any = null;
   try {
     const lst = await fs.lstat(abs);
     if (lst.isSymbolicLink()) {
-      // TASK-05 deny-by-default: lstat menyatakan symlink → TOLAK, tanpa
-      // kecuali bentuk path (8.3/long-name) dan tanpa bergantung O_NOFOLLOW
-      // yang diabaikan libuv di Windows.
-      //  1. real DI LUAR workspace → assertInsideWorkspace melempar error
-      //     'mengarah ke symlink di luar working directory' (pesan escape
-      //     eksplisit, dipakai test keamanan v17);
-      //  2. real DI DALAM workspace → pesan 'symbolic link' (O_NOFOLLOW).
       const real = await fs.realpath(abs);
       assertInsideWorkspace(real, cwd);
       return { ok: false, text: `read_file: '${filePath}' adalah symbolic link — ditolak demi keamanan (O_NOFOLLOW).` };
     }
-  } catch (err) {
+    if (lst.isDirectory()) {
+      return { ok: false, text: `read_file: '${filePath}' adalah direktori, bukan file.` };
+    }
+    if (!lst.isFile()) {
+      return { ok: false, text: `read_file: '${filePath}' bukan file reguler.` };
+    }
+
+    // Check memory cache before reading
+    const cached = fileReadCache.get(cacheKey);
+    if (cached && cached.mtimeMs === lst.mtimeMs && cached.size === lst.size) {
+      return cached.result;
+    }
+    stat = lst;
+  } catch (err: any) {
     if (err instanceof Error && (err.message.includes('working directory') || err.message.includes('file sensitif'))) {
       return { ok: false, text: `read_file: ${err.message}` };
     }
+    // ENOENT or other error: proceed to secureReadFile which handles it
   }
 
-  let handle;
-  let stat;
+  let content: string;
   try {
-    // TASK-05: O_NOFOLLOW — defense-in-depth anti-TOCTOU. Symlink apa pun
-    // ditolak di level open (ELOOP), termasuk symlink internal yang lolos
-    // pengecekan lstat di atas (deny-by-default).
-    handle = await fs.open(abs, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
-    stat = await handle.stat();
+    // PR-C1: Eksekusi pembacaan berkas TOCTOU-safe via secureReadFile (Blueprint §2.4)
+    const buf = await secureReadFile(cwd, filePath, { maxBytes: MAX_READ_FILE_SIZE });
+    content = buf.toString('utf8');
   } catch (err) {
+    if (err instanceof SecurityViolation) {
+      if (err.code === 'FILE_TOO_LARGE') {
+        let sizeMb = 'unknown';
+        try {
+          const st = await fs.stat(abs);
+          sizeMb = (st.size / 1024 / 1024).toFixed(1);
+        } catch {}
+        return {
+          ok: false,
+          text: `read_file: '${filePath}' terlalu besar (${sizeMb} MB, max ${MAX_READ_FILE_SIZE / 1024 / 1024} MB). Gunakan 'exec' dengan head/tail/sed.`,
+        };
+      }
+      if (err.code === 'SYMLINK_BLOCKED' || err.code === 'SYMLINK_IN_PATH' || err.code === 'SYMLINK_ESCAPE') {
+        return { ok: false, text: `read_file: '${filePath}' adalah symbolic link — ditolak demi keamanan (O_NOFOLLOW).` };
+      }
+      if (err.code === 'NOT_A_FILE') {
+        return { ok: false, text: `read_file: '${filePath}' bukan file reguler.` };
+      }
+      if (err.code === 'PATH_TRAVERSAL') {
+        return { ok: false, text: `read_file: target '${filePath}' berada di luar working directory.` };
+      }
+      return { ok: false, text: `read_file: pelanggaran keamanan (${err.code}): ${err.message}` };
+    }
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ELOOP') {
       return { ok: false, text: `read_file: '${filePath}' adalah symbolic link — ditolak demi keamanan (O_NOFOLLOW).` };
     }
     return { ok: false, text: `read_file: tidak bisa membuka '${filePath}': ${errorMessage(err)}` };
-  }
-
-  let content: string;
-  const cacheKey = `${abs}::${offset}::${limit}`;
-  try {
-    if (stat.size > MAX_READ_FILE_SIZE) {
-      // TASK-06 (OOM): tolak file raksasa sebelum dibaca ke RAM. Tutup handle
-      // dulu supaya tidak bocor (finally di bawah juga menutup, close bersifat idempoten).
-      await handle.close().catch(() => {});
-      return {
-        ok: false,
-        text: `read_file: '${filePath}' terlalu besar (${(stat.size / 1024 / 1024).toFixed(1)} MB, max ${MAX_READ_FILE_SIZE / 1024 / 1024} MB). Gunakan 'exec' dengan head/tail/sed.`,
-      };
-    }
-    if (stat.isDirectory()) {
-      return { ok: false, text: `read_file: '${filePath}' adalah direktori, bukan file.` };
-    }
-    if (!stat.isFile()) {
-      return { ok: false, text: `read_file: '${filePath}' bukan file reguler.` };
-    }
-
-    // Item 3: Return from in-memory cache directly if file has not changed
-    const cached = fileReadCache.get(cacheKey);
-    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-      return cached.result;
-    }
-
-    try {
-      content = await handle.readFile({ encoding: 'utf8' });
-    } catch (err) {
-      return { ok: false, text: `read_file: gagal membaca '${filePath}': ${errorMessage(err)}` };
-    }
-  } finally {
-    await handle.close().catch(() => {});
   }
 
   if (looksBinary(content)) {
@@ -222,11 +220,13 @@ export async function readFileTool(
       totalLines,
       truncated: false,
     };
-    fileReadCache.set(cacheKey, {
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
-      result: res,
-    });
+    if (stat) {
+      fileReadCache.set(cacheKey, {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        result: res,
+      });
+    }
     return res;
   }
 
@@ -246,11 +246,13 @@ export async function readFileTool(
     truncated,
     nextOffset: end < totalLines ? end + 1 : undefined,
   };
-  fileReadCache.set(cacheKey, {
-    mtimeMs: stat.mtimeMs,
-    size: stat.size,
-    result: res,
-  });
+  if (stat) {
+    fileReadCache.set(cacheKey, {
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      result: res,
+    });
+  }
   return res;
 }
 

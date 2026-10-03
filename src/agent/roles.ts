@@ -43,6 +43,7 @@ export const TOOL_RULES =
   '- To run a foreground shell command, reply with a single fenced block:\n' +
   '```tool\n{"tool": "exec", "command": "<command>", "cwd": null, "timeoutMs": 120000}\n```\n' +
   '  Default timeout is 120000ms (2 minutes). For longer foreground commands, pass a higher timeoutMs (e.g. 300000 for 5 minutes). Use start_process for background servers/watchers.\n' +
+  '  IMPORTANT: Tool exec (Bash) HANYA diperbolehkan untuk: kompilasi (tsc, cargo build, go build), test runner (npm test, pytest, cargo test, go test), dan perintah git (git status, git diff, git log, git add, git commit). Operasi baca/tulis file (cat, echo >, tee, sed, awk, rm, mv, cp, rsync) WAJIB menggunakan tool resmi: read_file, write_file, patch_file, edit_file, delete_file, move_file, glob, list_dir, code_search.\n' +
   '- To search for files matching a glob pattern or discover directory trees, reply with:\n' +
   '```tool\n{"tool": "glob", "pattern": "**/*.ts", "path": "."}\n```\n' +
   '  Returns matching relative file paths (ignores node_modules, .git, dist, .ruko, coverage, and binaries; capped at 200 files).\n' +
@@ -105,7 +106,7 @@ export const TOOL_RULES =
   '- To terminate a background process, reply with:\n' +
   '```tool\n{"tool": "stop_process", "process_id": "<process-id>"}\n```\n' +
   '  Sends SIGTERM then SIGKILL if needed (non-destructive action, no approval required).\n' +
-  '- Prefer glob, list_dir, and code_search to discover files and locate code before reading full files; prefer read_file over cat/head/tail; prefer patch_file/edit_file/write_file/delete_file/move_file/revert_file over shell redirection and rm/mv/git checkout; use start_process for long-running/background services; use exec for everything else.\n' +
+  '- Prefer glob, list_dir, and code_search to discover files and locate code before reading full files; prefer read_file over cat/head/tail; prefer patch_file/edit_file/write_file/delete_file/move_file/revert_file over shell redirection and rm/mv/git checkout; use start_process for long-running/background services; use exec ONLY for compilation, test runners, and git commands.\n' +
   '- After receiving the tool result, always output a <thought> reasoning block analyzing the tool output, then either run another tool (e.g. patch_file/edit_file if fixing code) or provide your verified final answer in plain text.\n' +
   '- Large command output is summarized with [... TRUNCATED ...] markers; work with what remains and re-run a narrower command if needed.\n';
 
@@ -317,8 +318,8 @@ export function formatEnvironmentContext(ctx: EnvironmentContextInput): string {
 export function planModeAddendum(): string {
   return (
     'ACTIVE MODE — PLAN: You may ONLY read and propose. Do not call exec/start_process/write_file/edit_file/patch_file/delete_file/move_file/revert_file/remember/save_skill/delete_skill ' +
-    '(the CLI blocks them anyway). Output a numbered step plan for user approval; the user runs it after ' +
-    'exiting plan mode with /plan off.'
+    '(the CLI blocks them anyway). When proposing options or a plan, present clear numbered choices (1. ..., 2. ..., 3. ...) and conclude with "Apa yang kamu pilih?" so the user can select an option directly by number. ' +
+    'When the user replies with the option number, the CLI automatically exits plan mode and executes the chosen option directly.'
   );
 }
 

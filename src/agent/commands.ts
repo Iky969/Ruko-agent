@@ -195,7 +195,7 @@ const COMMANDS: CommandDef[] = [
       if (env.sessionState) {
         env.sessionState.mode = 'default';
         env.sessionState.buildPhase = 'explore';
-        env.sessionState.reasoningLevel = 'xhigh';
+        env.sessionState.reasoningLevel = 'medium';
       }
       console.log('Percakapan baru dimulai (sesi sebelumnya tersimpan).');
     },
@@ -520,11 +520,11 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'reasoning',
     category: 'Sistem & Bantuan',
-    help: 'Level reasoning (High, XHigh, Max, Extreme) untuk mengatur kedalaman berpikir model.',
-    hint: '[high|xhigh|max|extreme]',
+    help: 'Level reasoning (Low, Medium, High) untuk mengatur kedalaman berpikir model.',
+    hint: '[low|medium|high]',
     run: async (args, env) => {
       const rawArg = args.trim().toLowerCase();
-      const validLevels: ReasoningLevel[] = ['high', 'xhigh', 'max', 'extreme'];
+      const validLevels: ReasoningLevel[] = ['low', 'medium', 'high'];
 
       const getSessionState = (): SessionState => {
         if (env.agent) return env.agent.sessionState;
@@ -538,10 +538,9 @@ const COMMANDS: CommandDef[] = [
         const state = getSessionState();
         state.reasoningLevel = level;
         const labelMap: Record<ReasoningLevel, string> = {
+          low: 'Low (rendah)',
+          medium: 'Medium (sedang — default sesi)',
           high: 'High (tinggi)',
-          xhigh: 'XHigh (sangat tinggi — default sesi)',
-          max: 'Max (maksimal)',
-          extreme: 'Extreme (ekstrem)',
         };
         console.log(green(`✔ Reasoning aktif: ${labelMap[level]}`));
       };
@@ -552,7 +551,7 @@ const COMMANDS: CommandDef[] = [
       }
 
       if (rawArg && !validLevels.includes(rawArg as ReasoningLevel)) {
-        console.log(`Level reasoning tidak dikenal: "${rawArg}". Pilihan: High, XHigh, Max, Extreme.`);
+        console.log(`Level reasoning tidak dikenal: "${rawArg}". Pilihan: Low, Medium, High.`);
         return;
       }
 
@@ -563,10 +562,9 @@ const COMMANDS: CommandDef[] = [
           title: 'Pilih Level Reasoning',
           defaultId: currentState.reasoningLevel,
           items: [
-            { id: 'high', label: 'High', description: 'Berpikir hati-hati tapi ringkas — cepat dan hemat token.' },
-            { id: 'xhigh', label: 'XHigh', description: 'Langkah demi langkah, pertimbangkan alternatif dan edge case.' },
-            { id: 'max', label: 'Max', description: 'Analisis menyeluruh: opsi, trade-off, dan verifikasi asumsi.' },
-            { id: 'extreme', label: 'Extreme', description: 'Deliberasi maksimal: semua sudut, simulasi kegagalan, double-check.' },
+            { id: 'low', label: 'Low', description: 'Berpikir ringkas dan cepat — hemat token dan latensi rendah.' },
+            { id: 'medium', label: 'Medium', description: 'Berpikir seimbang langkah demi langkah — default rekomendasi.' },
+            { id: 'high', label: 'High', description: 'Analisis mendalam, pertimbangkan alternatif dan edge case sebelum bertindak.' },
           ],
         });
         if (chosen && validLevels.includes(chosen as ReasoningLevel)) {
@@ -577,7 +575,7 @@ const COMMANDS: CommandDef[] = [
 
       // Non-interactive fallback
       const current = getSessionState().reasoningLevel;
-      console.log(`Level reasoning aktif: ${current}. Pilihan: high, xhigh, max, extreme.`);
+      console.log(`Level reasoning aktif: ${current}. Pilihan: low, medium, high.`);
     },
   },
   {
