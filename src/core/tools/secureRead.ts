@@ -51,6 +51,7 @@ export interface SecureReadOptions {
  *  4. Pembukaan via File Descriptor kernel atomik (O_RDONLY | O_NOFOLLOW | O_CLOEXEC).
  *  5. Validasi fstat kernel (isFile, batas ukuran).
  *  6. Post-open cross-check: resolusi realpath dan verifikasi kesesuaian inode/dev.
+ *  6b. Deteksi hardlink (fstat st_nlink > 1) → HARDLINK_ESCAPE, fail-closed (issue #31).
  *  7. Verifikasi post-read stat (mtimeNs dan size) untuk mendeteksi race mutasi selama pembacaan.
  *  8. Pelepasan handle di blok finally.
  */
@@ -162,6 +163,37 @@ export async function secureReadFile(
       if (stat.ino !== realStat.ino || stat.dev !== realStat.dev) {
         throw new SecurityViolation('TOCTOU_RACE', 'Inode/device mismatch (indikasi race condition)');
       }
+    }
+
+    // 5b. Hardlink escape detection (issue #31) — dicek pada fstat FD yang SUDAH
+    // terbuka (bukan path) sehingga tidak bisa di-race setelah validasi.
+    //
+    // Hardlink tidak terlihat oleh realpath/lstat/O_NOFOLLOW: nama di dalam
+    // workspace dan nama di luar (mis. ~/.ssh/id_rsa) menunjuk inode yang SAMA,
+    // jadi seluruh containment check di atas lolos. Satu-satunya sinyal di level
+    // inode adalah st_nlink > 1.
+    //
+    // Catatan st_dev: link(2) TIDAK bisa melintasi filesystem (EXDEV), sehingga
+    // hardlink ke file luar workspace SELALU ber-st_dev sama dengan workspace.
+    // Kondisi "nlink > 1 DAN st_dev berbeda" saja tidak akan pernah terpicu oleh
+    // serangan hardlink nyata — maka kebijakan fail-closed di sini menolak setiap
+    // nlink > 1, dan st_dev dilaporkan sebagai diagnostik (beda device = file di
+    // mount point dalam workspace, sinyal tambahan yang sama-sama mencurigakan).
+    // File reguler (nlink === 1) tidak terpengaruh.
+    if (stat.nlink > 1n) {
+      let devNote = '';
+      try {
+        const wsStat = await fs.stat(workspaceReal, { bigint: true });
+        devNote = wsStat.dev === stat.dev
+          ? ' (st_dev sama dengan workspace root)'
+          : ` (st_dev ${stat.dev} ≠ workspace root ${wsStat.dev})`;
+      } catch {
+        // Diagnostik saja — kegagalan stat workspace tidak melonggarkan penolakan.
+      }
+      throw new SecurityViolation(
+        'HARDLINK_ESCAPE',
+        `Berkas memiliki ${stat.nlink} hardlink${devNote} — ditolak karena salah satu nama dapat berada di luar workspace: ${userPath}`,
+      );
     }
 
     // 6. Pembacaan data dari file descriptor yang sudah terverifikasi

@@ -115,6 +115,11 @@ export const DANGEROUS_WORKSPACE_ENV_VARS = new Set([
   'PYTHONPATH',
   'PERL5LIB',
   'RUBYLIB',
+  // Interpreter startup / option injection (issue #31)
+  'PYTHONSTARTUP',
+  'PYTHONWARNINGS',
+  'PERL5OPT',
+  'RUBYOPT',
   'JAVA_TOOL_OPTIONS',
   '_JAVA_OPTIONS',
 
