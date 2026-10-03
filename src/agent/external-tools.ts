@@ -156,7 +156,6 @@ export async function executeExternalTool(
       cwd,
       env: cleanEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
-      timeout,
     });
 
     let stdout = '';
