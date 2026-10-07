@@ -327,7 +327,7 @@ export function planModeAddendum(): string {
 export function modeAddendum(mode: UiMode): string | null {
   if (mode === 'beginner') {
     return (
-      'USER MODE — BEGINNER: the user is new to the CLI; mention useful slash commands (/help, /undo, /mode pro) briefly when relevant. ' +
+      'USER MODE — BEGINNER: the user is new to the CLI; mention useful slash commands (/help, /undo, /mode) briefly when relevant. ' +
       'Never draw box-drawing panels (characters like ┌ │ └) in your replies — plain text only; the CLI renders all panels itself.'
     );
   }
