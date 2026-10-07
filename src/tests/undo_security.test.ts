@@ -22,28 +22,33 @@ function makeWorkspace(): string {
 
 test('WP-02: id meta.json dengan traversal (`..`) ditolak — berkas di luar folder undo aman', () => {
   const ws = makeWorkspace();
-  const victim = join(tmpdir(), `ruko-undo-victim-${process.pid}-${Date.now()}.txt`);
+  const stamp = `ruko-undo-victim-${process.pid}-${Date.now()}`;
+  const victim = join(tmpdir(), `${stamp}.txt`);
+  // Berkas yang AKAN menjadi korban bila `join(dir, id + '.content')` tidak
+  // divalidasi: berada di luar direktori undo (di tmpdir), nama = <stamp>.content.
+  const victimContent = join(tmpdir(), `${stamp}.content`);
   try {
     writeFileSync(victim, 'jangan dihapus', 'utf8');
+    writeFileSync(victimContent, 'korban lain', 'utf8');
 
     const undoDir = join(ws, '.ruko', 'undo');
-    // meta palsu: id traversal diarahkan ke berkas victim di luar direktori undo
-    const evilId = `../../../${victim.split('/').slice(1).join('/').replace(/\.txt$/, '')}`;
+    // undoDir = <tmp>/<ws>/.ruko/undo → `../../../<stamp>` menunjuk ke <tmp>/<stamp>
+    const evilId = `../../../${stamp}`;
     writeFileSync(
       join(undoDir, 'evil.meta.json'),
       `${JSON.stringify({ id: evilId, abs: victim, existed: false })}\n`,
       'utf8',
     );
-    // berkas konten yang seharusnya jadi korban bila join() tidak divalidasi
-    writeFileSync(join(tmpdir(), `${victim.split('/').pop()!.replace(/\.txt$/, '')}.content`), '', 'utf8');
 
     assert.deepEqual(listSnapshots(undoDir), [], 'snapshot dengan id tidak valid harus dibuang');
     assert.equal(undoLast(undoDir, ws), null, 'tidak ada snapshot valid → undoLast mengembalikan null');
     assert.equal(existsSync(victim), true, 'berkas di luar folder undo tidak boleh terhapus');
+    assert.equal(existsSync(victimContent), true, 'berkas konten di luar folder undo tidak boleh terhapus');
     assert.equal(existsSync(ws), true);
   } finally {
     rmSync(ws, { recursive: true, force: true });
     rmSync(victim, { force: true });
+    rmSync(victimContent, { force: true });
   }
 });
 
