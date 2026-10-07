@@ -31,7 +31,11 @@ const REDACTION_RULES = [
   { pattern: /AKIA[0-9A-Z]{16}/g, replace: '[REDACTED:AWS_KEY]' },
   { pattern: /Bearer\s+[A-Za-z0-9\-_.=]{16,512}/gi, replace: 'Bearer [REDACTED:BEARER]' },
   {
-    pattern: /(api[_-]?key|secret|password)["'\s:=]{1,4}[A-Za-z0-9_\-]{16,128}/gi,
+    // WP-05 (v2.1.0): cakupan diperluas ke variasi token / bearer / passphrase
+    // (dan padanan penulisannya: passwd, auth), dengan charset nilai yang lebih
+    // lengkap (base64url, JWT bertitik, token ber-slash).
+    pattern:
+      /(api[_-]?key|secret|password|passwd|passphrase|bearer|token|auth)["'\s:=]{1,4}[A-Za-z0-9_\-./+=]{16,256}/gi,
     replace: '$1=[REDACTED]',
   },
 ];

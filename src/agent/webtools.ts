@@ -82,7 +82,12 @@ export function stripDangerousBlocks(html: string): string {
   const tagRe = /<(\/?)([a-zA-Z][a-zA-Z0-9:_-]*)\b[^>]*?>/gy;
   let out = '';
   let i = 0;
-  let depth = 0;
+  // WP-05 (v2.1.0): TAG STACK menggantikan pencacah integer (M6). Dengan
+  // pencacah, tag penutup yang SALAH PASANG — mis. `<script>payload</style>` —
+  // tetap mengurangi kedalaman, sehingga blok berbahaya dianggap tertutup dan
+  // muatan tersembunyi ikut terlempar ke output. Sekarang penutup hanya menutup
+  // bila cocok dengan tag teratas; pasangan salah diabaikan (fail-closed).
+  const openTags: string[] = [];
   while (i < html.length) {
     tagRe.lastIndex = i;
     const m = tagRe.exec(html);
@@ -90,30 +95,33 @@ export function stripDangerousBlocks(html: string): string {
       // Not a tag here (comment, doctype, stray `<`).
       const nextLt = html.indexOf('<', i);
       if (nextLt === -1) {
-        if (depth === 0) out += html.slice(i);
+        if (openTags.length === 0) out += html.slice(i);
         break;
       }
       if (nextLt > i) {
         // Flush the text before the next `<` and retry the tag match there.
-        if (depth === 0) out += html.slice(i, nextLt);
+        if (openTags.length === 0) out += html.slice(i, nextLt);
         i = nextLt;
         continue;
       }
       // Sitting on a `<` that starts no tag: keep it and step forward.
-      if (depth === 0) out += '<';
+      if (openTags.length === 0) out += '<';
       i += 1;
       continue;
     }
-    if (depth === 0) out += html.slice(i, m.index);
+    if (openTags.length === 0) out += html.slice(i, m.index);
     const isClose = m[1] === '/';
     const name = m[2].toLowerCase();
     if (DANGEROUS_BLOCK_TAGS.has(name)) {
       if (isClose) {
-        if (depth > 0) depth -= 1;
+        // Hanya penutup yang cocok dengan tag teratas yang menutup blok.
+        if (openTags.length > 0 && openTags[openTags.length - 1] === name) {
+          openTags.pop();
+        }
       } else if (!m[0].endsWith('/>')) {
-        depth += 1;
+        openTags.push(name);
       }
-    } else if (depth === 0) {
+    } else if (openTags.length === 0) {
       out += m[0];
     }
     i = tagRe.lastIndex;

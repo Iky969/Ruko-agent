@@ -109,8 +109,18 @@ test('isSensitivePath & assertNotSensitivePath: mendeteksi path sensitif dan var
     assert.equal(isSensitivePath('package.json', ws), false);
     assert.equal(isSensitivePath('src/index.ts', ws), false);
     assert.equal(isSensitivePath('.ruko/skills/my-skill.md', ws), false);
-    assert.equal(isSensitivePath('.ruko/sessions/ses_123.json', ws), false);
-    assert.equal(isSensitivePath('.ruko/memory.md', ws), false);
+    // WP-02 (v2.1.0): default-deny seluruh subjalur .ruko/** — assertion lama
+    // yang mengizinkan .ruko/sessions & .ruko/memory.md DIPERKETAT mengikuti
+    // spesifikasi (riwayat/sesi/memori tidak boleh dibaca lewat tool).
+    assert.equal(isSensitivePath('.ruko/sessions/ses_123.json', ws), true);
+    assert.equal(isSensitivePath('.ruko/memory.md', ws), true);
+    assert.equal(isSensitivePath('.ruko/history', ws), true);
+    assert.equal(isSensitivePath('.ruko/exports/session.jsonl', ws), true);
+    assert.equal(isSensitivePath('.ruko/guardian-audit.log', ws), true);
+    assert.throws(() => assertNotSensitivePath('.ruko/history', ws), /ditolak/);
+    // Allowlist baca non-sensitif tetap lolos
+    assert.equal(isSensitivePath('.ruko/plan.json', ws), false);
+    assert.doesNotThrow(() => assertNotSensitivePath('.ruko/plan.json', ws));
     assert.equal(isSensitivePath('environment.ts', ws), false);
     assert.equal(isSensitivePath('keyboard.ts', ws), false);
     assert.doesNotThrow(() => assertNotSensitivePath('src/index.ts', ws));

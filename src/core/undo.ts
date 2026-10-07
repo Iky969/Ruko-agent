@@ -33,6 +33,18 @@ export interface UndoSnapshot {
   existed: boolean;
 }
 
+/**
+ * WP-02 (v2.1.0): format id snapshot yang sah — hanya karakter filesystem
+ * aman, maksimal 128 karakter, TANPA pola traversal `..`. Kolom `id` dari
+ * meta.json tidak pernah dipercaya (meta.json bisa dimanipulasi), karena
+ * `join(dir, id + '.content')` dipakai untuk membaca/menghapus berkas.
+ */
+const SNAPSHOT_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+function isValidSnapshotId(id: unknown): id is string {
+  return typeof id === 'string' && SNAPSHOT_ID_RE.test(id) && !id.includes('..');
+}
+
 export function defaultUndoDir(): string {
   return process.env.RUKO_UNDO_DIR ?? join(process.cwd(), '.ruko', 'undo');
 }
@@ -63,7 +75,11 @@ export function listSnapshots(dir = defaultUndoDir()): UndoSnapshot[] {
   for (const file of readdirSync(dir)) {
     if (!file.endsWith('.meta.json')) continue;
     try {
-      out.push(JSON.parse(readFileSync(join(dir, file), 'utf8')) as UndoSnapshot);
+      const snap = JSON.parse(readFileSync(join(dir, file), 'utf8')) as UndoSnapshot;
+      // WP-02: tolak id kolom meta yang tidak valid (traversal/karakter asing)
+      // sebelum sempat dipakai untuk join path hapus/pulih di luar folder undo.
+      if (!isValidSnapshotId(snap?.id)) continue;
+      out.push(snap);
     } catch {
       // corrupt meta — skip
     }
@@ -115,6 +131,20 @@ function isInside(root: string, candidate: string): boolean {
 }
 
 /**
+ * WP-02 (v2.1.0): berkas konten snapshot WAJIB berada mutlak di dalam direktori
+ * penyimpanan undo. Ini pertahanan berlapis setelah validasi format `id`:
+ * meta.json yang dimanipulasi tidak boleh membuat Ruko menulis/menghapus berkas
+ * di luar `.ruko/undo/`.
+ */
+function assertContentInsideUndoDir(dir: string, contentPath: string): void {
+  if (!isInside(resolve(dir), resolve(contentPath))) {
+    throw new Error(
+      `Akses dibatalkan: berkas konten snapshot "${contentPath}" berada di luar direktori undo.`,
+    );
+  }
+}
+
+/**
  * Validates that a snapshot target path is strictly inside the workspace
  * and does not point to sensitive or protected files/directories.
  *
@@ -139,6 +169,14 @@ export function validateSnapshotPath(targetAbs: string, workspaceRoot: string = 
   if (
     relNorm === '.ruko/config.json' ||
     relNorm.startsWith('.ruko/undo') ||
+    // WP-02: default-deny seluruh subjalur .ruko/** — allowlist resmi hanya
+    // .ruko/skills/** dan .ruko/plan.json (sinkron dengan isSensitivePath).
+    ((relNorm.startsWith('.ruko/') || relNorm.includes('/.ruko/')) &&
+      !(
+        /(^|\/)\.ruko\/skills(\/|$)/.test(relNorm) ||
+        relNorm === '.ruko/plan.json' ||
+        relNorm.endsWith('/.ruko/plan.json')
+      )) ||
     relNorm === '.env' ||
     relNorm.startsWith('.env.') ||
     relNorm.startsWith('.git') ||
@@ -166,6 +204,7 @@ export function undoLast(dir = defaultUndoDir(), workspaceRoot: string = process
   if (!last) return null;
   validateSnapshotPath(last.abs, workspaceRoot);
   const contentPath = join(dir, `${last.id}.content`);
+  assertContentInsideUndoDir(dir, contentPath);
   if (last.existed) {
     mkdirSync(dirname(last.abs), { recursive: true });
     writeFileSync(last.abs, existsSync(contentPath) ? readFileSync(contentPath) : Buffer.alloc(0));
@@ -232,6 +271,7 @@ export function revertFileSnapshot(abs: string, dir = defaultUndoDir(), workspac
   const target = snapshots[matchIndex];
   validateSnapshotPath(target.abs, workspaceRoot);
   const contentPath = join(dir, `${target.id}.content`);
+  assertContentInsideUndoDir(dir, contentPath);
   if (target.existed) {
     mkdirSync(dirname(target.abs), { recursive: true });
     writeFileSync(target.abs, existsSync(contentPath) ? readFileSync(contentPath) : Buffer.alloc(0));

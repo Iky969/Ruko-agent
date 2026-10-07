@@ -7,6 +7,8 @@ import { sanitizeTerminalOutput } from './ui.js';
 import { getEnvProfile, type EnvProfile } from './env.js';
 // Tree kill lintas platform (fix zombie grandchild Windows).
 import { killProcessTree } from './treeKill.js';
+// WP-01 (v2.1.0): denylist .env workspace digabungkan ke denylist subprocess.
+import { DANGEROUS_WORKSPACE_ENV_VARS } from './dotenv.js';
 
 export interface ExecOptions {
   timeoutMs?: number;
@@ -66,6 +68,9 @@ export const DANGEROUS_ENV_VARS = new Set([
   'PERL5LIB', // prepend @INC → shadowing modul Perl
   'RUBYOPT', // opsi CLI implisit, mis. `-revil` → require arbitrer
   'RUBYLIB', // prepend $LOAD_PATH → shadowing library Ruby
+
+  // Sumber denylist .env workspace (IFS, SHELL, NODE_DEBUG, HTTP(S)_PROXY, dst.)
+  ...DANGEROUS_WORKSPACE_ENV_VARS,
 ]);
 
 // ─────────────────────────────────────────────────────────────────────────────

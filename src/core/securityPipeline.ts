@@ -16,7 +16,7 @@ import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import { FileLock } from './state/fileLock.js';
 import { HostState, loadHostState } from './state/hostState.js';
-import { ScopeAmendmentManager } from './approval/scopeAmendment.js';
+import { ScopeAmendmentManager, type HostStateMutator } from './approval/scopeAmendment.js';
 import { evaluateDispatcherGate, DispatcherGateDecision } from './dispatcher/dispatcherGate.js';
 
 export interface SecurityPipelineOptions {
@@ -75,9 +75,29 @@ export async function bootstrapSecurityPipeline(
 
   try {
     const hostState = await loadHostState(sessionId, { resume: options.resume ?? true });
+
+    // WP-04 (v2.1.0) — Single-Writer State: mutasi state.json dari
+    // ScopeAmendmentManager didelegasikan ke mutator terpusat ini dan
+    // diserialkan oleh in-process mutex (promise chain). Manager tidak lagi
+    // membuat FileLock baru, sehingga tidak ada self-deadlock LOCK_TIMEOUT
+    // ketika pipeline sudah memegang lock sesi.
+    let stateMutationChain: Promise<unknown> = Promise.resolve();
+    const stateMutator: HostStateMutator = (targetSessionId, mutate) => {
+      const task = stateMutationChain.then(async () => {
+        const freshState = await loadHostState(targetSessionId, { resume: false });
+        return mutate(freshState);
+      });
+      stateMutationChain = task.then(
+        () => undefined,
+        () => undefined,
+      );
+      return task;
+    };
+
     const scopeManager = new ScopeAmendmentManager(hostState, wsRoot, {
       isTTY: options.isTTY ?? process.stdin.isTTY,
       monorepoRoots: options.monorepoRoots,
+      stateMutator,
     });
 
     const pipeline: SecurityPipeline = {
