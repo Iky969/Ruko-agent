@@ -262,12 +262,13 @@ Ruko menerapkan defense-in-depth:
 | `/clear` | Bersihkan memori percakapan |
 | `/compact` | Paksa kompresi history |
 | `/plan on\|off` | Mode rencana (blokir write/exec); balas nomor opsi → auto-off + eksekusi |
-| `/mode [default\|research\|code\|build]` | Mode kerja agen (loop detector & fase build) |
+| `/mode [default\|research\|code\|build]` | Mode operasional agen (AgentMode: `default`\|`research`\|`code`\|`build`) |
 | `/reasoning [low\|medium\|high]` | Tingkat reasoning native (default medium) |
 | `/yolo on\|off` | Mode auto-approve |
 | `/undo [path]` | Batalkan perubahan file |
 | `/settings` | Dashboard terpadu (context, tokens, role, mode, approval) |
 | `/role [nama]` | Ganti role AI |
+| `/settings mode [beginner\|pro]` | Mode tampilan antarmuka (UiMode: `beginner`\|`pro`) |
 | `/profile [alias]` | Ganti profil LLM |
 | `/exec <cmd>` | Shell langsung |
 | `/history [n]` | n pesan terakhir |
