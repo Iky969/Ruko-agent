@@ -2,16 +2,18 @@ import { existsSync } from 'node:fs';
 import { Confirmer, guardedExecute } from '../core/approval.js';
 import { join, relative as relativeFromCwd, resolve as resolvePath } from 'node:path';
 import { Context } from '../core/context.js';
-import { isHostnameOrSubdomain, isPrivateOrLocalHost, saveConfig } from '../core/config.js';
+import { ALLOWED_API_KEY_ENV_VARS, isHostnameOrSubdomain, isPrivateOrLocalHost, saveConfig } from '../core/config.js';
 import { promptSetup, SetupResult } from '../core/wizard.js';
 import { bold, cyan, dim, formatDuration, formatK, green, renderBox, terminalWidth, visibleLength, yellow } from '../core/ui.js';
 import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
-import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot } from './tools.js';
+import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot, safeExecPrecheck } from './tools.js';
 import { AgentConfig, AgentMode, createDefaultSessionState, DEFAULT_CONFIG, ProviderProfile, ReasoningLevel, SessionState, UiMode } from '../types.js';
 import { ConnectionResult, createProvider, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
+import { clearFileReadCache } from './filetools.js';
+import { saveHostState } from '../core/state/hostState.js';
 import { scanSkills } from '../core/skills.js';
 import type { SelectorOptions } from '../core/tui.js';
 import type { Agent } from './agent.js';
@@ -326,7 +328,7 @@ const COMMANDS: CommandDef[] = [
     category: 'Operasi & Eksekusi',
     help: 'Mode rencana: hanya baca & usulkan, eksekusi diblokir di kode.',
     hint: 'on | off',
-    run: (args, env) => {
+    run: async (args, env) => {
       if (!env.agent) {
         console.log('Plan mode hanya tersedia di dalam REPL.');
         return;
@@ -334,6 +336,22 @@ const COMMANDS: CommandDef[] = [
       const arg = args.trim().toLowerCase();
       const on = arg === 'on' || (arg === '' && !env.agent.planMode);
       env.agent.planMode = on;
+
+      // WP-04 (v2.1.0): sinkronkan hostState.mode secara langsung dan PERSIST
+      // atomik. Saat plan mode dinyalakan, cakupan izin sementara dikosongkan
+      // sehingga tidak ada mutasi otomatis yang lolos dari rencana sebelumnya.
+      const hostState = env.agent.getHostState();
+      if (hostState) {
+        hostState.mode = on ? 'plan' : 'act';
+        if (on) {
+          hostState.approvalScope = null;
+        }
+        try {
+          await saveHostState(hostState);
+        } catch (err) {
+          console.log(dim(`(gagal menyimpan state mode plan: ${err instanceof Error ? err.message : String(err)})`));
+        }
+      }
       console.log(
         on
           ? yellow('PLAN MODE aktif — tool eksekusi/write diblok; model hanya boleh membaca & menyusun langkah. /plan off untuk lanjut.')
@@ -639,11 +657,20 @@ const COMMANDS: CommandDef[] = [
         console.log('Usage: /exec <command>');
         return;
       }
+      // WP-03: jalur /exec memakai pemeriksaan pra-eksekusi bersama dengan tool
+      // exec dan pesan perintah manual `run` (sebelumnya /exec tanpa guard).
+      const precheck = safeExecPrecheck(args, getWorkspaceRoot());
+      if (precheck.blocked) {
+        console.log(yellow(`⚠ ${precheck.message}`));
+        return;
+      }
       const result = await guardedExecute(
         args,
         { timeoutMs: env.config.execTimeoutMs, confirm: env.confirm, llmProvider: env.llm },
         env.config,
       );
+      // WP-03: shell dapat mengubah berkas mana pun → cache baca dibersihkan.
+      clearFileReadCache();
       console.log(result.output || '(no output)');
       console.log(
         `\n[exit code: ${result.code ?? 'killed'} | ${result.durationMs}ms` +
@@ -1158,7 +1185,22 @@ function describeProfile(p: ProviderProfile): string {
 
 /** Applies a provider profile live: credentials + model + persist alias. */
 function applyProfile(env: CommandEnv, alias: string, profile: ProviderProfile): void {
-  const apiKey = (profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : profile.apiKey) ?? '';
+  // WP-01: Validasi ulang whitelist apiKeyEnv pada titik pemakaian (defense-in-depth).
+  // sanitizeConfigFile sudah menyaring saat load, tetapi profil yang datang dari
+  // sumber lain tidak boleh lolos membaca env var sembarang (exfil credential).
+  let apiKey = profile.apiKey ?? '';
+  if (profile.apiKeyEnv) {
+    if (ALLOWED_API_KEY_ENV_VARS.has(profile.apiKeyEnv)) {
+      apiKey = process.env[profile.apiKeyEnv] ?? '';
+    } else {
+      console.log(
+        yellow(
+          `⚠ apiKeyEnv profil "${alias}" ditolak: bukan env var LLM resmi dalam whitelist. Kredensial diabaikan.`,
+        ),
+      );
+      apiKey = '';
+    }
+  }
   const patch: Partial<AgentConfig> = {
     activeProfile: alias,
     ...(apiKey ? { apiKey } : {}),

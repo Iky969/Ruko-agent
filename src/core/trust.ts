@@ -57,27 +57,25 @@ function writeGlobalTrustStore(store: Record<string, { path: string; trustedAt: 
   } catch {
     // Best-effort write
   }
-}
-
-/**
+}/**
  * Checks if the specified workspace directory is trusted.
  *
- * TASK-03 — Trust sources checked in order:
+ * WP-01 (v2.1.0) — Trust sources yang sah HANYA:
  *   1. `RUKO_TRUST_FOLDER` env var (CI escape hatch).
- *   2. **Global trust store** `~/.ruko/trusted-workspaces.json` (PRIMARY —
- *      lives outside the repo, immune to supply-chain attacks).
- *   3. Legacy: `.ruko/trusted` marker in the workspace (backward compat, with
- *      deprecation warning).
- *   4. Legacy: `.ruko/config.json` `trustedWorkspace === true` (backward compat,
- *      with deprecation warning).
+ *   2. **Global trust store** `~/.ruko/trusted-workspaces.json` — satu-satunya
+ *      sumber kebenaran (single source of truth), hidup di luar repo sehingga
+ *      kebal supply-chain attack.
  *
- * When trust is found via a legacy source (3 or 4), the workspace is
- * auto-migrated to the global store and a one-time warning is emitted.
+ * Pembacaan marker `.ruko/trusted` di dalam workspace, flag `trustedWorkspace`
+ * dari config ruang kerja, dan auto-migrasi ke penyimpanan global DIHAPUS:
+ * ketiganya memungkinkan self-authorization (repo asing cukup meng-commit
+ * `.ruko/trusted` untuk mengaku tepercaya).
  */
 export function isWorkspaceTrusted(
   cwd: string = process.cwd(),
   configPath: string = defaultConfigPath(),
 ): boolean {
+  void configPath; // WP-01: sumber legacy dihapus — param dipertahankan demi kompatibilitas API.
   // Source 1: env var bypass (L1 — documented CI escape hatch)
   if (process.env.RUKO_TRUST_FOLDER === '1' || process.env.RUKO_TRUST_FOLDER === 'true') {
     console.warn(
@@ -90,39 +88,13 @@ export function isWorkspaceTrusted(
   // Source 2: global trust store (TASK-03 — primary, secure)
   const hash = hashWorkspacePath(cwd);
   const store = readGlobalTrustStore();
+
   if (store[hash]) {
     return true;
   }
 
-  // Source 3: legacy .ruko/trusted marker (backward compat)
-  const markerPath = join(cwd, '.ruko', TRUST_MARKER_FILE);
-  if (existsSync(markerPath)) {
-    console.warn(
-      '[trust] ⚠ Trust ditemukan di .ruko/trusted (legacy). ' +
-        'Migrasi otomatis ke ~/.ruko/trusted-workspaces.json. ' +
-        'File .ruko/trusted di dalam repo bisa berbahaya jika berasal dari clone repo asing.',
-    );
-    // Auto-migrate to global store
-    addToGlobalTrustStore(cwd);
-    return true;
-  }
-
-  // Source 4: legacy config.json trustedWorkspace (backward compat)
-  try {
-    const cfg = loadConfig(configPath);
-    if (cfg.trustedWorkspace === true) {
-      console.warn(
-        '[trust] ⚠ Trust ditemukan di config.json trustedWorkspace (legacy). ' +
-          'Migrasi otomatis ke ~/.ruko/trusted-workspaces.json.',
-      );
-      // Auto-migrate to global store
-      addToGlobalTrustStore(cwd);
-      return true;
-    }
-  } catch {
-    // Config read error, treat as untrusted
-  }
-
+  // WP-01: Source 3 & 4 (legacy .ruko/trusted marker & config trustedWorkspace)
+  // DIHAPUS — hanya repo yang tercatat di global store yang dianggap tepercaya.
   return false;
 }
 

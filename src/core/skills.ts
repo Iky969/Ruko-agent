@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 
@@ -99,9 +99,60 @@ export function parseSkillContent(raw: string, fallbackName: string): SkillDef {
   };
 }
 
+/**
+ * WP-02 (v2.1.0): batas kanonikal sebuah direktori skills (realpathSync).
+ *
+ * - `dir` sendiri di-resolve secara fisik, sehingga `.ruko/skills` yang berupa
+ *   symlink keluar workspace TIDAK pernah dipercaya.
+ * - Bila `workspaceRoot` diberikan (skills lokal), direktori skills wajib berada
+ *   di dalam batas kanonikal ruang kerja; jika tidak → null (fail-closed).
+ */
+function canonicalSkillsBoundary(dir: string, workspaceRoot?: string): string | null {
+  let realDir: string;
+  try {
+    realDir = realpathSync(resolve(dir));
+  } catch {
+    return null;
+  }
+  if (workspaceRoot !== undefined) {
+    let realWs: string;
+    try {
+      realWs = realpathSync(resolve(workspaceRoot));
+    } catch {
+      return null;
+    }
+    if (realDir !== realWs) {
+      const wsPrefix = realWs.endsWith(sep) ? realWs : realWs + sep;
+      if (!realDir.startsWith(wsPrefix)) return null;
+    }
+  }
+  return realDir;
+}
+
+/**
+ * WP-02: resolusi fisik kandidat berkas skill. Mengembalikan path kanonikal
+ * HANYA jika berkas eksis dan target fisiknya masih di dalam `boundary` —
+ * symlink yang mengarah ke luar batas kanonikal ruang kerja ditolak.
+ */
+function resolveCanonicalSkillFile(candidate: string, boundary: string): string | null {
+  let realCandidate: string;
+  try {
+    realCandidate = realpathSync(candidate);
+  } catch {
+    return null;
+  }
+  if (realCandidate === boundary) return null;
+  const prefix = boundary.endsWith(sep) ? boundary : boundary + sep;
+  return realCandidate.startsWith(prefix) ? realCandidate : null;
+}
+
 /** Internal directory scanner for `.md` files or `<name>/SKILL.md`. */
-export function scanDirectory(dir: string): SkillDef[] {
+export function scanDirectory(dir: string, workspaceRoot?: string): SkillDef[] {
   if (!existsSync(dir)) return [];
+
+  // WP-02: seluruh kandidat diverifikasi terhadap batas kanonikal (anti symlink escape).
+  const boundary = canonicalSkillsBoundary(dir, workspaceRoot);
+  if (!boundary) return [];
 
   const skills: SkillDef[] = [];
   try {
@@ -112,18 +163,20 @@ export function scanDirectory(dir: string): SkillDef[] {
         if (entry.isFile() && entry.name.endsWith('.md')) {
           const name = entry.name.replace(/\.md$/, '');
           const fullPath = join(dir, entry.name);
-          const raw = readFileSync(fullPath, 'utf8');
+          const canonical = resolveCanonicalSkillFile(fullPath, boundary);
+          if (!canonical) continue;
+          const raw = readFileSync(canonical, 'utf8');
           const parsed = parseSkillContent(raw, name);
           parsed.filePath = fullPath;
           skills.push(parsed);
         } else if (entry.isDirectory()) {
           const skillMd = join(dir, entry.name, 'SKILL.md');
-          if (existsSync(skillMd)) {
-            const raw = readFileSync(skillMd, 'utf8');
-            const parsed = parseSkillContent(raw, entry.name);
-            parsed.filePath = skillMd;
-            skills.push(parsed);
-          }
+          const canonical = resolveCanonicalSkillFile(skillMd, boundary);
+          if (!canonical) continue;
+          const raw = readFileSync(canonical, 'utf8');
+          const parsed = parseSkillContent(raw, entry.name);
+          parsed.filePath = skillMd;
+          skills.push(parsed);
         }
       } catch {
         // ignore unreadable file
@@ -139,7 +192,7 @@ export function scanDirectory(dir: string): SkillDef[] {
 /** Lists all available skills in local .ruko/skills. */
 export function listSkills(workspaceRoot: string = process.cwd()): SkillDef[] {
   const dir = defaultSkillsDir(workspaceRoot);
-  const skills = scanDirectory(dir);
+  const skills = scanDirectory(dir, workspaceRoot);
   return skills.sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -157,7 +210,7 @@ export function scanSkills(
   options: ScanSkillsOptions = { includeGlobal: true },
 ): SkillDef[] {
   const localDir = defaultSkillsDir(workspaceRoot);
-  const localSkills = scanDirectory(localDir);
+  const localSkills = scanDirectory(localDir, workspaceRoot);
 
   if (options.includeGlobal === false) {
     return localSkills.sort((a, b) => a.name.localeCompare(b.name));
@@ -199,30 +252,37 @@ export function readSkill(name: string, workspaceRoot: string = process.cwd()): 
   if (!canonicalDirect.startsWith(prefix) && canonicalDirect !== canonicalDir) {
     return null;
   }
-  if (existsSync(directFile)) {
-    try {
-      const raw = readFileSync(directFile, 'utf8');
-      const parsed = parseSkillContent(raw, safeName);
-      parsed.filePath = directFile;
-      return parsed;
-    } catch {
+  // WP-02: batas kanonikal skills lokal — symlink keluar workspace ditolak.
+  const boundary = canonicalSkillsBoundary(dir, workspaceRoot);
+
+  if (boundary) {
+    const canonicalDirect = resolveCanonicalSkillFile(directFile, boundary);
+    if (canonicalDirect) {
+      try {
+        const raw = readFileSync(canonicalDirect, 'utf8');
+        const parsed = parseSkillContent(raw, safeName);
+        parsed.filePath = directFile;
+        return parsed;
+      } catch {
+        return null;
+      }
+    }
+
+    const nestedFile = join(dir, safeName, 'SKILL.md');
+    const canonicalNested = resolve(nestedFile);
+    if (!canonicalNested.startsWith(prefix) && canonicalNested !== canonicalDir) {
       return null;
     }
-  }
-
-  const nestedFile = join(dir, safeName, 'SKILL.md');
-  const canonicalNested = resolve(nestedFile);
-  if (!canonicalNested.startsWith(prefix) && canonicalNested !== canonicalDir) {
-    return null;
-  }
-  if (existsSync(nestedFile)) {
-    try {
-      const raw = readFileSync(nestedFile, 'utf8');
-      const parsed = parseSkillContent(raw, safeName);
-      parsed.filePath = nestedFile;
-      return parsed;
-    } catch {
-      return null;
+    const canonicalNestedReal = resolveCanonicalSkillFile(nestedFile, boundary);
+    if (canonicalNestedReal) {
+      try {
+        const raw = readFileSync(canonicalNestedReal, 'utf8');
+        const parsed = parseSkillContent(raw, safeName);
+        parsed.filePath = nestedFile;
+        return parsed;
+      } catch {
+        return null;
+      }
     }
   }
 
@@ -231,13 +291,16 @@ export function readSkill(name: string, workspaceRoot: string = process.cwd()): 
   if (existsSync(gDir)) {
     const canonicalGDir = resolve(gDir);
     const gPrefix = canonicalGDir.endsWith(sep) ? canonicalGDir : canonicalGDir + sep;
+    // WP-02: batas kanonikal direktori skills global (symlink keluar ditolak).
+    const gBoundary = canonicalSkillsBoundary(gDir);
 
     const globalDirect = join(gDir, `${safeName}.md`);
     const canonicalGlobalDirect = resolve(globalDirect);
-    if (canonicalGlobalDirect.startsWith(gPrefix) || canonicalGlobalDirect === canonicalGDir) {
-      if (existsSync(globalDirect)) {
+    if (gBoundary && (canonicalGlobalDirect.startsWith(gPrefix) || canonicalGlobalDirect === canonicalGDir)) {
+      const real = resolveCanonicalSkillFile(globalDirect, gBoundary);
+      if (real) {
         try {
-          const raw = readFileSync(globalDirect, 'utf8');
+          const raw = readFileSync(real, 'utf8');
           const parsed = parseSkillContent(raw, safeName);
           parsed.filePath = globalDirect;
           return parsed;
@@ -249,10 +312,11 @@ export function readSkill(name: string, workspaceRoot: string = process.cwd()): 
 
     const globalNested = join(gDir, safeName, 'SKILL.md');
     const canonicalGlobalNested = resolve(globalNested);
-    if (canonicalGlobalNested.startsWith(gPrefix) || canonicalGlobalNested === canonicalGDir) {
-      if (existsSync(globalNested)) {
+    if (gBoundary && (canonicalGlobalNested.startsWith(gPrefix) || canonicalGlobalNested === canonicalGDir)) {
+      const real = resolveCanonicalSkillFile(globalNested, gBoundary);
+      if (real) {
         try {
-          const raw = readFileSync(globalNested, 'utf8');
+          const raw = readFileSync(real, 'utf8');
           const parsed = parseSkillContent(raw, safeName);
           parsed.filePath = globalNested;
           return parsed;
