@@ -267,6 +267,7 @@
   - Sesudah: **1245 tests (1244 pass / 0 fail / 1 skip win32, 67 suites)**.
   - Delta: **+13 test / +2 suite**, semuanya dari `residual_hardening_issue31.test.ts`. Tidak ada test lama yang berubah status.
 - **Review (disetujui pengguna):** kebijakan konservatif tolak semua `nlink > 1` disetujui. Strip `PYTHONPATH`/`PERL5LIB`/`RUBYLIB` dari `exec` user disetujui (konsisten dengan `NODE_PATH`). Seluruh test hardlink (a) **dipertahankan**: test tersebut lulus di bawah kebijakan konservatif dan menjadi regression coverage fix ini. Yang "mustahil lulus" hanya varian spesifikasi literal (AND `st_dev`), dan varian itu tidak diimplementasikan.
-- **Status rilis:** di-commit & di-push ke `main`. Issue #31 diberi comment ringkasan fix, 3 item sisa (SSRF edge-case/redirect test, Guardian self-justifying injection, SSE/TUI quality) dipindah ke issue follow-up terpisah, lalu #31 ditutup.
-- **Next step:** Follow-up 3 item sisa di issue baru.
+- **Status rilis:** di-commit & di-push ke `main` (commit `9615be5`). Issue #31 diberi comment ringkasan fix, 3 item sisa (SSRF edge-case/redirect test, Guardian self-justifying injection, SSE/TUI quality) resmi dipindahkan ke issue baru [#32](https://github.com/Iky969/Ruko-agent/issues/32), dan issue #31 telah ditutup.
+- **Next step:** Follow-up 3 item sisa di issue #32.
+
 
