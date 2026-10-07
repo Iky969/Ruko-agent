@@ -5,7 +5,14 @@ Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tun
 
 ---
 
-## [2.0.0-dev] - Unreleased
+## [2.1.0] - 2026-10-07
+
+### Security & Hardening
+- **Hardlink Escape Detection (`secureReadFile`):** Menolak berkas dengan `st_nlink > 1` (`HARDLINK_ESCAPE`) secara fail-closed pada fstat kernel descriptor untuk mencegah pelarian file sandbox melalui hardlink ke berkas sensitif di luar workspace.
+- **Interpreter Injection Denylist (`executor.ts` / `dotenv.ts`):** Memperluas pembersihan environment subprocess dan denylist `.env` untuk Python (`PYTHONSTARTUP`, `PYTHONPATH`, `PYTHONWARNINGS`), Perl (`PERL5OPT`, `PERL5LIB`), dan Ruby (`RUBYOPT`, `RUBYLIB`).
+- **Installer & Version Alignment:** Memperbarui installer `install.sh` untuk mengarah ke tag rilis immutable `v2.1.0`.
+
+## [2.0.0] - 2026-10-02
 
 ### Breaking Changes (Arsitektur Baru)
 - **Zero-Dependency Mandate:** Menghapus seluruh dependensi runtime npm; beralih murni ke modul native Node.js 22/24 (`node:*`).

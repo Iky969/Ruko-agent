@@ -177,7 +177,7 @@ export class HostFetch {
               headers: {
                 Host: url.host,
                 Connection: 'close', // Paksa penutupan TCP setelah respons
-                'User-Agent': 'ruko-agent/2.0.0',
+                'User-Agent': 'ruko-agent/2.1.0',
                 Accept: '*/*',
               },
               servername: isHttps ? stripBrackets(url.hostname) : undefined, // SNI TLS

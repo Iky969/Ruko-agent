@@ -4,9 +4,9 @@
 
 | Versi | Didukung | Catatan |
 |---|---:|---|
-| 2.0.x | ✅ | Versi stabil aktif saat ini |
-| 1.9.x | ⚠️ | Patch keamanan esensial |
-| < 1.9.0 | ❌ | Tidak didukung, wajib upgrade ke 2.0.0 |
+| 2.1.x | ✅ | Versi stabil aktif saat ini |
+| 2.0.x | ⚠️ | Patch keamanan esensial |
+| < 2.0.0 | ❌ | Tidak didukung, wajib upgrade ke 2.1.0 |
 
 ---
 
