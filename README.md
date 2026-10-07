@@ -1,10 +1,10 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-1217%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-1244%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-Linux%20%7C%20Windows%20%7C%20macOS-blue.svg)](.github/workflows/ci.yml)
 [![Security](https://img.shields.io/badge/security-CodeQL%20%7C%20Secret%20Scanning%20%7C%20Dependabot-success.svg)](.github/SECURITY.md)
@@ -19,7 +19,7 @@ cd /proyek-anda
 ruko
 ```
 
-> Installer mem-pin tag release immutable `v2.0.0`, build dari source, memasang `ruko` global, dan otomatis mem-backup instalasi lama. Windows & Jupyter/Colab: lihat bagian [Instalasi per Platform](#-instalasi--memulai-cepat).
+> Installer mem-pin tag release immutable `v2.1.0`, build dari source, memasang `ruko` global, dan otomatis mem-backup instalasi lama. Windows & Jupyter/Colab: lihat bagian [Instalasi per Platform](#-instalasi--memulai-cepat).
 
 ---
 
@@ -68,7 +68,7 @@ Opsi lanjutan (supply-chain strict mode):
 
 ```bash
 # Tag versi lain
-RUKO_VERSION=v2.0.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh)"
+RUKO_VERSION=v2.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh)"
 # Pin commit SHA spesifik
 RUKO_COMMIT_SHA=<sha> bash -c "$(curl -fsSL https://raw.githubusercontent.com/Iky969/Ruko-agent/main/install.sh)"
 ```
