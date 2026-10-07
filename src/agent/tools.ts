@@ -6,7 +6,7 @@ import { countDiffLines, formatFileMutationLogLine } from '../core/diffui.js';
 import { revertFile, takeSnapshot } from '../core/undo.js';
 import type { ActivityTray } from '../core/activity.js';
 import { cyan, dim, green, magenta, red, yellow } from '../core/ui.js';
-import { codeSearchTool, globTool, listDirTool, readFileTool } from './filetools.js';
+import { clearFileReadCache, codeSearchTool, globTool, listDirTool, readFileTool } from './filetools.js';
 import { appendMemory } from '../core/memory.js';
 import { deleteSkill, listSkills, readSkill, saveSkill } from '../core/skills.js';
 import { searchSessions } from '../core/session.js';
@@ -753,6 +753,24 @@ export function isSensitivePath(targetPath: string, workspaceRoot: string = getW
       return true;
     }
 
+    // 2b. WP-02 (v2.1.0): DEFAULT-DENY seluruh subjalur `.ruko/**` — riwayat
+    //     perintah, sesi (sessions/*.json), ekspor (exports/*), guardian-audit.log,
+    //     memory.md, dst. Bocornya berkas ini membocorkan kredensial/konteks
+    //     percakapan. Allowlist baca non-sensitif: `.ruko/skills/**` dan
+    //     `.ruko/plan.json` (proyeksi plan hanya-baca).
+    const isUnderRukoDir = (p: string): boolean => /(^|\/)\.ruko\//.test(p);
+    if (isUnderRukoDir(relLower) || isUnderRukoDir(absLower)) {
+      const isAllowlisted =
+        /(^|\/)\.ruko\/skills(\/|$)/.test(relLower) ||
+        relLower === '.ruko/plan.json' ||
+        /(^|\/)\.ruko\/skills(\/|$)/.test(absLower) ||
+        absLower === '.ruko/plan.json' ||
+        absLower.endsWith('/.ruko/plan.json');
+      if (!isAllowlisted) {
+        return true;
+      }
+    }
+
     // 3. .env, .env.*
     if (baseLower === '.env' || baseLower.startsWith('.env.')) {
       return true;
@@ -995,6 +1013,8 @@ async function writeWithDiff(
     await writeHandle?.close();
   }
 
+  // WP-03: cache baca berkas dibersihkan deterministik setelah penulisan.
+  clearFileReadCache(abs);
   onLog?.(green(`🟢 Edit(${fileLabel})`));
   // Fase 4: ringkasan diff ringkas `✍️ <tool> <file> +N -M Xs` — angka N/M
   // dihitung dengan algoritma diff yang SAMA dengan renderer, jadi selalu
@@ -1029,6 +1049,103 @@ export interface WorkspaceMutationCheck {
   blocked: boolean;
   toolAdvice?: string;
   message?: string;
+  /** WP-03: target path di dalam workspace yang terdeteksi akan dimutasi. */
+  targets?: string[];
+}
+
+/**
+ * WP-03 (v2.1.0): ekstraksi target operator pengalihan `>` / `>>` pada satu
+ * segmen perintah (baik redirect kosong maupun yang membawa teks).
+ *
+ * - Isi tanda kutip di-mask (dengan panjang yang sama) agar `>` di dalam string
+ *   literal tidak salah dianggap operator pengalihan.
+ * - Duplikasi file descriptor (`2>&1`, `>&2`) diabaikan — bukan penulisan berkas.
+ * - Operator tanpa target yang bisa dianalisis (`cmd >`) ditandai
+ *   `unanalyzable` → pemanggil memperlakukannya potensi mutasi (fail-closed).
+ */
+function extractRedirectTargets(segment: string): { targets: string[]; unanalyzable: boolean } {
+  const targets: string[] = [];
+  let unanalyzable = false;
+  const masked = segment.replace(/'[^']*'|"[^"]*"/g, (s) => ' '.repeat(s.length));
+  const re = /\d*>>?\s*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(masked)) !== null) {
+    const raw = segment.slice(m.index + m[0].length);
+    // Duplikasi file descriptor: `2>&1`, `>&2`, `>&-` — bukan penulisan berkas.
+    if (/^&(?:\d+|-)?/.test(raw)) continue;
+    const token =
+      raw
+        .match(/^(?:"([^"]*)"|'([^']*)'|([^\s;&|<>]+))/)
+        ?.slice(1)
+        .find((v) => v !== undefined) ?? '';
+    if (token.startsWith('&')) continue; // sabuk pengaman kedua
+    if (!token.trim()) {
+      unanalyzable = true;
+      continue;
+    }
+    targets.push(token.trim());
+  }
+  return { targets, unanalyzable };
+}
+
+/** Utilitas shell yang menulis berkas di tempat (in-place file writers). */
+const WRITE_UTILITY_RE = /^(?:(?:\/usr)?\/bin\/)?(sed|tee|dd|awk|gawk|mawk|nawk|patch)\b(.*)$/i;
+
+/**
+ * WP-03 (v2.1.0): deteksi mutasi tersembunyi lewat utilitas penulis berkas
+ * (`sed -i`, `tee`, `dd of=`, `awk -i`, `patch`) di dalam workspace.
+ * Efek yang tidak bisa dianalisis (in-place writer tanpa target) → fail-closed.
+ */
+function detectWriteUtilityMutation(segment: string, workspaceRoot: string): WorkspaceMutationCheck {
+  const m = segment.trim().match(WRITE_UTILITY_RE);
+  if (!m) return { blocked: false };
+  const util = m[1].toLowerCase();
+  const rest = m[2] ?? '';
+
+  const isInPlaceWriter =
+    util === 'sed' || util === 'awk' || util === 'gawk' || util === 'mawk' || util === 'nawk'
+      ? /(?:^|\s)-[a-zA-Z]*i/.test(rest)
+      : false;
+  const isFileWriter = util === 'tee' || util === 'dd' || util === 'patch' || isInPlaceWriter;
+  if (!isFileWriter) return { blocked: false };
+
+  const targets: string[] = [];
+  if (util === 'dd') {
+    const of = rest.match(/\bof=(?:"([^"]*)"|'([^']*)'|(\S+))/i);
+    const ofTarget = of?.[1] ?? of?.[2] ?? of?.[3];
+    if (ofTarget) targets.push(ofTarget);
+  } else {
+    const args = extractCommandArgs(rest).filter((a) => !a.startsWith('-'));
+    // `sed` menerima script sebagai argumen non-flag PERTAMA (`s/a/b/`) — itu
+    // bukan path berkas; sisanya (f1, f2, …) adalah berkas target.
+    const fileArgs = util === 'sed' ? args.slice(1) : args;
+    targets.push(...fileArgs);
+  }
+
+  const inWorkspace = targets.filter((t) => isPathInsideWorkspace(t, workspaceRoot));
+  if (inWorkspace.length > 0) {
+    return {
+      blocked: true,
+      toolAdvice: 'write_file / edit_file',
+      targets: inWorkspace,
+      message: `exec ditolak: utilitas penulis berkas '${util}' terdeteksi pada path workspace (${inWorkspace
+        .map((t) => `"${t}"`)
+        .join(', ')}). Gunakan tool resmi 'write_file' atau 'edit_file' yang memiliki pencadangan otomatis (.ruko/undo/).`,
+    };
+  }
+
+  // Fail-closed: in-place writer tanpa target yang bisa dianalisis (mis.
+  // `sed -i` yang menerima input dari pipe) dianggap berpotensi memutasi.
+  if (isInPlaceWriter && targets.length === 0) {
+    return {
+      blocked: true,
+      toolAdvice: 'write_file / edit_file',
+      targets: [],
+      message: `exec ditolak: efek sistem berkas dari '${util}' tidak dapat dianalisis dengan pasti (fail-closed). Gunakan tool resmi 'write_file'/'edit_file' yang memiliki pencadangan otomatis (.ruko/undo/).`,
+    };
+  }
+
+  return { blocked: false };
 }
 
 /**
@@ -1213,6 +1330,75 @@ export function detectWorkspaceMutationInExec(
         }
       }
     }
+
+    // 5. WP-03 (v2.1.0): SELURUH operator pengalihan `>` / `>>` (kosong maupun
+    //    berisi teks) yang menulis ke dalam workspace.
+    const redirects = extractRedirectTargets(s);
+    const redirectsInWorkspace = redirects.targets.filter((t) => isPathInsideWorkspace(t, workspaceRoot));
+    if (redirectsInWorkspace.length > 0) {
+      return {
+        blocked: true,
+        toolAdvice: 'write_file / edit_file',
+        targets: redirectsInWorkspace,
+        message: `exec ditolak: operator pengalihan ('>' / '>>') terdeteksi menulis ke path workspace (${redirectsInWorkspace
+          .map((t) => `"${t}"`)
+          .join(', ')}). Gunakan tool resmi 'write_file' atau 'edit_file' yang memiliki pencadangan otomatis (.ruko/undo/).`,
+      };
+    }
+    if (redirects.unanalyzable) {
+      return {
+        blocked: true,
+        toolAdvice: 'write_file / edit_file',
+        targets: [],
+        message: `exec ditolak: efek sistem berkas dari operator pengalihan tidak dapat dianalisis dengan pasti (fail-closed). Gunakan tool resmi 'write_file'/'edit_file' yang memiliki pencadangan otomatis (.ruko/undo/).`,
+      };
+    }
+
+    // 6. WP-03: utilitas penulis berkas (sed -i, tee, dd, awk -i, patch).
+    const utilCheck = detectWriteUtilityMutation(s, workspaceRoot);
+    if (utilCheck.blocked) {
+      return utilCheck;
+    }
+  }
+
+  return { blocked: false };
+}
+
+/**
+ * WP-03 (v2.1.0): SATU pintu masuk pemeriksaan pra-eksekusi shell untuk SEMUA
+ * jalur yang menjalankan perintah — tool `exec`, pesan perintah manual
+ * (`run <cmd>`), dan slash command `/exec`. Mencegah pemeriksaan yang menyimpang
+ * antar jalur (jalur /exec sebelumnya tidak memeriksa apa pun).
+ */
+export function safeExecPrecheck(
+  command: string,
+  workspaceRoot: string = getWorkspaceRoot(),
+): WorkspaceMutationCheck {
+  if (!command || !command.trim()) {
+    return { blocked: false };
+  }
+
+  if (isSensitiveEnvCommand(command)) {
+    return {
+      blocked: true,
+      message:
+        'exec ditolak: command berpotensi membocorkan environment variable sensitif. Kredensial tidak dapat diakses lewat tool ini.',
+    };
+  }
+
+  const fileCheck = detectSensitiveFileAccessInExec(command, workspaceRoot);
+  if (fileCheck.blocked) {
+    return { blocked: true, message: fileCheck.message };
+  }
+
+  const mutationCheck = detectWorkspaceMutationInExec(command, workspaceRoot);
+  if (mutationCheck.blocked) {
+    return {
+      blocked: true,
+      message: mutationCheck.message,
+      toolAdvice: mutationCheck.toolAdvice,
+      targets: mutationCheck.targets ?? [],
+    };
   }
 
   return { blocked: false };
@@ -1375,6 +1561,15 @@ function extractSubshellAndEvalCommands(cmd: string): string[] {
   // eval "cmd" or eval 'cmd' or eval cmd
   const evalPattern = /\beval\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gi;
   while ((m = evalPattern.exec(cmd)) !== null) {
+    const target = m[1] ?? m[2] ?? m[3];
+    if (target?.trim()) extracted.push(target.trim());
+  }
+
+  // WP-03 (v2.1.0): interpreter `-c` — argumen DI DALAM tanda kutip ikut
+  // diekstrak untuk bash/sh/zsh/dash/ksh sebelum masuk ke isSensitiveEnvCommand
+  // dan filter berkas sensitif (`bash -c "printenv"` tidak boleh lolos).
+  const interpDashC = /\b(?:bash|sh|zsh|dash|ksh)\s+(?:-[a-zA-Z]*c[a-zA-Z]*|--command)\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gi;
+  while ((m = interpDashC.exec(cmd)) !== null) {
     const target = m[1] ?? m[2] ?? m[3];
     if (target?.trim()) extracted.push(target.trim());
   }
@@ -1674,23 +1869,50 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         return JSON.stringify({ error: 'exec: missing "command" field' });
       }
 
-      if (isSensitiveEnvCommand(command)) {
-        const msg = 'exec ditolak: command berpotensi membocorkan environment variable sensitif. Kredensial tidak dapat diakses lewat tool ini.';
-        deps.onLog?.(yellow(`⚠ ${msg}`));
-        return JSON.stringify({ error: msg });
-      }
+      // WP-03: SATU pintu masuk pemeriksaan pra-eksekusi (dipakai juga oleh
+      // pesan perintah manual `run <cmd>` dan slash command `/exec`).
+      const precheck = safeExecPrecheck(command, ws);
+      if (precheck.blocked) {
+        const targets = precheck.targets ?? [];
 
-      const fileCheck = detectSensitiveFileAccessInExec(command, ws);
-      if (fileCheck.blocked) {
-        deps.onLog?.(yellow(`⚠ ${fileCheck.message}`));
-        return JSON.stringify({ error: fileCheck.message });
-      }
+        // WP-03: blokir penulisan ke berkas security core (assertNotSecurityCore)
+        // sebelum evaluasi cakupan apa pun.
+        for (const target of targets) {
+          try {
+            assertNotSecurityCore(target, ws);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            deps.onLog?.(yellow(`⚠ ${msg}`));
+            return JSON.stringify({ error: msg });
+          }
+        }
 
-      const mutationCheck = detectWorkspaceMutationInExec(command, ws);
-      if (mutationCheck.blocked) {
-        deps.onLog?.(yellow(`⚠ Exec ditolak: gunakan tool resmi ${mutationCheck.toolAdvice}`));
+        // WP-03: perintah shell berpotensi mutatif ikut dievaluasi cakupan
+        // ScopeAmendmentManager (fail-closed bila di luar scope/headless).
+        if (deps.scopeAmendmentManager && targets.length > 0) {
+          const isInteractive = (deps.subagentDepth ?? 0) === 0 && deps.confirm !== undefined;
+          for (const target of targets) {
+            const allowed = await deps.scopeAmendmentManager.evaluateMutationTarget(
+              target,
+              `Perintah shell berpotensi mutatif via exec: ${command}`,
+              isInteractive,
+              { tool: 'exec', args: { command } },
+            );
+            if (!allowed) {
+              const msg = `SECURITY_DENIED: Target mutasi shell di luar scope yang diizinkan (${target})`;
+              deps.onLog?.(yellow(`⚠ ${msg}`));
+              return JSON.stringify({ error: msg });
+            }
+          }
+        }
+
+        if (precheck.toolAdvice) {
+          deps.onLog?.(yellow(`⚠ Exec ditolak: gunakan tool resmi ${precheck.toolAdvice}`));
+        } else {
+          deps.onLog?.(yellow(`⚠ ${precheck.message}`));
+        }
         return JSON.stringify({
-          error: mutationCheck.message,
+          error: precheck.message,
         });
       }
 
@@ -1713,6 +1935,9 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         },
         config,
       );
+      // WP-03: shell dapat mengubah berkas mana pun di workspace → cache baca
+      // dibersihkan deterministik setelah eksekusi (bukan menunggu mtime).
+      clearFileReadCache();
       return JSON.stringify(
         {
           code: result.code,
@@ -1955,6 +2180,8 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
 
       try {
         unlinkSync(abs);
+        // WP-03: cache baca dibersihkan setelah penghapusan.
+        clearFileReadCache(abs);
         deps.onLog?.(red(`🔴 Delete(${rel})`));
         return JSON.stringify(
           {
@@ -2055,6 +2282,9 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
           copyFileSync(sourceAbs, targetAbs);
           unlinkSync(sourceAbs);
         }
+        // WP-03: cache baca dibersihkan untuk sumber maupun tujuan.
+        clearFileReadCache(sourceAbs);
+        clearFileReadCache(targetAbs);
         deps.onLog?.(green(`🟢 Move(${sourceRel} -> ${targetRel})`));
         return JSON.stringify(
           {

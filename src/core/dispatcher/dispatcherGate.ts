@@ -76,6 +76,9 @@ export async function evaluateDispatcherGate(
         targetPath,
         opts.args?.reason || `Mutasi berkas via ${opts.tool}`,
         Boolean(opts.isInteractive),
+        // WP-05: binding persetujuan + tampilan fakta teknis memakai nama tool
+        // dan muatan argumen asli (referensi, dibandingkan ulang pasca-konfirmasi).
+        { tool: opts.tool, args: opts.args },
       );
       if (!allowed) {
         return {
