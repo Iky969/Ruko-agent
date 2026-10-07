@@ -11,6 +11,7 @@ import {
   loadCustomRoles,
   parseRoleFile,
   planModeAddendum,
+  TOOL_CALLING_DISCIPLINE,
   TOOL_RULES,
 } from '../agent/roles.js';
 
@@ -116,4 +117,32 @@ test('TASK-04: buildSystemPrompt includes untrusted tags when agentDoc has them'
   assert.ok(p.includes('<untrusted_project_instructions>'), 'system prompt must carry untrusted tags');
   assert.ok(p.includes('</untrusted_project_instructions>'), 'system prompt must carry closing tag');
   assert.ok(p.includes('Use pnpm'), 'project content must be in the prompt');
+});
+
+test('Tool Calling Discipline instruction is present in system prompt and TOOL_RULES', () => {
+  const p = buildSystemPrompt({
+    role: getBuiltInRole('default')!,
+    planMode: false,
+    mode: 'beginner',
+    agentDoc: null,
+  });
+  assert.ok(TOOL_RULES.includes(TOOL_CALLING_DISCIPLINE), 'TOOL_RULES must include TOOL_CALLING_DISCIPLINE');
+  assert.ok(p.includes('[TOOL CALLING DISCIPLINE]'), 'system prompt must include [TOOL CALLING DISCIPLINE]');
+  assert.ok(p.includes('Selesaikan seluruh penalaran dalam fase thinking.'));
+  assert.ok(p.includes('DILARANG menulis format JSON tool, XML tag (<tool_call>), atau kode eksekusi di dalam blok thinking.'));
+  assert.ok(p.includes('Begitu fase thinking selesai, panggil tool HANYA melalui interface function call resmi.'));
+  assert.ok(p.includes('Jika tidak memerlukan tool, langsung berikan jawaban akhir ke pengguna.'));
+});
+
+test('Todos UX display instruction is present in system prompt and CORE_IDENTITY', () => {
+  const p = buildSystemPrompt({
+    role: getBuiltInRole('default')!,
+    planMode: false,
+    mode: 'beginner',
+    agentDoc: null,
+  });
+  assert.ok(CORE_IDENTITY.includes('- [ ] Langkah yang belum selesai'));
+  assert.ok(CORE_IDENTITY.includes('- [x] Langkah yang sudah selesai'));
+  assert.ok(p.includes('- [ ] Langkah yang belum selesai'));
+  assert.ok(p.includes('- [x] Langkah yang sudah selesai'));
 });

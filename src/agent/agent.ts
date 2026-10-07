@@ -7,6 +7,7 @@ import {
   activityIconForTool,
   activityLabelForTool,
   describeToolCallForLog,
+  extractThoughts,
   inferStepDescription,
   LineGate,
   RevealFilter,
@@ -488,6 +489,7 @@ export class Agent {
     this.callCounts.clear();
     this.consecutiveRepeatCount = 0;
     this.lastCallSignature = null;
+    let consecutiveThoughtOnlyCount = 0;
 
     try {
       for (let i = 0; i < maxIterations; i += 1) {
@@ -541,9 +543,13 @@ export class Agent {
         // filter, so a tool call emitted inside the thought stream can never
         // spill into the reasoning ticker as ordinary text.
         const thoughtReveal = new RevealFilter((text) => reasoningPanel.feed(text));
+        let streamedThought = '';
         const thoughtParser = new ThoughtStreamParser({
           onText: (text) => reveal.feed(text),
-          onThought: (thoughtChunk) => thoughtReveal.feed(thoughtChunk),
+          onThought: (thoughtChunk) => {
+            streamedThought += thoughtChunk;
+            thoughtReveal.feed(thoughtChunk);
+          },
           onThoughtEnd: () => {
             // Fase 3: akhiri SEGMEN reasoning ini (baris collapsed / box per
             // segmen) tanpa mematikan panel — <thought> berikutnya buka segmen baru.
@@ -554,7 +560,10 @@ export class Agent {
         try {
           raw = await this.llmProvider.chat(messages, {
             onToken: (token) => thoughtParser.feed(token),
-            onThought: (chunk) => thoughtReveal.feed(chunk),
+            onThought: (chunk) => {
+              streamedThought += chunk;
+              thoughtReveal.feed(chunk);
+            },
             signal,
             maxTokens: this.config.maxOutputTokens ?? 4096,
             // Fase 2: wiring /reasoning → parameter provider di llm.ts.
@@ -607,6 +616,65 @@ export class Agent {
 
         if (calls.length === 0) {
           const text = stripThoughtBlocks(stripToolBlocks(raw));
+          const hasThought =
+            streamedThought.trim().length > 0 ||
+            extractThoughts(raw).length > 0 ||
+            /<thought>|<think>|\*Thought:/i.test(raw) ||
+            Boolean((this.llmProvider as { lastReasoning?: string | null }).lastReasoning);
+
+          // Circuit breaker untuk thought loop (feedback.txt item 2):
+          // Jika agent menghasilkan respons "thought" tanpa tool_calls DAN tanpa teks jawaban ke user
+          // sebanyak 3-4 kali berturut-turut dalam satu turn, paksa loop berhenti dengan error deskriptif.
+          if (hasThought && !text.trim()) {
+            consecutiveThoughtOnlyCount += 1;
+            if (consecutiveThoughtOnlyCount >= 4) {
+              if (tree.isTreeActive) {
+                tree.finish('Agent terjebak dalam thought loop');
+              }
+              const errMsg = 'Agent terjebak dalam thought loop tanpa memanggil tool.';
+              this.lastResponseStreamed = false;
+              lastRawResponse = errMsg;
+              lastHadToolCalls = tree.currentStep > 0;
+              return errMsg;
+            }
+
+            // Tambahkan jeda minimum (500ms-1s) sebelum mengirim giliran berikutnya jika turn sebelumnya
+            // hanya menghasilkan thought tanpa aksi, untuk mengurangi risiko memicu rate limit provider.
+            const configuredDelay = process.env.RUKO_THOUGHT_LOOP_DELAY_MS
+              ? Number(process.env.RUKO_THOUGHT_LOOP_DELAY_MS)
+              : 500;
+            const delayMs = Number.isNaN(configuredDelay) ? 500 : configuredDelay;
+            if (delayMs > 0 && !signal?.aborted) {
+              await new Promise<void>((resolve) => {
+                const timer = setTimeout(resolve, delayMs);
+                signal?.addEventListener('abort', () => {
+                  clearTimeout(timer);
+                  resolve();
+                }, { once: true });
+              });
+            }
+
+            if (signal?.aborted) {
+              if (tree.isTreeActive) {
+                tree.finish('Dibatalkan oleh pengguna');
+              } else {
+                process.stdout.write(yellow('\n⚠ Dibatalkan oleh pengguna\n'));
+              }
+              return '';
+            }
+
+            messages.push({
+              role: 'assistant',
+              content: raw.trim() || '<thought></thought>',
+              timestamp: new Date().toISOString(),
+            });
+            messages.push({
+              role: 'user',
+              content: 'Fase thinking telah selesai. Silakan panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir langsung kepada pengguna.',
+              timestamp: new Date().toISOString(),
+            });
+            continue;
+          }
 
           // Multi-step task completion guard:
           // If the instruction requested modification (edit/fix/write), but only inspection tools ran,
@@ -668,6 +736,7 @@ export class Agent {
         }
 
         hasSeparatedFromTools = false;
+        consecutiveThoughtOnlyCount = 0;
 
         for (const call of calls) {
           if (MUTATING_TOOLS.has(call.tool)) {

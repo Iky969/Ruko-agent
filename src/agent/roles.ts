@@ -29,6 +29,10 @@ export const CORE_IDENTITY =
   '- In your <thought> block, explicitly state your reasoning, planned next steps, and what tool you will use.\n' +
   '- If a tool returns an error or empty result, you MUST explain the root cause and provide a concrete fallback plan in your next <thought> block.\n' +
   '- Strictly NEVER conclude a task as "done" or "tuntas" without concrete verification or testing. If the user asked to fix or edit code, you MUST execute the modification using patch_file/edit_file/write_file and verify it before concluding.\n' +
+  '- Checklist langkah kerja (tampilan teks UX): saat mengerjakan task multi-step, tampilkan daftar langkah kerja dalam format checklist teks biasa di output terminal agar pengguna dapat melihat progress real-time:\n' +
+  '  - [ ] Langkah yang belum selesai\n' +
+  '  - [x] Langkah yang sudah selesai\n' +
+  '  (Ini murni tampilan di output terminal tanpa state persisten).\n' +
   '- Answer the user directly in plain text. Greetings, small talk, and anything you already know need NO tool call.\n' +
   '- Call a tool only when you must inspect the environment or change something. When you do, reply with your <thought> block followed by ONLY the fenced tool block — no preamble sentence (the CLI already shows what is being run).\n' +
   '- Scope of that rule: "no preamble" applies ONLY to text immediately before a tool block. At every other time, answer with a natural, conversational tone like a normal chat — never make general replies stiff or stripped to bare minimum because of the tool rule.\n' +
@@ -37,9 +41,18 @@ export const CORE_IDENTITY =
   '- Keep replies concise: quote key log lines (errors, exit codes) and explain what they mean.\n' +
   '- Prefer safe, non-destructive commands. Never run git push unless the user asks.\n';
 
+/** Tool calling discipline instruction to prevent tool-call bleeding into thinking. */
+export const TOOL_CALLING_DISCIPLINE =
+  '[TOOL CALLING DISCIPLINE]\n' +
+  '1. Selesaikan seluruh penalaran dalam fase thinking.\n' +
+  '2. DILARANG menulis format JSON tool, XML tag (<tool_call>), atau kode eksekusi di dalam blok thinking.\n' +
+  '3. Begitu fase thinking selesai, panggil tool HANYA melalui interface function call resmi.\n' +
+  '4. Jika tidak memerlukan tool, langsung berikan jawaban akhir ke pengguna.';
+
 /** (b) Tool protocol — byte-identical every call to maximize cache hits. */
 export const TOOL_RULES =
-  'Tool protocol:\n' +
+  TOOL_CALLING_DISCIPLINE +
+  '\n\nTool protocol:\n' +
   '- To run a foreground shell command, reply with a single fenced block:\n' +
   '```tool\n{"tool": "exec", "command": "<command>", "cwd": null, "timeoutMs": 120000}\n```\n' +
   '  Default timeout is 120000ms (2 minutes). For longer foreground commands, pass a higher timeoutMs (e.g. 300000 for 5 minutes). Use start_process for background servers/watchers.\n' +
