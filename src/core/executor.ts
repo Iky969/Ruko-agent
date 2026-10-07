@@ -54,6 +54,18 @@ export const DANGEROUS_ENV_VARS = new Set([
   'LD_LIBRARY_PATH',
   'DYLD_INSERT_LIBRARIES',
   'DYLD_LIBRARY_PATH',
+
+  // Interpreter startup / module-path injection lintas bahasa (issue #31).
+  // Setiap variabel di bawah dibaca interpreter SEBELUM skrip user berjalan,
+  // sehingga nilai dari caller/.env repo asing = eksekusi kode arbitrer pada
+  // perintah `python`/`perl`/`ruby` apa pun yang dijalankan agen.
+  'PYTHONSTARTUP', // file dieksekusi saat interpreter interaktif start
+  'PYTHONPATH', // prepend sys.path → shadowing modul stdlib (mis. os.py palsu)
+  'PYTHONWARNINGS', // filter `-W` → import kategori warning arbitrer (gadget RCE)
+  'PERL5OPT', // opsi CLI implisit, mis. `-Mevil` / `-e` → RCE
+  'PERL5LIB', // prepend @INC → shadowing modul Perl
+  'RUBYOPT', // opsi CLI implisit, mis. `-revil` → require arbitrer
+  'RUBYLIB', // prepend $LOAD_PATH → shadowing library Ruby
 ]);
 
 // ─────────────────────────────────────────────────────────────────────────────

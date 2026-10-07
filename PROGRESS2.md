@@ -237,6 +237,37 @@
 - **Belum di-commit.**
 - **Next step:** Menunggu review persetujuan dari pengguna sebelum commit.
 
-
+## 16. Issue #31 — Residual Hardening Post-Audit: Hardlink Escape (`secureRead.ts`) & Env Interpreter Python/Perl/Ruby (`executor.ts`/`dotenv.ts`) [status: DISETUJUI]
+- **Objective:** Mengeksekusi 2 residual hardening dari audit Qwen+Grok yang sudah di-cross-check terhadap kode asli (issue #31, `feedback.txt`): (1) deteksi hardlink pada `secureReadFile`, (2) perluasan denylist env subprocess/.env untuk Python, Perl, Ruby. Item lain di issue #31 (edge URL/redirect test, Guardian injection lewat isi command, SSE/TUI quality) **di luar scope** batch ini dan tetap backlog.
+- **Keputusan teknis penting + alasan:**
+  1. **Hardlink detection fail-closed pada `nlink > 1` (deviasi sadar dari spesifikasi literal):**
+     - Spesifikasi meminta tolak bila `nlink > 1` **DAN** `st_dev` berbeda dari workspace root. Secara kernel, `link(2)` tidak bisa melintasi filesystem (`EXDEV`), jadi hardlink ke file sensitif di luar workspace **selalu** punya `st_dev` yang sama dengan workspace. Kondisi AND tersebut tidak akan pernah terpicu oleh serangan hardlink nyata, dan test adversarial (a) mustahil lulus dengan jujur.
+     - Implementasi: tolak setiap `stat.nlink > 1n` dengan `SecurityViolation('HARDLINK_ESCAPE')`. Kebijakan ini superset ketat dari kondisi spesifikasi. `st_dev` tetap dibandingkan dengan workspace root dan dicantumkan di pesan error sebagai diagnostik.
+     - Cek dilakukan pada **fstat FD yang sudah terbuka** (`handle.stat({ bigint: true })`), bukan pada path, sehingga konsisten dengan pola TOCTOU-safe yang sudah ada dan tidak bisa di-race. Posisinya setelah cross-check inode/dev realpath (langkah 5b), sebelum pembacaan data.
+     - Hardlink tidak terdeteksi oleh `realpath`/`lstat`/`O_NOFOLLOW`/`assertPhysicalContainment` karena path-nya memang berada di dalam workspace. Hanya `st_nlink` yang memberi sinyal di level inode.
+     - **Trade-off false positive:** file `nlink = 1` tidak terpengaruh, sesuai syarat. File yang sah tetapi ber-hardlink (mis. `node_modules` hasil pnpm store, backup `cp -al`) akan ditolak `read_file`. Agen masih bisa membacanya lewat `exec`, karena shell memang di luar boundary file sandbox.
+     - `readFileTool` memetakan `HARDLINK_ESCAPE` ke pesan yang jelas dan bisa ditindaklanjuti agen, tanpa membocorkan isi file.
+  2. **Env interpreter lintas bahasa:**
+     - `DANGEROUS_ENV_VARS` (`src/core/executor.ts`) ditambah `PYTHONSTARTUP`, `PYTHONPATH`, `PYTHONWARNINGS`, `PERL5OPT`, `PERL5LIB`, `RUBYOPT`, `RUBYLIB`. Mekanismenya sama dengan Node/LD_*/Bash: di-strip dari `process.env` + `options.env` sebelum spawn.
+     - `DANGEROUS_WORKSPACE_ENV_VARS` (`src/core/dotenv.ts`) ditambah `PYTHONSTARTUP`, `PYTHONWARNINGS`, `PERL5OPT`, `RUBYOPT` (`PYTHONPATH`/`PERL5LIB`/`RUBYLIB` sudah ada sebelumnya). Varian lowercase ikut diblokir lewat `isDangerousWorkspaceEnvVar`.
+     - Pencocokan tetap nama-eksak, bukan prefix, sehingga env Python/Ruby yang benign (`PYTHONUNBUFFERED`, `PYTHONDONTWRITEBYTECODE`, `RUBY_GC_*`) tetap lolos.
+     - `resourceGovernor.ts` tidak diubah: sudah berbasis allowlist, jadi ketujuh variabel itu otomatis tidak lolos.
+     - **Trade-off:** `PYTHONPATH`/`PERL5LIB`/`RUBYLIB` milik user yang sah di shell induk juga tidak diteruskan ke `exec`. Perilaku ini sama dengan `NODE_PATH` yang sudah di-strip sejak §15.
+  3. **Kualitas test:** test interpreter bersifat behavioral, dengan payload nyata (`sitecustomize.py`, `Evil.pm` via `-MEvil`, `evil.rb` via `-revil`) plus **positive control** yang membuktikan payload memang tereksekusi bila Ruko tidak men-strip env. Mutation check: dengan source di-revert (`git stash`), 12/13 test baru gagal. Satu-satunya yang lolos adalah test anti-false-positive `nlink = 1`, dan itu memang diharapkan.
+- **File yang dimodifikasi / dibuat:**
+  - `src/core/tools/secureRead.ts` — langkah 5b hardlink detection (`HARDLINK_ESCAPE`) + update docstring.
+  - `src/agent/filetools.ts` — pemetaan pesan `HARDLINK_ESCAPE` di `readFileTool`.
+  - `src/core/executor.ts` — +7 env interpreter di `DANGEROUS_ENV_VARS`.
+  - `src/core/dotenv.ts` — +4 env interpreter di `DANGEROUS_WORKSPACE_ENV_VARS`.
+  - `src/tests/residual_hardening_issue31.test.ts` (baru) — 13 tests / 2 suites:
+    - (a) Hardlink (6): hardlink ke file sensitif di luar ditolak tanpa bocor isi; hardlink di subdir bersarang & path absolut; `read_file` end-to-end; hardlink sesama workspace ber-`st_dev` sama ikut ditolak (mengunci kebijakan); file reguler `nlink = 1` tetap terbaca; file kembali terbaca setelah `nlink` turun ke 1.
+    - (b) Env (7): parity denylist executor↔dotenv (+ lowercase); strip dari `options.env` sementara env aplikasi normal & Python/Ruby benign lolos; strip dari `process.env` induk; behavioral Python/Perl/Ruby dengan positive control; `.env` workspace memblokir env interpreter dan tetap memuat variabel normal.
+- **Rekonsiliasi test (sebelum/sesudah/delta):**
+  - Angka terakhir terdokumentasi (§15): 1217 tests / 61 suites. Baseline aktual sebelum batch ini (HEAD `0e783eb`): **1232 tests (1231 pass / 0 fail / 1 skip win32, 65 suites)**. Gap +15 test / +4 suite berasal dari commit setelah `ff60213`: `plan_auto_execute.test.ts` +12 test / +4 suite (`describe`), `reasoning_fase2.test.ts` +2, `secureRead.test.ts` +1.
+  - Sesudah: **1245 tests (1244 pass / 0 fail / 1 skip win32, 67 suites)**.
+  - Delta: **+13 test / +2 suite**, semuanya dari `residual_hardening_issue31.test.ts`. Tidak ada test lama yang berubah status.
+- **Review (disetujui pengguna):** kebijakan konservatif tolak semua `nlink > 1` disetujui. Strip `PYTHONPATH`/`PERL5LIB`/`RUBYLIB` dari `exec` user disetujui (konsisten dengan `NODE_PATH`). Seluruh test hardlink (a) **dipertahankan**: test tersebut lulus di bawah kebijakan konservatif dan menjadi regression coverage fix ini. Yang "mustahil lulus" hanya varian spesifikasi literal (AND `st_dev`), dan varian itu tidak diimplementasikan.
+- **Status rilis:** di-commit & di-push ke `main` (commit `9615be5`). Issue #31 diberi comment ringkasan fix, 3 item sisa (SSRF edge-case/redirect test, Guardian self-justifying injection, SSE/TUI quality) resmi dipindahkan ke issue baru [#32](https://github.com/Iky969/Ruko-agent/issues/32), dan issue #31 telah ditutup.
+- **Next step:** Follow-up 3 item sisa di issue #32.
 
 

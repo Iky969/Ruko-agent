@@ -194,6 +194,9 @@ export async function readFileTool(
       if (err.code === 'PATH_TRAVERSAL') {
         return { ok: false, text: `read_file: target '${filePath}' berada di luar working directory.` };
       }
+      if (err.code === 'HARDLINK_ESCAPE') {
+        return { ok: false, text: `read_file: '${filePath}' adalah hardlink (nlink > 1) — ditolak demi keamanan karena salah satu namanya bisa berada di luar workspace.` };
+      }
       return { ok: false, text: `read_file: pelanggaran keamanan (${err.code}): ${err.message}` };
     }
     const code = (err as NodeJS.ErrnoException).code;
