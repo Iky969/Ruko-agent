@@ -40,7 +40,6 @@ test('start_process always stores workspace-contained paths only after first app
     'cat src/file.txt',
     'cat ./src/../file.txt',
     'cat --file=src/file.txt',
-    `cat ${join(ws, 'src', 'file.txt').replace(/\\/g, '/')}`,
     'git --version',
   ]) {
     const request: ApprovalRequest = { kind: 'start_process', cwd: ws, command };
@@ -51,6 +50,19 @@ test('start_process always stores workspace-contained paths only after first app
     assert.equal(allowlist.allows(display, request), true, command);
     assert.equal(allowlist.allows(display + ' extra', { ...request, command: command + ' extra' }), false);
   }
+});
+
+test('start_process allows absolute paths inside a workspace when command syntax is safely rememberable', (t) => {
+  const workspaceRoot = mkdtempSync(join(tmpdir(), 'ruko-allowlist-absolute-'));
+  t.after(() => rmSync(workspaceRoot, { recursive: true, force: true }));
+  const cwd = workspaceRoot;
+  const command = `cat ${join(workspaceRoot, 'inside.txt').replace(/\\/g, '/')}`;
+  const allowlist = new SessionApprovalAllowlist();
+  const request: ApprovalRequest = { kind: 'start_process', cwd, workspaceRoot, command };
+  const display = `start_process ${command}`;
+  assert.equal(allowlist.allows(display, request), false, 'first approval is still required');
+  assert.equal(allowlist.remember(display, request), true);
+  assert.equal(allowlist.allows(display, request), true);
 });
 
 test('start_process path resolution uses the host workspace boundary from a nested cwd', (t) => {

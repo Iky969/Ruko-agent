@@ -32,7 +32,10 @@ export class SessionApprovalAllowlist {
       // Drive-relative paths also depend on ambient per-drive cwd on Windows.
       if (/^[a-zA-Z]:/.test(candidate) &&
         (process.platform !== 'win32' || !path.win32.isAbsolute(candidate))) return false;
-      return inside(path.resolve(root, path.resolve(cwd, candidate)));
+      const resolved = path.isAbsolute(candidate)
+        ? path.resolve(candidate)
+        : path.resolve(cwd, candidate);
+      return inside(resolved);
     });
   }
 
