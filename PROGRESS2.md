@@ -51,8 +51,8 @@
 ---
 
 ## 3. Active Task / Next Focus
-- **Current Step:** Empat commit kode murni hasil rebase + follow-up Windows path fix sudah diverifikasi lokal di `fix/feedback-scope-security-pr`; changelog/progress memuat catatan tindak lanjut CI. Detail §22.
-- **Action Item:** Push branch yang diminta, lalu pastikan seluruh CI untuk head terbaru hijau. Jika ada check gagal, perbaiki dan ulangi. STOP sebelum merge; jangan mengubah repo utama `/workspaces/Ruko-agent` atau membuat tag/release.
+- **Current Step:** Commit rebase, Windows short-path fix, dan klarifikasi review sudah didorong ke PR #37. Seluruh status checks PR pada head terakhir lulus, detail §22.
+- **Action Item:** PR #37 tetap open; jangan merge tanpa instruksi eksplisit. Repo utama `/workspaces/Ruko-agent` tidak diubah. Workflow Advanced Security AI terpisah gagal karena kuota bulanan, bukan hasil finding.
 
 ---
 
@@ -406,11 +406,13 @@
 - Pada checkpoint ini branch/HEAD/status utama serta SHA-256 diff staged/unstaged masih identik dengan sebelum rebase. Setelah satu commit docs, perintah diminta dan pemeriksaan invariant diulang; hasil pasca-commit dilaporkan pada jawaban akhir. Hanya catatan ANALISIS existing tetap untracked, tidak ikut commit.
 
 ### Follow-up CI — Windows temporary paths
-- Push pertama ke PR #37 membawa head `b0b5edbd24955af98ddf19a47455a8d05d3bc558`; run `38080042867` gagal di Windows Node 18/20: absolute temp path memakai `RUNNER~1` ditolak. Fix pertama `889f4d1` memisahkan normalisasi absolute-vs-relative, tetapi retry CI `38080881880` masih gagal pada test absolute path.
-- Diagnosis retry: test menghasilkan workspace di `os.tmpdir()` (di luar `workspaceRoot`), lalu mengharapkan path absolut itu dapat diingat. Ekspektasi tersebut salah—absolute luar workspace wajib tetap ditolak. Test diperbaiki agar temp workspace dibuat di bawah `process.cwd()` sehingga temporary path absolute memang inside workspace. Kasus `../`, `/etc`, drive asing dan tilde expansion tetap ditolak.
-- Fix produksi menangani absolute langsung, relative dari cwd, containment workspace, Windows short-path component literal `RUNNER~1` (bukan shell tilde expansion). Tambahan tes mengunci short-name path tetap diizinkan dan `~/...` tidak dapat disimpan.
-- Commit terbaru untuk perubahan ini: `d105d885747e865ca948f511cbcd7e3e81cd2e9d fix(approval): allow Windows short path components in session grants`.
-- CI run `38080881880` untuk head sebelum commit tersebut gagal dua job Windows pada absolute-path regression; ia belum memverifikasi koreksi test/short-path yang baru. Jalankan typecheck/build/full test dan push hasil lokal yang lulus, lalu tunggu CI terbaru hijau; jangan nyatakan selesai bila check gagal.
+- Push pertama PR #37 memakai head `b0b5edb`; run `38080042867` gagal Windows Node 18/20 karena grammar allowlist menolak `~` pada komponen path literal `RUNNER~1`. Rebase sudah diikuti commit path absolute `889f4d1`; retry `38080881880` memakai head lama `d8281da` (belum berisi grammar fix), jadi dua kegagalan yang sama bukan bukti untuk commit terbaru.
+- Fix `d105d88` menambah `~` dalam charset safe command sambil memblokir shell-leading `~/...` dan `=~/...`. Coverage meliputi `RUNNER~1` literal in-workspace, tilde expansion, serta traversal/absolute luar/drive asing tetap ditolak.
+- Tes absolute-path memakai temp workspace sebagai cwd dan workspaceRoot bersama; path tersebut memang berada di workspace (tidak melemahkan containment). Perubahan test hanya menormalkan slash pada Windows saat menyusun command path, sedangkan production resolver menerima separators Windows native/forward slash.
+- Commit `d105d88` berisi fix short-name grammar plus test. Commit `1784b38` berisi fixture test workspace-internal plus koreksi PROGRESS2. Dua commit terbaru telah dipush; full verification setelah commit terakhir: typecheck/build exit 0; `npm test` **1375 / 1374 pass / 0 fail / 1 skip / 69 suites**; sessionAllowlist **16/16**.
+- Klarifikasi eksplisit review PR #37 diposting: “Temuan #2 (exec vs start_process) dianggap perilaku yang disengaja, bukan bug.”
+- CI final PR #37 untuk head `1784b3888e80caae0d4af9e96057c103657542ee`: CI Node 18/20/22 pada Ubuntu, Node 18/20 Windows, Node 18/20 macOS, CodeQL Analysis, CodeQL, dan Analyze JavaScript/TypeScript semuanya pass. PR state OPEN, merge state CLEAN; tidak merge.
+- Workflow GitHub Advanced Security `Code scanning AI findings` terpisah gagal karena kuota bulanan Copilot (HTTP 402); tidak ada laporan finding. Status check rollup required untuk PR tetap seluruhnya pass. PR tetap open dan belum di-merge.
 
 ### Batas pekerjaan
 - Repo utama `/workspaces/Ruko-agent` tetap `main` @ `1a9c91e`; status serta hash diff staged/unstaged disimpan sebelum rebase untuk dibandingkan setelah verifikasi/commit docs. Semua checkout/rebase/edit/build/staging/commit dilakukan hanya di worktree PR; staging memakai nama file eksplisit.
