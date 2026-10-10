@@ -51,8 +51,8 @@
 ---
 
 ## 3. Active Task / Next Focus
-- **Current Step:** Feedback v2 — batch 3, task 5→8: regresi PLAN, zero runtime dependency, pesan penolakan scope, validasi `/plan`, serta audit referensi mode dari `halo.txt` — [status: SELESAI-terverifikasi, STOP untuk review]. Detail di §19; batch sebelumnya tetap diarsipkan di §17–18.
-- **Action Item:** Menunggu review pengguna sebelum commit. Task 9–12 dan task berikutnya tidak dilanjutkan; perubahan staged awal batch 2 dipertahankan, batch 3 belum di-stage/commit. Tidak push, perubahan versi package, atau tag rilis.
+- **Current Step:** Feedback v2 — batch 4, task 9–12: kegagalan persist, status PLAN/scope, gate `yoloMode`, dan approval `[a/y/n]` sesi-only — [status: SELESAI-terverifikasi, STOP untuk review]. Detail §20.
+- **Action Item:** Menunggu review pengguna sebelum commit batch 4. Commit lokal `24598da` mencakup perubahan sebelum batch ini; batch 4 belum di-stage. Tidak push, ubah versi, tag, atau mulai task di luar permintaan.
 
 ---
 
@@ -329,5 +329,22 @@
   - Log: `/home/codespace/.hermes/cache/scratch/ruko-feedback-batch3/baseline.tap`, `final.tap` (run gagal), `final-green.tap`, `relevant.tap`.
   - Static/self-review dilakukan; scan added-lines tidak menemukan assignment credential/eval/shell injection baru. Review independen belum dilakukan: tool delegasi dan CLI reviewer (`codex`/`claude`/`opencode`) tidak tersedia.
 - **Batas / Git:** task 5→8 selesai berurutan; task 9–12 dan task berikutnya tetap terbuka. Tidak menyalakan Ruko YOLO runtime atau mengubah approval global; approval nonaktif hanya fixture regresi. `dist/` hanya diperbarui otomatis lewat build. `feedback.txt` tetap di-ignore dan diperbarui lokal; tidak mengubah aturan ignore. Tidak staging/commit/push/tag/release; STOP menunggu review pengguna.
+
+## 20. Feedback v2 — Batch 4: Task 9–12 [status: SELESAI-terverifikasi, STOP untuk review]
+- **Task 9 — simpan state:** `/plan` dan kedua jalur auto-off tetap berbagi `Agent.setPlanMode()`; bukti menghitung tepat satu persist atomik per transisi. Kegagalan `saveHostState` kini menyertakan kode `HOST_STATE_SAVE_FAILED`, operasi, arah PLAN/ACT, sesi, kode I/O, dan sebab; rollback state/mode tetap berjalan. REPL melaporkan sekali, pemanggil Agent langsung menerima error dengan `cause`. Test ENOSPC tiga jalur memeriksa state disk/live tetap PLAN, tidak ada pemanggilan provider/turn lanjutan.
+- **Task 10 — status:** `SystemLoop` memberikan PLAN/ACT dari HostState otoritatif (field Agent hanya fallback saat HostState absen) serta scope paths atau `(none)` ke status line/panel. Status line memprioritaskan status otorisasi sebelum detail opsional; panel menambahkan baris status khusus, semua baris tetap clamped. Test menelusuri allow/off/reset/on dan host state vs flag Agent stale; regresi UI mencakup 24–120 kolom, scope kosong/satu/banyak/path panjang Unicode, serta sanitasi karakter kontrol.
+- **Task 11 — `yoloMode`:** field `DispatcherGateOptions.yoloMode` kini deprecated/ignored untuk kompatibilitas. `runToolCall` tidak lagi membaca `config.approvalEnabled` untuk mengisinya. Getter ber-throw membuktikan gate tidak membaca opsi mati; test PLAN, ACT dan read-only.
+- **Task 12 — approval sesi `[a/y/n]`:** `a` menyimpan command exact-match hanya untuk loop/session aktif; `y` mengizinkan sekali, `n`/kosong/invalid/EOF menolak. Grant diikat pada jenis operasi (`exec`/`start_process`), teks command tepat, dan `realpath(cwd)`; tidak memakai prefix dan tidak mengubah `approvalAllowlist` config.
+  - Tombol `a` hanya tersedia untuk command sederhana non-blocked, non-high-risk dan bukan direct `git push`, command destruktif, interpreter/dynamic shell, shell operator/substitusi, variable expansion, atau environment interpolation. `BLOCKED_PATTERNS` tetap selalu menang dan tidak bisa diingat.
+  - Grant disimpan di RAM `SystemLoop`, dicabut `/new`, penggantian sesi, dan stop. Callback prompt lama memeriksa epoch allowlist sehingga jawaban `a` setelah sesi berubah ditolak. Non-TTY tidak mengizinkan persetujuan, bahkan jika command sebelumnya pernah diingat.
+  - `/exec`, instruksi manual `run`, `exec` melalui agent, dan `start_process` kini melewati gate/path-security yang sama sebelum guarded execution. Regresi membuktikan izin sesi tidak melewati PLAN atau scope null; config allowlist yang telah ada tetap dihormati guardedExecute.
+- **File utama:** `src/agent/agent.ts`, `src/agent/commands.ts`, `src/agent/tools.ts`, `src/core/approval.ts`, `src/core/approval/sessionAllowlist.ts` (baru), `src/core/loop.ts`, `src/core/ui.ts`, `src/core/dispatcher/dispatcherGate.ts`; test baru `src/tests/feedback_approval_session.test.ts`, `src/tests/feedback_status_scope.test.ts`, serta regresi `feedback_scope_bootstrap.test.ts`/`fase2_dispatcherGate.test.ts`.
+- **Verifikasi actual (Linux / Node v24.21.0 / npm 11.19.0):**
+  - Baseline setelah commit `24598da`: `npm run test -- --test-reporter=tap` — **1283 tests / 1282 pass / 0 fail / 1 skip / 68 suites**.
+  - Final perintah yang sama — **1303 tests / 1302 pass / 0 fail / 1 skip / 68 suites**. Delta **+20 test / +0 suite**; TAP leaf records direkonsiliasi terhadap ringkasan total, tak ada test dihapus/rename. Skip existing untuk path Windows.
+  - Suite terkait final: **241/241 pass**. `npm run typecheck`, build di `npm run test`, `git diff --check`: lulus. Empat guard zero-runtime-dependency terpilih tetap lulus; `npm ls --omit=dev --all` menghasilkan `(empty)`.
+  - Satu full run awal selama iterasi berakhir saat fixture `start_process git --version` diklasifikasikan non-risk dan tak menampilkan opsi `a`; fixture diperbaiki menjadi `echo git push`, yang benar-benar memicu approval gate. Full run akhir lulus semua. Tak ada blocker tersembunyi atau test di-skip untuk menutupi kegagalan.
+  - Static self-review: tak ada assignment credential literal, `eval()` atau `shell=True` pada tambahan. Review independen tidak dilakukan karena reviewer CLI/delegasi tidak tersedia.
+- **Dokumentasi/Git:** task 9–12 dicentang dan checkpoint ditambahkan lokal di `feedback.txt` (tetap ignored oleh `.gitignore:14`). §3/§20 dan `CHANGELOGSv2.md` diperbarui. Baseline commit `24598da` tetap lokal; batch 4 belum di-stage/commit. Tidak push/tag/release. Task PR-B lain seperti `/config approval` dan kebijakan persist/banner YOLO tetap terbuka; task 9–12 selesai dan sesi berhenti untuk review.
 
 

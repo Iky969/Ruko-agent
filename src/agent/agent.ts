@@ -1,5 +1,5 @@
 import { sep } from 'node:path';
-import { Confirmer, guardedExecute } from '../core/approval.js';
+import type { Confirmer } from '../core/approval.js';
 import { Context } from '../core/context.js';
 import { ActivityTray } from '../core/activity.js';
 import { isFileMutationLogLine, parseFileMutationLogLine, renderMutationSummary } from '../core/diffui.js';
@@ -29,9 +29,7 @@ import {
   RoleDef,
 } from './roles.js';
 import {
-  detectSensitiveFileAccessInExec,
   getWorkspaceRoot,
-  isSensitiveEnvCommand,
   parseToolCalls,
   runToolCall,
   stripToolBlocks,
@@ -254,7 +252,18 @@ export class Agent {
           this.scopeAmendmentManager.seedWorkspaceScope(options.userAuthorized === true);
         }
         this.hostState.mode = on ? 'plan' : 'act';
-        await saveHostState(this.hostState);
+        try {
+          await saveHostState(this.hostState);
+        } catch (cause) {
+          const code = cause instanceof Error ? (cause as NodeJS.ErrnoException).code : undefined;
+          const detail = cause instanceof Error ? cause.message : String(cause);
+          // The REPL logs the propagated error once; direct callers retain its cause.
+          throw new Error(
+            `HOST_STATE_SAVE_FAILED: saveHostState gagal untuk transisi ${previousMode.toUpperCase()} → ${on ? 'PLAN' : 'ACT'}` +
+            ` (${this.hostState.sessionId})${code ? ` [${code}]` : ''}: ${detail}. Transisi dibatalkan.`,
+            { cause },
+          );
+        }
       } catch (err) {
         this.hostState.mode = previousMode;
         this.hostState.approvalScope = previousScope;
@@ -430,18 +439,12 @@ export class Agent {
     if (match) {
       const cmd = match[1];
       const ws = this.workspaceRoot ?? getWorkspaceRoot();
-      if (isSensitiveEnvCommand(cmd)) {
-        return `exec ditolak: command berpotensi membocorkan environment variable sensitif. Kredensial tidak dapat diakses lewat tool ini.`;
-      }
-      const fileCheck = detectSensitiveFileAccessInExec(cmd, ws);
-      if (fileCheck.blocked) {
-        return fileCheck.message ?? 'exec ditolak: akses ke file sensitif diblokir.';
-      }
-      const result = await guardedExecute(
-        cmd,
-        { timeoutMs: this.config.execTimeoutMs, confirm: this.confirm, llmProvider: this.llmProvider },
-        this.config,
-      );
+      const result = JSON.parse(await runToolCall({ tool: 'exec', command: cmd }, {
+        config: this.config, confirm: this.confirm, llmProvider: this.llmProvider,
+        workspaceRoot: ws, hostState: this.hostState, planMode: this.planMode,
+        scopeAmendmentManager: this.scopeAmendmentManager,
+      }));
+      if (result.error) return result.error;
       return (
         `${result.output || '(no output)'}\n` +
         `[exit code: ${result.code ?? 'killed'} | ${result.durationMs}ms` +

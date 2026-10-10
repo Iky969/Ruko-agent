@@ -277,6 +277,30 @@ describe('feedback PR-A: ACT scope bootstrap', () => {
     assert.match(stripAnsi(buildHelpText()), /\/scope/);
   });
 
+  test('REPL status bar and panel show live host PLAN/ACT and scope after authorization changes', async () => {
+    const loop = new SystemLoop(env.ctx, agent, env.config, join(root, 'config.json'), pipeline);
+    const assertStatus = (mode: string, scope: string) => {
+      for (const width of [30, 80, 120]) {
+        for (const render of ['statusBarLine', 'statusPanel']) {
+          const output = stripAnsi((loop as any)[render](width));
+          assert.ok(output.includes(mode), output);
+          assert.ok(output.includes(`scope: ${scope}`), output);
+        }
+      }
+    };
+    assertStatus('PLAN', '(none)');
+    await handleCommand('/scope allow src', env);
+    assertStatus('PLAN', 'src');
+    await handleCommand('/plan off', env);
+    assertStatus('ACT', 'src');
+    await handleCommand('/scope reset', env);
+    assertStatus('ACT', '(none)');
+    await handleCommand('/plan on', env);
+    assertStatus('PLAN', '(none)');
+    agent.planMode = false; // stale fallback must not override authoritative host display
+    assertStatus('PLAN', '(none)');
+  });
+
   test('scope denial identifies a changed plan and its recovery replaces the stale contract', async () => {
     await handleCommand('/scope allow src', env);
     await handleCommand('/plan off', env);
@@ -558,6 +582,57 @@ describe('feedback PR-A: ACT scope bootstrap', () => {
     assert.equal(pipeline.hostState.mode, 'plan');
     assert.equal(pipeline.hostState.approvalScope, null);
     assert.equal((await loadHostState(pipeline.sessionId, { resume: false })).mode, 'plan');
+  });
+
+  for (const route of ['command', 'agent-auto', 'repl-auto'] as const) {
+    test(`host state save failure is reported once and stops ${route} before execution`, async (t) => {
+      const failure = Object.assign(new Error('test disk full'), { code: 'ENOSPC' });
+      const rename = t.mock.method(fsPromises, 'rename', async () => { throw failure; });
+      const logs: string[] = [];
+      t.mock.method(console, 'error', (...args: unknown[]) => { logs.push(args.map(String).join(' ')); });
+      const chat = t.mock.method(provider, 'chat');
+      env.ctx.add('assistant', '1. Buat file\n2. Baca struktur');
+      const stateFile = join(process.env.RUKO_HOST_STATE_DIR!, pipeline.sessionId, 'state.json');
+      const before = readFileSync(stateFile, 'utf8');
+      if (route === 'agent-auto') {
+        await assert.rejects(agent.handleInstruction('1'), (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.match(err.message, /HOST_STATE_SAVE_FAILED.*saveHostState.*PLAN.*ACT.*ENOSPC.*test disk full/);
+          assert.equal(err.cause, failure);
+          return true;
+        });
+        assert.deepEqual(logs, [], 'direct callers own error reporting');
+      } else {
+        const loop = new SystemLoop(env.ctx, agent, env.config, join(root, 'config.json'), pipeline);
+        const turn = t.mock.method(loop as any, 'runTurn', async () => {});
+        await (loop as any).handleLine(route === 'command' ? '/plan off' : '1');
+        assert.equal(logs.length, 1);
+        assert.match(logs[0], /\[error\].*HOST_STATE_SAVE_FAILED.*saveHostState.*PLAN.*ACT.*ENOSPC/);
+        assert.equal(turn.mock.callCount(), 0);
+      }
+      assert.equal(chat.mock.callCount(), 0);
+      assert.equal(rename.mock.callCount(), 1);
+      assert.equal(agent.planMode, true);
+      assert.equal(pipeline.hostState.mode, 'plan');
+      assert.equal(pipeline.hostState.approvalScope, null);
+      assert.equal(readFileSync(stateFile, 'utf8'), before);
+    });
+  }
+
+  test('slash PLAN transitions and both auto-off paths each persist host state only once', async (t) => {
+    const rename = t.mock.method(fsPromises, 'rename');
+    await handleCommand('/plan off', env);
+    assert.equal(rename.mock.callCount(), 1);
+    await handleCommand('/plan on', env);
+    assert.equal(rename.mock.callCount(), 2);
+    env.ctx.add('assistant', '1. Kerjakan file\n2. Lihat struktur');
+    await agent.handleInstruction('1');
+    assert.equal(rename.mock.callCount(), 3);
+    await handleCommand('/plan on', env);
+    const loop = new SystemLoop(env.ctx, agent, env.config, join(root, 'config.json'), pipeline);
+    t.mock.method(loop as any, 'runTurn', async () => {});
+    await (loop as any).handleLine('1');
+    assert.equal(rename.mock.callCount(), 5);
   });
 
   for (const initialMode of ['plan', 'act'] as const) {

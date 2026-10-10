@@ -38,6 +38,7 @@ export interface DispatcherGateOptions {
   args?: Record<string, any>;
   hostState?: HostState | null;
   planMode?: boolean;
+  /** @deprecated Ignored compatibility field. Approval policy cannot bypass PLAN or scope; never read here. */
   yoloMode?: boolean;
   scopeManager?: ScopeAmendmentManager | null;
   isInteractive?: boolean;

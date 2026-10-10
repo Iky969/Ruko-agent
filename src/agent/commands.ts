@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { Confirmer, guardedExecute } from '../core/approval.js';
+import type { Confirmer } from '../core/approval.js';
 import { join, relative as relativeFromCwd, resolve as resolvePath } from 'node:path';
 import { Context } from '../core/context.js';
 import { isHostnameOrSubdomain, isPrivateOrLocalHost, saveConfig } from '../core/config.js';
@@ -8,7 +8,7 @@ import { bold, cyan, dim, formatDuration, formatK, green, renderBox, terminalWid
 import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
-import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot } from './tools.js';
+import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot, runToolCall } from './tools.js';
 import { AgentConfig, AgentMode, createDefaultSessionState, DEFAULT_CONFIG, ProviderProfile, ReasoningLevel, SessionState, UiMode } from '../types.js';
 import { ConnectionResult, createProvider, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
@@ -683,11 +683,15 @@ const COMMANDS: CommandDef[] = [
         console.log('Usage: /exec <command>');
         return;
       }
-      const result = await guardedExecute(
-        args,
-        { timeoutMs: env.config.execTimeoutMs, confirm: env.confirm, llmProvider: env.llm },
-        env.config,
-      );
+      const result = JSON.parse(await runToolCall({ tool: 'exec', command: args }, {
+        config: env.config, confirm: env.confirm, llmProvider: env.llm,
+        workspaceRoot: getWorkspaceRoot(), hostState: env.agent?.getHostState(),
+        planMode: env.agent?.planMode, scopeAmendmentManager: env.agent?.getScopeAmendmentManager(),
+      }));
+      if (result.error) {
+        console.log(result.error);
+        return;
+      }
       console.log(result.output || '(no output)');
       console.log(
         `\n[exit code: ${result.code ?? 'killed'} | ${result.durationMs}ms` +

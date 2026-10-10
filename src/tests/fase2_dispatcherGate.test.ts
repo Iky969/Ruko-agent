@@ -17,6 +17,7 @@ import {
 } from '../core/dispatcher/dispatcherGate.js';
 import { runToolCall } from '../agent/tools.js';
 import type { HostState } from '../core/state/hostState.js';
+import { ScopeAmendmentManager } from '../core/approval/scopeAmendment.js';
 
 function makeState(mode: 'plan' | 'act'): HostState {
   return {
@@ -30,6 +31,30 @@ function makeState(mode: 'plan' | 'act'): HostState {
 }
 
 describe('F2-T1 Dispatcher Gate Lock', () => {
+  test('deprecated yoloMode is never read for PLAN, ACT scope, or read-only decisions', async () => {
+    for (const mode of ['plan', 'act'] as const) {
+      const hostState = makeState(mode);
+      const scopeManager = new ScopeAmendmentManager(hostState, process.cwd(), { isTTY: false });
+      for (const tool of ['write_file', 'read_file']) {
+        const decision = await evaluateDispatcherGate({
+          tool, hostState, scopeManager, args: { path: 'test.txt' },
+          get yoloMode(): boolean { throw new Error('dispatcher must not read approval policy'); },
+        });
+        assert.equal(decision.allowed, tool === 'read_file');
+      }
+    }
+  });
+
+  test('tool dispatch does not read approval config before the PLAN gate', async () => {
+    const result = JSON.parse(await runToolCall({ tool: 'write_file', path: 'blocked.txt', content: 'x' }, {
+      hostState: makeState('plan'),
+      config: {
+        get approvalEnabled(): boolean { throw new Error('unused YOLO derivation'); },
+      } as any,
+    }));
+    assert.match(result.error, /plan mode aktif/);
+  });
+
   test('isPlanModeBlockedTool mencakup seluruh tool mutasi disk & subprocess', () => {
     const requiredTools = [
       'exec',

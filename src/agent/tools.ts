@@ -1652,7 +1652,6 @@ export async function runToolCall(call: ToolCall, deps: ToolDeps = {}): Promise<
     args: call,
     hostState: deps.hostState,
     planMode: deps.planMode,
-    yoloMode: deps.config ? !deps.config.approvalEnabled : false,
     scopeManager: deps.scopeAmendmentManager,
     isInteractive: (deps.subagentDepth ?? 0) === 0 && deps.confirm !== undefined,
     workspaceRoot: ws,
@@ -2440,6 +2439,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         const ok = await deps.confirm(
           `start_process ${command}`,
           `menjalankan proses latar belakang "${command}"`,
+          { kind: 'start_process', cwd: resolvedCwd, command },
         );
         if (!ok) {
           return JSON.stringify({

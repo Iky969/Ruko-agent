@@ -4,6 +4,30 @@ Berkas ini mencatat batch implementasi feedback sesuai permintaan pengguna. Riwa
 
 ## [Unreleased] — 2026-10-10
 
+### Batch 4 — Task 9–12, status/scope, dan approval sesi
+
+#### Fixed
+- Kegagalan persist HostState diberi konteks `HOST_STATE_SAVE_FAILED` (operasi, transisi, sesi, errno dan sebab) sambil mempertahankan rollback fail-closed. Transisi PLAN/ACT dan auto-off tetap memakai satu jalur save.
+- Status bar/panel sekarang menampilkan PLAN/ACT dari HostState otoritatif dan scope yang sedang berlaku, termasuk `(none)` dan jumlah subtree tambahan; ringkasan authorization diprioritaskan saat lebar terminal terbatas.
+- `DispatcherGateOptions.yoloMode` deprecated dan diabaikan, dan tidak lagi diisi dari config saat dispatch tool. Plan/scope tetap keputusan host.
+- Approval shell menambahkan `[a/y/n]`: `a` membuat grant sesi exact-command, `y` one-shot, dan `n`/kosong/invalid/EOF menolak. Grant hanya untuk command sederhana yang memang butuh approval, bukan blocked/high-risk/destructive/dynamic, diikat ke operasi dan physical cwd, disimpan dalam memori loop saja, dan dicabut saat sesi berubah/baru/stop.
+- Jalur shell `/exec` dan manual `run` diarahkan melalui `runToolCall`; Plan, scope, batas file dan pemeriksaan shell yang sama berlaku sebelum approval. Config `approvalAllowlist` existing tetap berfungsi, tidak ditulis oleh `a`.
+
+#### Tests
+- Tambahan 20 leaf tests; baseline/final full-suite direkonsiliasi terhadap TAP leaf records dan ringkasan totals. Semua pass tanpa penghapusan/rename test.
+- Skenario ENOSPC untuk command/Agent auto-off/REPL auto-off; jumlah persist per transisi; status PLAN/ACT/scope live dan layout/sanitasi terminal; getter `yoloMode` ber-throw; one-shot/always/deny/cancel; exact command + jenis eksekusi + cwd; shell command destruktif/dinamis; pencabutan saat `/new`/stale prompt/non-TTY; bypass session approval tetap tunduk pada PLAN/scope.
+- `approvalAllowlist` config existing diuji terpisah pada `guardedExecute`.
+
+#### Verification
+- Baseline `npm run test -- --test-reporter=tap`: **1283 tests / 1282 pass / 0 fail / 1 skip / 68 suites**.
+- Final perintah yang sama: **1303 tests / 1302 pass / 0 fail / 1 skip / 68 suites**; delta **+20 / +0 suite**. Skip existing khusus Windows.
+- Suite terkait akhir **241/241 pass**; `npm run typecheck`, build dan `git diff --check` lulus. `npm ls --omit=dev --all` kosong.
+- Static self-review selesai; tak ada review independen. Verifikasi pada Linux / Node v24.21.0 / npm 11.19.0.
+
+#### Boundary
+- `feedback.txt` diperbarui lokal (tetap ignored); `PROGRESS2.md` §3/§20 diperbarui.
+- Tidak mengubah kebijakan global atau mengaktifkan YOLO, tidak menambah runtime dependency, dan tidak mengedit `dist/` manual. Commit terdahulu `24598da` dipertahankan; batch 4 belum di-stage/commit/push/tag. Task selanjutnya di luar 9–12 tidak dikerjakan.
+
 ### Batch 3 — Task 5–8 & audit referensi mode
 
 #### Fixed
