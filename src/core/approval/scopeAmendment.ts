@@ -12,8 +12,8 @@
  *  2. Kriptografi Kontrak Scope: Perubahan path di luar subtree memicu prompt
  *     konfirmasi interaktif; modifikasi hash rencana membatalkan izin eksekusi
  *     secara otomatis (fail-closed).
- *  3. Fail-Closed non-TTY / CI: Jika berada di lingkungan headless/CI tanpa
- *     TTY interaktif, amandemen otomatis ditolak tanpa menggantung sesi.
+ *  3. Fail-Closed non-TTY: Tanpa TTY interaktif, amandemen otomatis ditolak
+ *     tanpa menggantung sesi; variabel CI tidak menggantikan status stdin TTY.
  *  4. Interactive Timeout 30 detik untuk sesi lokal agar tidak menggantung.
  *  5. Mutasi host state menggunakan mutator serial Pipeline atau lock sesi
  *     milik pipeline — mencegah self-deadlock LOCK_TIMEOUT.
@@ -594,7 +594,7 @@ export class ScopeAmendmentManager {
 
     // 3. Target baru di luar subtree membutuhkan otorisasi eksplisit pengembang.
     // Fail-Closed di lingkungan headless/CI tanpa TTY (QA.md §1.7)
-    const effectiveTTY = this.options.isTTY ?? (Boolean(process.stdin.isTTY) && process.env.CI !== 'true');
+    const effectiveTTY = this.options.isTTY ?? Boolean(process.stdin.isTTY);
     if (!isInteractive || !effectiveTTY) {
       return this.denyMutation('SCOPE_OUTSIDE', targetPath);
     }

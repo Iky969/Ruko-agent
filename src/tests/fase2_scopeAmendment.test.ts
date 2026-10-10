@@ -10,7 +10,7 @@
  *  - Fungsi hash plan kanonis computePlanHash
  */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough, Readable, Writable } from 'node:stream';
@@ -114,6 +114,45 @@ describe('F2-T2 Scope Amendment Manager', () => {
     const resUnrelated = await manager.evaluateMutationTarget('scripts/deploy.sh', 'ubah script', false);
     assert.equal(resUnrelated, false, 'Mutasi di luar subtree non-interactive harus ditolak');
   });
+
+  for (const [tty, ci] of [[true, 'true'], [false, 'true'], [false, 'false']] as const) {
+    test(`TC-SCM-02: Fallback stdin TTY=${tty} with CI=${ci} follows the runtime TTY decision`, async (t) => {
+      const previousCI = process.env.CI;
+      const previousTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+      t.after(() => {
+        if (previousCI === undefined) delete process.env.CI;
+        else process.env.CI = previousCI;
+        if (previousTTY) Object.defineProperty(process.stdin, 'isTTY', previousTTY);
+        else Reflect.deleteProperty(process.stdin, 'isTTY');
+      });
+      process.env.CI = ci;
+      Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: tty });
+      const hostDir = createHostDir();
+      const ws = createWorkspace();
+      const state = createMockHostState(`sess-tty-${tty}-${ci}`, ['src/core']);
+      await saveHostState(state);
+      const statePath = join(hostDir, state.sessionId, 'state.json');
+      const before = readFileSync(statePath, 'utf8');
+      let outputBuffer = '';
+      const manager = new ScopeAmendmentManager(state, ws, {
+        // Deliberately omit isTTY: exercise the production fallback.
+        input: tty ? Readable.from(['y\n']) : new Readable({ read() { assert.fail('non-TTY must not read stdin'); } }),
+        output: new Writable({ write(chunk, _enc, cb) { outputBuffer += chunk.toString(); cb(); } }),
+        promptTimeoutMs: 5000,
+      });
+      const decision = await manager.evaluateMutationDecision('src/new.txt', 'TTY fallback', true);
+      assert.equal(decision.allowed, tty);
+      if (tty) {
+        assert.match(outputBuffer, /Izinkan amandemen scope ini\? \[Y\/n\]/);
+        assert.ok(JSON.parse(readFileSync(statePath, 'utf8')).approvalScope.allowedPaths.includes('src/new.txt'));
+      } else {
+        if (!decision.allowed) assert.equal(decision.code, 'SCOPE_OUTSIDE');
+        assert.equal(outputBuffer, '');
+        assert.equal(readFileSync(statePath, 'utf8'), before, 'non-TTY must not persist an amendment');
+        assert.equal(state.approvalScope?.allowedPaths.includes('src/new.txt'), false);
+      }
+    });
+  }
 
   test('DoD #2: Modifikasi hash rencana membatalkan izin eksekusi secara otomatis (fail-closed)', async () => {
     createHostDir();
