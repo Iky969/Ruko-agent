@@ -51,8 +51,8 @@
 ---
 
 ## 3. Active Task / Next Focus
-- **Current Step:** Feedback v2 — batch 4, task 9–12: kegagalan persist, status PLAN/scope, gate `yoloMode`, dan approval `[a/y/n]` sesi-only — [status: SELESAI-terverifikasi, STOP untuk review]. Detail §20.
-- **Action Item:** Menunggu review pengguna sebelum commit batch 4. Commit lokal `24598da` mencakup perubahan sebelum batch ini; batch 4 belum di-stage. Tidak push, ubah versi, tag, atau mulai task di luar permintaan.
+- **Current Step:** Persiapan PR ke `main` pada branch `fix/feedback-scope-security-pr`: merge remote terbaru direkonsiliasi, panduan kontribusi ditambahkan, dan versi source/package disiapkan sebagai `2.2.0` unreleased. Detail §21.
+- **Action Item:** Ajukan branch fitur sebagai PR, lalu tunggu CI/review; jangan push langsung ke `main`, merge, atau buat tag/release. Installer tetap menggunakan `v2.1.0` sampai tag immutable `v2.2.0` diterbitkan.
 
 ---
 
@@ -346,5 +346,14 @@
   - Satu full run awal selama iterasi berakhir saat fixture `start_process git --version` diklasifikasikan non-risk dan tak menampilkan opsi `a`; fixture diperbaiki menjadi `echo git push`, yang benar-benar memicu approval gate. Full run akhir lulus semua. Tak ada blocker tersembunyi atau test di-skip untuk menutupi kegagalan.
   - Static self-review: tak ada assignment credential literal, `eval()` atau `shell=True` pada tambahan. Review independen tidak dilakukan karena reviewer CLI/delegasi tidak tersedia.
 - **Dokumentasi/Git:** task 9–12 dicentang dan checkpoint ditambahkan lokal di `feedback.txt` (tetap ignored oleh `.gitignore:14`). §3/§20 dan `CHANGELOGSv2.md` diperbarui. Baseline commit `24598da` tetap lokal; batch 4 belum di-stage/commit. Tidak push/tag/release. Task PR-B lain seperti `/config approval` dan kebijakan persist/banner YOLO tetap terbuka; task 9–12 selesai dan sesi berhenti untuk review.
+
+## 21. Persiapan Pull Request — scope, security, dokumentasi, dan versi 2.2.0
+- Perubahan lokal `1502dd7`, `24598da`, dan `1a9c91e` dipertahankan pada branch fitur, lalu direkonsiliasi dengan `origin/main` terbaru (`c73bff6`). Konflik API scope diselesaikan dengan mempertahankan validasi lock pipeline dan state-mutator serial; mutasi scope menolak bila pipeline kehilangan nonce lock.
+- Ditambahkan `docs/CONTRIBUTING.md` dan tautan README. Versi package/lockfile, badge README, dan User-Agent diselaraskan ke `2.2.0` sebagai versi source belum dirilis. Installer sengaja tetap pada `v2.1.0`; pemeriksaan GitHub memastikan tag/release `v2.2.0` belum tersedia.
+- `RUKO-UX-BUG-APPROVAL-REPORT-v2.md` sudah dihapus pada `origin/main` commit `c73bff6`; file tersebut tidak ada di branch PR maupun remote main. `halo.txt` tetap lokal/ignored dan tidak masuk PR.
+- Branch `fix/feedback-scope-security-pr` disiapkan untuk PR ke `main`; belum ada PR/push pada saat catatan ini ditulis. Tidak ada force-push atau commit langsung ke `main`. Periksa hasil CI/review sebelum merge.
+- Verifikasi pasca-integrasi: `npm run typecheck` lulus; `npm run test` lulus **1336 tests / 1335 pass / 0 fail / 1 skip**, Node 24.21.0 Linux; `git diff --check` lulus. CI lintas OS tetap menunggu GitHub.
+- Verifikasi tambahan setelah metadata versi 2.2.0: `npm run typecheck`, `npm run build`, `npm test`, `npm run test:e2e`, `npm run test:urls`, `npm ls --omit=dev --all`, dan `git diff --check` lulus. CLI build menampilkan `ruko v2.2.0`; suite penuh **1336 / 1335 pass / 0 fail / 1 skip**. Skip file-URL khusus Windows pada host Linux.
+- Tag `v2.2.0` dan GitHub release belum ada; commit versi menyatakan Unreleased dan `install.sh` tetap mem-pin `v2.1.0`. Tidak membuat tag/release dan tidak mengubah kebijakan installer.
 
 

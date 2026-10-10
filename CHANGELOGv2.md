@@ -5,6 +5,18 @@ Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tun
 
 ---
 
+## [2.2.0] - Unreleased
+
+### Security & Approval
+- **Scope & Plan/Act:** bootstrap scope yang memerlukan otorisasi host, perintah `/scope allow|status|reset`, validasi input `/plan`, serta diagnostik penolakan scope yang menyebut penyebabnya.
+- **Approval sesi:** grant `[a/y/n]` untuk command yang aman dan exact-match selama sesi aktif; tidak mengubah allowlist persisten atau melewati Plan Mode maupun scope.
+- **Security hardening:** validasi approval binding, trust boundary konfigurasi, pembatasan mutasi subprocess, persistence scope/undo, sanitasi web content, dan penguncian state sesi.
+- **Status UI:** PLAN/ACT dan scope aktif ditampilkan dari HostState otoritatif.
+
+Rilis ini belum diterbitkan. `install.sh` sengaja tetap mem-pin `v2.1.0` hingga tag immutable `v2.2.0` tersedia.
+
+---
+
 ## [2.1.0] - 2026-10-07
 
 ### Security & Hardening

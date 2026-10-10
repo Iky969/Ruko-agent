@@ -133,7 +133,7 @@ export class Agent {
   private _planMode = false;
 
   /**
-   * WP-04 (v2.1.0): status plan mode adalah PROYEKSI langsung dari
+   * Status plan mode adalah PROYEKSI langsung dari
    * `hostState.mode` ('plan' | 'act') bila HostState terikat — sehingga
    * `/plan on`, auto-off pemilihan rencana, dan reset saat resume tidak pernah
    * menyimpang dari state kanonis di ~/.ruko/sessions/.

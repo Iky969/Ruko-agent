@@ -15,9 +15,8 @@
  *  3. Fail-Closed non-TTY / CI: Jika berada di lingkungan headless/CI tanpa
  *     TTY interaktif, amandemen otomatis ditolak tanpa menggantung sesi.
  *  4. Interactive Timeout 30 detik untuk sesi lokal agar tidak menggantung.
- *  5. WP-04 (v2.1.0): Mutasi host state didelegasikan ke mutator terpusat yang
- *     dimiliki SecurityPipeline (single-writer in-process mutex). Manager TIDAK
- *     membuat FileLock baru — mencegah self-deadlock LOCK_TIMEOUT.
+ *  5. Mutasi host state menggunakan mutator serial Pipeline atau lock sesi
+ *     milik pipeline — mencegah self-deadlock LOCK_TIMEOUT.
  *  5b. WP-05 (v2.1.0): Persetujuan amandemen terikat hash muatan argumen teknis
  *     dan menampilkan fakta riil (alat, jalur kanonikal, badge risiko, diff).
  *  6. TC-SCM-03 Symlink Hardening: Resolusi fisik (realpathSync) pada parent
@@ -44,7 +43,7 @@ import { FileLock } from '../state/fileLock.js';
 import * as os from 'node:os';
 
 /**
- * WP-04 (v2.1.0): delegasi mutasi state.json ke pemilik lock tunggal.
+ * Delegasi mutasi state.json ke pemilik lock tunggal.
  *
  * Manager TIDAK boleh membuat instance FileLock baru di dalam dirinya: pada
  * runtime nyata SecurityPipeline sudah memegang lock eksklusif kernel untuk
@@ -113,7 +112,7 @@ export function canonicalize(obj: any): string {
 }
 
 /**
- * WP-05 (v2.1.0): token persetujuan deterministik berbasis hash dari muatan
+ * Token persetujuan deterministik berbasis hash dari muatan
  * argumen TEKNIS (nama alat + jalur target + argumen). Dipakai untuk membatalkan
  * eksekusi bila argumen berubah setelah tombol persetujuan ditekan.
  */

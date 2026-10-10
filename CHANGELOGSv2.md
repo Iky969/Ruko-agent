@@ -2,6 +2,15 @@
 
 Berkas ini mencatat batch implementasi feedback sesuai permintaan pengguna. Riwayat rilis sebelumnya tetap berada di `CHANGELOGv2.md`; file tersebut tidak diganti atau diubah oleh batch ini.
 
+## Persiapan PR & v2.2.0 — 2026-10-10
+
+- Menggabungkan update `origin/main` ke branch fitur dan mempertahankan perbaikan security/scope di kedua sisi; validasi typecheck dan full suite dijalankan setelah rekonsiliasi.
+- Menambahkan `docs/CONTRIBUTING.md` dan tautannya dari README.
+- Menyiapkan versi source/package `2.2.0` sebagai unreleased. `install.sh` tetap mem-pin tag immutable `v2.1.0`, karena tag/release `v2.2.0` belum diterbitkan.
+- Laporan `RUKO-UX-BUG-APPROVAL-REPORT-v2.md` dihapus dari GitHub `main` pada commit `c73bff6`; tidak disalin ke branch PR. `halo.txt` tetap lokal/ignored.
+- Perubahan disiapkan untuk PR dari branch `fix/feedback-scope-security-pr` ke `main`; tidak ada push langsung atau force-push ke `main`.
+- Verifikasi source `2.2.0`: typecheck/build/full test/e2e/file-URL suite lulus; full test **1336 tests / 1335 pass / 0 fail / 1 skip** (skip Windows-only di Linux). CLI `--version` menampilkan `ruko v2.2.0`; `npm ls --omit=dev --all` kosong.
+
 ## [Unreleased] — 2026-10-10
 
 ### Batch 4 — Task 9–12, status/scope, dan approval sesi
