@@ -35,11 +35,13 @@ test('start_process always stores workspace-contained paths only after first app
   const ws = mkdtempSync(join(tmpdir(), 'ruko-allowlist-local-'));
   t.after(() => rmSync(ws, { recursive: true, force: true }));
   mkdirSync(join(ws, 'src'));
+  mkdirSync(join(ws, 'RUNNER~1'));
   const allowlist = new SessionApprovalAllowlist();
   for (const command of [
     'cat src/file.txt',
     'cat ./src/../file.txt',
     'cat --file=src/file.txt',
+    'cat RUNNER~1/src.txt',
     'git --version',
   ]) {
     const request: ApprovalRequest = { kind: 'start_process', cwd: ws, command };
@@ -53,16 +55,31 @@ test('start_process always stores workspace-contained paths only after first app
 });
 
 test('start_process allows absolute paths inside a workspace when command syntax is safely rememberable', (t) => {
-  const workspaceRoot = mkdtempSync(join(tmpdir(), 'ruko-allowlist-absolute-'));
+  const workspaceRoot = mkdtempSync(join(process.cwd(), 'ruko-allowlist-absolute-'));
   t.after(() => rmSync(workspaceRoot, { recursive: true, force: true }));
   const cwd = workspaceRoot;
-  const command = `cat ${join(workspaceRoot, 'inside.txt').replace(/\\/g, '/')}`;
+  const inWorkspace = join(workspaceRoot, 'inside.txt');
+  const normalizedPath = process.platform === 'win32'
+    ? inWorkspace.replace(/\\/g, '/')
+    : inWorkspace;
+  const command = `cat ${normalizedPath}`;
   const allowlist = new SessionApprovalAllowlist();
   const request: ApprovalRequest = { kind: 'start_process', cwd, workspaceRoot, command };
   const display = `start_process ${command}`;
   assert.equal(allowlist.allows(display, request), false, 'first approval is still required');
   assert.equal(allowlist.remember(display, request), true);
   assert.equal(allowlist.allows(display, request), true);
+});
+
+test('start_process never remembers shell-leading tilde expansion', (t) => {
+  const ws = mkdtempSync(join(tmpdir(), 'ruko-allowlist-tilde-expansion-'));
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  const allowlist = new SessionApprovalAllowlist();
+  for (const command of ['cat ~/outside.txt', 'cat file=~/outside.txt']) {
+    const request: ApprovalRequest = { kind: 'start_process', cwd: ws, workspaceRoot: ws, command };
+    assert.equal(allowlist.canRemember(`start_process ${command}`, request), false, command);
+    assert.equal(allowlist.remember(`start_process ${command}`, request), false, command);
+  }
 });
 
 test('start_process path resolution uses the host workspace boundary from a nested cwd', (t) => {

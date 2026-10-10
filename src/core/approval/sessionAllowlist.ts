@@ -28,6 +28,9 @@ export class SessionApprovalAllowlist {
       // separators even on POSIX so foreign traversal cannot be remembered.
       const value = part.slice(part.indexOf('=') + 1).replace(/\\/g, '/');
       const candidate = value.replace(/^-[a-zA-Z]+(?=\/|\.{1,2}\/)/, '');
+      // Shell-leading tilde forms expand before command execution; embedded
+      // tildes (for example Windows 8.3 `RUNNER~1`) are ordinary path bytes.
+      if (/^~(?:\/|$)|=~(?:\/|$)/.test(part)) return false;
       // A foreign drive path would otherwise look relative on POSIX.
       // Drive-relative paths also depend on ambient per-drive cwd on Windows.
       if (/^[a-zA-Z]:/.test(candidate) &&
@@ -60,7 +63,7 @@ export class SessionApprovalAllowlist {
     if (!this.commandPathsStayInWorkspace(trimmed, request.cwd, request.workspaceRoot ?? request.cwd)) return null;
     // Reject shell expansion, quoting, control characters and dynamic interpreters.
     // Complex commands remain available through one-shot approval, not "always".
-    if (!trimmed || !/^[a-zA-Z0-9_./:@=,+ -]+$/.test(trimmed) || containsShellOperators(command)) return null;
+    if (!trimmed || !/^[a-zA-Z0-9_./:@=,+~ -]+$/.test(trimmed) || containsShellOperators(command)) return null;
     const executable = trimmed.split(/\s+/)[0].split('/').pop()!.replace(/\.exe$/i, '').toLowerCase();
     if (/^(?:sudo|doas|su|env|sh|bash|dash|zsh|ksh|fish|cmd|powershell|pwsh|node|python[\d.]*|perl|ruby|lua|php|eval|xargs)$/.test(executable)) return null;
     const risk = detectRisk(trimmed, { ...DEFAULT_CONFIG, approvalEnabled: true, approvalAllowlist: [] }).risk;
