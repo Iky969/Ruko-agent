@@ -672,7 +672,7 @@ export function assertNotSecurityCore(targetPath: string, workspaceRoot: string 
  * - .env, .env.*
  * - .git-credentials, .git-credentials.*
  * - id_rsa, id_ed25519, *.pem, *.key
- * - .git/config
+ * - .git/config, .git/hooks/**
  *
  * Case-insensitive, handles URL-encoding (%2e%2e%2f) and escape characters (\).
  */
@@ -794,11 +794,16 @@ export function isSensitivePath(targetPath: string, workspaceRoot: string = getW
       return true;
     }
 
-    // 6. .git/config
+    // 6. .git/config dan .git/hooks/** (hooks dapat menjalankan arbitrary code)
     if (
       relLower === '.git/config' ||
       relLower.endsWith('/.git/config') ||
-      absLower.endsWith('/.git/config')
+      absLower.endsWith('/.git/config') ||
+      relLower.startsWith('.git/hooks/') ||
+      relLower.includes('/.git/hooks/') ||
+      relLower === '.git/hooks' ||
+      absLower.includes('/.git/hooks/') ||
+      absLower.endsWith('/.git/hooks')
     ) {
       return true;
     }

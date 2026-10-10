@@ -71,17 +71,48 @@ export async function evaluateDispatcherGate(
 
   // 2. Evaluasi Scope Amendment jika ScopeAmendmentManager tersedia
   if (opts.scopeManager && isMutationTool(opts.tool)) {
-    const targetPath = extractTargetPath(opts.tool, opts.args || {});
-    if (targetPath) {
-      const decision = await opts.scopeManager.evaluateMutationDecision(
-        targetPath,
-        opts.args?.reason || `Mutasi berkas via ${opts.tool}`,
-        Boolean(opts.isInteractive),
-        // WP-05: binding persetujuan + tampilan fakta teknis memakai nama tool
-        // dan muatan argumen asli (referensi, dibandingkan ulang pasca-konfirmasi).
-        { tool: opts.tool, args: opts.args },
-      );
-      if (!decision.allowed) return decision;
+    // Untuk move_file: periksa KEDUA sisi (source dan target) terhadap scope.
+    // Fail-closed: jika salah satu di luar scope, tolak operasi.
+    if (opts.tool === 'move_file') {
+      const args = opts.args || {};
+      // Match runToolCallRaw's aliases and precedence exactly: checking a
+      // different alias would authorize a decoy instead of the executed path.
+      const sourcePath = String(args.source ?? args.from ?? args.path ?? '');
+      const targetPath = String(args.target ?? args.to ?? args.destination ?? '');
+
+      if (sourcePath) {
+        const sourceDecision = await opts.scopeManager.evaluateMutationDecision(
+          sourcePath,
+          opts.args?.reason || `move_file: pemeriksaan source`,
+          Boolean(opts.isInteractive),
+          { tool: opts.tool, args: opts.args },
+        );
+        if (!sourceDecision.allowed) return sourceDecision;
+      }
+
+      if (targetPath) {
+        const targetDecision = await opts.scopeManager.evaluateMutationDecision(
+          targetPath,
+          opts.args?.reason || `move_file: pemeriksaan destination`,
+          Boolean(opts.isInteractive),
+          { tool: opts.tool, args: opts.args },
+        );
+        if (!targetDecision.allowed) return targetDecision;
+      }
+    } else {
+      // Tool lain: periksa hanya target path
+      const targetPath = extractTargetPath(opts.tool, opts.args || {});
+      if (targetPath) {
+        const decision = await opts.scopeManager.evaluateMutationDecision(
+          targetPath,
+          opts.args?.reason || `Mutasi berkas via ${opts.tool}`,
+          Boolean(opts.isInteractive),
+          // WP-05: binding persetujuan + tampilan fakta teknis memakai nama tool
+          // dan muatan argumen asli (referensi, dibandingkan ulang pasca-konfirmasi).
+          { tool: opts.tool, args: opts.args },
+        );
+        if (!decision.allowed) return decision;
+      }
     }
   }
 
