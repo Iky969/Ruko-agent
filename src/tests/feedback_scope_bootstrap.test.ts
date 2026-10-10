@@ -297,7 +297,7 @@ describe('feedback PR-A: ACT scope bootstrap', () => {
     assertStatus('ACT', '(none)');
     await handleCommand('/plan on', env);
     assertStatus('PLAN', '(none)');
-    agent.planMode = false; // stale fallback must not override authoritative host display
+    (agent as any)._planMode = false; // stale fallback must not override authoritative host display
     assertStatus('PLAN', '(none)');
   });
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -183,4 +183,81 @@ test('TASK-03: globalTrustStorePath points to ~/.ruko/', () => {
   const storePath = globalTrustStorePath();
   assert.ok(storePath.includes('.ruko'), 'store path should be under .ruko');
   assert.ok(storePath.endsWith('trusted-workspaces.json'), 'store should be named trusted-workspaces.json');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-01 (v2.1.0): Self-authorization dihapus. Marker `.ruko/trusted` di dalam
+// workspace dan flag `trustedWorkspace` config TIDAK LAGI memberi status
+// tepercaya — satu-satunya sumber kebenaran adalah global trust store.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Menghapus entri global untuk workspace (best-effort, test-only). */
+function removeGlobalTrustEntry(ws: string): void {
+  try {
+    const storePath = globalTrustStorePath();
+    const store = JSON.parse(readFileSync(storePath, 'utf8'));
+    delete store[hashWorkspacePath(ws)];
+    writeFileSync(storePath, JSON.stringify(store, null, 2) + '\n', 'utf8');
+  } catch {
+    // best effort
+  }
+}
+
+test('WP-01: file .ruko/trusted di workspace TIDAK mengubah status trust global', async () => {
+  await inTempWorkspace(async (ws) => {
+    const configPath = join(ws, '.ruko', 'config.json');
+    mkdirSync(join(ws, '.ruko'), { recursive: true });
+    writeFileSync(
+      join(ws, '.ruko', TRUST_MARKER_FILE),
+      JSON.stringify({ trustedAt: new Date().toISOString(), cwd: ws }),
+      'utf8',
+    );
+    removeGlobalTrustEntry(ws);
+
+    assert.equal(
+      isWorkspaceTrusted(ws, configPath),
+      false,
+      'marker .ruko/trusted dari repo tidak boleh memberi trust',
+    );
+  });
+});
+
+test('WP-01: config.json trustedWorkspace=true di workspace TIDAK mengubah status trust', async () => {
+  await inTempWorkspace(async (ws) => {
+    const configPath = join(ws, '.ruko', 'config.json');
+    saveConfig({ ...DEFAULT_CONFIG, trustedWorkspace: true }, configPath);
+    removeGlobalTrustEntry(ws);
+
+    assert.equal(
+      isWorkspaceTrusted(ws, configPath),
+      false,
+      'flag trustedWorkspace dari config ruang kerja tidak boleh memberi trust',
+    );
+  });
+});
+
+test('WP-01: mencabut entri global mencabut trust walau marker workspace masih ada', async () => {
+  await inTempWorkspace(async (ws) => {
+    const configPath = join(ws, '.ruko', 'config.json');
+    saveConfig({ ...DEFAULT_CONFIG }, configPath);
+    removeGlobalTrustEntry(ws);
+
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      markWorkspaceTrusted(ws, configPath);
+      assert.equal(isWorkspaceTrusted(ws, configPath), true, 'global store memberi trust');
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    // Marker/config workspace masih ada, tetapi status trust dicabut → false
+    assert.equal(existsSync(join(ws, '.ruko', TRUST_MARKER_FILE)), true, 'marker legacy tetap ditulis');
+    removeGlobalTrustEntry(ws);
+    assert.equal(
+      isWorkspaceTrusted(ws, configPath),
+      false,
+      'marker workspace tidak boleh menghidupkan kembali trust',
+    );
+  });
 });

@@ -32,6 +32,7 @@ import {
   getWorkspaceRoot,
   parseToolCalls,
   runToolCall,
+  safeExecPrecheck,
   stripToolBlocks,
   ToolCall,
 } from './tools.js';
@@ -129,7 +130,29 @@ export class Agent {
     lastTurnDurationMs: 0,
   };
   /** Plan mode toggle — enforced at the tool layer, not just in the prompt. */
-  planMode = false;
+  private _planMode = false;
+
+  /**
+   * WP-04 (v2.1.0): status plan mode adalah PROYEKSI langsung dari
+   * `hostState.mode` ('plan' | 'act') bila HostState terikat — sehingga
+   * `/plan on`, auto-off pemilihan rencana, dan reset saat resume tidak pernah
+   * menyimpang dari state kanonis di ~/.ruko/sessions/.
+   * Tanpa HostState (unit test / subagent non-bound) nilai in-memory dipakai.
+   */
+  get planMode(): boolean {
+    return this.hostState ? this.hostState.mode === 'plan' : this._planMode;
+  }
+
+  set planMode(value: boolean) {
+    this._planMode = value;
+    if (!this.hostState) return;
+    const next = value ? 'plan' : 'act';
+    if (this.hostState.mode !== next) {
+      this.hostState.mode = next;
+      // Persistensi atomik: setiap transisi mode plan/act langsung tersimpan.
+      void saveHostState(this.hostState).catch(() => {});
+    }
+  }
   /**
    * Live bottom activity tray (feedback §4). Shared with the REPL: the loop
    * draws `activityTray.renderRows()` inside the editor's live region, and a

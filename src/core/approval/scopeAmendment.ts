@@ -15,7 +15,11 @@
  *  3. Fail-Closed non-TTY / CI: Jika berada di lingkungan headless/CI tanpa
  *     TTY interaktif, amandemen otomatis ditolak tanpa menggantung sesi.
  *  4. Interactive Timeout 30 detik untuk sesi lokal agar tidak menggantung.
- *  5. Perlindungan atomic FileLock saat memperbarui host state di ~/.ruko/sessions/.
+ *  5. WP-04 (v2.1.0): Mutasi host state didelegasikan ke mutator terpusat yang
+ *     dimiliki SecurityPipeline (single-writer in-process mutex). Manager TIDAK
+ *     membuat FileLock baru — mencegah self-deadlock LOCK_TIMEOUT.
+ *  5b. WP-05 (v2.1.0): Persetujuan amandemen terikat hash muatan argumen teknis
+ *     dan menampilkan fakta riil (alat, jalur kanonikal, badge risiko, diff).
  *  6. TC-SCM-03 Symlink Hardening: Resolusi fisik (realpathSync) pada parent
  *     directory target dan setiap entry allowedPaths untuk mendeteksi symlink
  *     escape. Fail-closed jika realpathSync gagal (dangling symlink dll).
@@ -39,11 +43,35 @@ import { HostState, saveHostState, loadHostState } from '../state/hostState.js';
 import { FileLock } from '../state/fileLock.js';
 import * as os from 'node:os';
 
+/**
+ * WP-04 (v2.1.0): delegasi mutasi state.json ke pemilik lock tunggal.
+ *
+ * Manager TIDAK boleh membuat instance FileLock baru di dalam dirinya: pada
+ * runtime nyata SecurityPipeline sudah memegang lock eksklusif kernel untuk
+ * sesi yang sama, sehingga lock kedua di proses yang sama = self-deadlock
+ * (LOCK_TIMEOUT). Pipeline menyerahkan mutator yang diserialisasi in-process.
+ */
+export type HostStateMutator = (
+  sessionId: string,
+  mutate: (fresh: HostState) => Promise<boolean>,
+) => Promise<boolean>;
+
+/**
+ * WP-05 (v2.1.0): metadata binding persetujuan — nama alat mutasi + muatan
+ * argumen teknis yang dipakai untuk token hash.
+ */
+export interface ApprovalBindingMeta {
+  tool?: string;
+  args?: Record<string, any>;
+}
+
 export interface ScopeAmendmentOptions {
   input?: NodeJS.ReadableStream;
   output?: NodeJS.WritableStream;
   isTTY?: boolean;
   promptTimeoutMs?: number;
+  /** WP-04: mutator state terpusat (disediakan SecurityPipeline). */
+  stateMutator?: HostStateMutator;
   /**
    * TC-SCM-03: Daftar root monorepo yang diizinkan sebagai pengecualian
    * symlink traversal. Symlink yang secara fisik mengarah ke salah satu
@@ -51,7 +79,7 @@ export interface ScopeAmendmentOptions {
    * Contoh: ['/repo/packages', '/repo/node_modules/.pnpm']
    */
   monorepoRoots?: string[];
-  /** The pipeline already holds this session lock for its entire lifetime. */
+  /** Pipeline-owned lock: validate and reuse it instead of acquiring again. */
   sessionLock?: FileLock;
 }
 
@@ -82,6 +110,69 @@ export function canonicalize(obj: any): string {
   if (Array.isArray(obj)) return `[${obj.map(canonicalize).join(',')}]`;
   const sortedKeys = Object.keys(obj).sort();
   return `{${sortedKeys.map((k) => `${JSON.stringify(k)}:${canonicalize(obj[k])}`).join(',')}}`;
+}
+
+/**
+ * WP-05 (v2.1.0): token persetujuan deterministik berbasis hash dari muatan
+ * argumen TEKNIS (nama alat + jalur target + argumen). Dipakai untuk membatalkan
+ * eksekusi bila argumen berubah setelah tombol persetujuan ditekan.
+ */
+export function computeApprovalBindingToken(meta: ApprovalBindingMeta, targetPath: string): string {
+  const payload = {
+    tool: meta.tool ?? null,
+    target: path.resolve(targetPath),
+    args: meta.args ?? null,
+  };
+  return crypto.createHash('sha256').update(canonicalize(payload)).digest('hex');
+}
+
+/**
+ * WP-05: badge risiko tinggi untuk target yang berdampak luas (alur kerja
+ * CI/CD dan manifest build/script).
+ */
+export function highRiskTargetBadge(canonicalTarget: string): string | null {
+  const normalized = canonicalTarget.replace(/\\/g, '/');
+  const base = path.basename(normalized).toLowerCase();
+  const isCiWorkflow = /(^|\/)\.github\/workflows\//.test(normalized) || /(^|\/)\.gitlab-ci/.test(normalized);
+  const isManifest =
+    base === 'package.json' ||
+    base === 'package-lock.json' ||
+    base === 'jenkinsfile' ||
+    base === 'makefile' ||
+    base === 'dockerfile';
+  if (!isCiWorkflow && !isManifest) return null;
+  return 'TARGET BERISIKO TINGGI: berkas CI/CD atau manifest build/script — perubahan di sini dapat mengeksekusi kode di pipeline.';
+}
+
+/**
+ * WP-05: ringkasan diff faktual (jumlah baris lama → baru) untuk ditampilkan
+ * pada prompt persetujuan. Bukan ringkasan buatan LLM.
+ */
+export function summarizeProposedDiff(
+  args: Record<string, any> | undefined,
+  canonicalTarget: string,
+): string | null {
+  if (!args) return null;
+  const content =
+    typeof args.content === 'string'
+      ? args.content
+      : typeof args.newText === 'string'
+        ? args.newText
+        : typeof args.new_string === 'string'
+          ? args.new_string
+          : null;
+  if (content === null) return null;
+
+  const newLines = content.split('\n').length;
+  let oldLines: number | null = null;
+  try {
+    if (fsSync.existsSync(canonicalTarget) && fsSync.statSync(canonicalTarget).isFile()) {
+      oldLines = fsSync.readFileSync(canonicalTarget, 'utf8').split('\n').length;
+    }
+  } catch {
+    oldLines = null;
+  }
+  return oldLines === null ? `berkas baru (${newLines} baris)` : `penggantian isi: ${oldLines} → ${newLines} baris`;
 }
 
 export function computePlanHash(plan: any, allowedPaths: string[], workspaceRoot: string): string {
@@ -230,8 +321,25 @@ export class ScopeAmendmentManager {
     this.consecutiveRejections.clear();
   }
 
-  /** Reuse the pipeline's owned lock instead of deadlocking on a second acquire. */
+  /** Persist scope changes through the pipeline mutator or its owned lock. */
   private async updateScope(update: (state: HostState) => boolean): Promise<boolean> {
+    const apply = async (freshState: HostState): Promise<boolean> => {
+      Object.assign(this.state, {
+        ...freshState,
+        approvalScope: freshState.approvalScope
+          ? { ...freshState.approvalScope, allowedPaths: freshState.approvalScope.allowedPaths.slice() }
+          : null,
+      });
+      if (!update(freshState)) return false;
+      await saveHostState(freshState);
+      Object.assign(this.state, freshState);
+      return true;
+    };
+
+    if (this.options.stateMutator) {
+      return this.options.stateMutator(this.state.sessionId, apply);
+    }
+
     let release: (() => Promise<void>) | undefined;
     if (this.options.sessionLock) {
       const lock = this.options.sessionLock;
@@ -246,17 +354,7 @@ export class ScopeAmendmentManager {
       release = await new FileLock(path.join(hostDir, this.state.sessionId, 'state.json')).acquire();
     }
     try {
-      const freshState = await loadHostState(this.state.sessionId, { resume: false });
-      Object.assign(this.state, {
-        ...freshState,
-        approvalScope: freshState.approvalScope
-          ? { ...freshState.approvalScope, allowedPaths: freshState.approvalScope.allowedPaths.slice() }
-          : null,
-      });
-      if (!update(freshState)) return false;
-      await saveHostState(freshState);
-      Object.assign(this.state, freshState);
-      return true;
+      return await apply(await loadHostState(this.state.sessionId, { resume: false }));
     } finally {
       await release?.();
     }
@@ -424,13 +522,28 @@ export class ScopeAmendmentManager {
   }
 
   /** Boolean compatibility for callers that only need the authorization result. */
-  async evaluateMutationTarget(targetPath: string, reason: string, isInteractive: boolean): Promise<boolean> {
-    return (await this.evaluateMutationDecision(targetPath, reason, isInteractive)).allowed;
+  async evaluateMutationTarget(
+    targetPath: string,
+    reason: string,
+    isInteractive: boolean,
+    meta?: ApprovalBindingMeta,
+  ): Promise<boolean> {
+    return (await this.evaluateMutationDecision(targetPath, reason, isInteractive, meta)).allowed;
   }
 
   /** Return the cause with its decision, never via mutable last-error state. */
-  async evaluateMutationDecision(targetPath: string, reason: string, isInteractive: boolean): Promise<ScopeMutationDecision> {
+  async evaluateMutationDecision(
+    targetPath: string,
+    reason: string,
+    isInteractive: boolean,
+    meta?: ApprovalBindingMeta,
+  ): Promise<ScopeMutationDecision> {
     if (!this.state.approvalScope) return this.denyMutation('SCOPE_MISSING', targetPath);
+
+    // WP-05: token binding dihitung SEBELUM prompt — dibandingkan ulang setelah
+    // pengguna menyetujui. Argumen teknis yang berubah di tengah proses
+    // membatalkan eksekusi (deterministic approval binding).
+    const bindingToken = meta ? computeApprovalBindingToken(meta, targetPath) : null;
 
     // Kriptografi Kontrak Scope: jika activePlanHash diset dan berbeda dari approvalScope.planHash,
     // modifikasi hash rencana membatalkan izin eksekusi secara otomatis
@@ -498,10 +611,24 @@ export class ScopeAmendmentManager {
     let confirmed = false;
     let timer: NodeJS.Timeout | undefined;
 
+    // WP-05: tampilkan FAKTA TEKNIS riil (bukan ringkasan buatan LLM): nama alat
+    // mutasi, jalur kanonikal target, badge risiko, dan ringkasan diff.
+    const canonicalTargetDisplay = canonicalPath ?? path.resolve(this.workspaceRoot, targetPath);
+
     try {
       if (outStream && typeof outStream.write === 'function') {
         outStream.write(`\n[Ruko] AI mengusulkan amandemen scope untuk target baru: ${targetPath}\n`);
         outStream.write(`Alasan: ${reason}\n`);
+        outStream.write(`  • Alat mutasi    : ${meta?.tool ?? '(tidak diketahui)'}\n`);
+        outStream.write(`  • Jalur kanonikal: ${canonicalTargetDisplay}\n`);
+        const badge = highRiskTargetBadge(canonicalTargetDisplay);
+        if (badge) {
+          outStream.write(`  ⚠ ${badge}\n`);
+        }
+        const diff = summarizeProposedDiff(meta?.args, canonicalTargetDisplay);
+        if (diff) {
+          outStream.write(`  • Ringkasan diff : ${diff}\n`);
+        }
       }
 
       const answerPromise = rl.question('Izinkan amandemen scope ini? [Y/n]: ');
@@ -535,7 +662,17 @@ export class ScopeAmendmentManager {
       return this.denyMutation('SCOPE_AMENDMENT_DECLINED', targetPath);
     }
 
-    // 4. Persist under the standalone or already-owned pipeline session lock.
+    // Approval must still describe the exact tool payload that the user saw.
+    if (bindingToken !== null && meta && computeApprovalBindingToken(meta, targetPath) !== bindingToken) {
+      if (outStream && typeof outStream.write === 'function') {
+        outStream.write(
+          '[Ruko] Argumen teknis berubah setelah persetujuan → eksekusi DIBATALKAN (approval binding mismatch).\n',
+        );
+      }
+      return this.denyMutation('SCOPE_AMENDMENT_DECLINED', targetPath);
+    }
+
+    // 4. Persist under the pipeline mutator or owned session lock.
     const updated = await this.updateScope((freshState) => {
       if (
         freshState.mode !== 'act' || !freshState.approvalScope ||

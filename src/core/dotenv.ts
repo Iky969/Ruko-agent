@@ -152,6 +152,14 @@ export const DANGEROUS_WORKSPACE_ENV_VARS = new Set([
  */
 export function isDangerousWorkspaceEnvVar(key: string): boolean {
   const upper = key.toUpperCase();
+  // WP-01 (v2.1.0): prefix RUKO_* DITOLAK MUTLAK dari .env workspace —
+  // flag internal (RUKO_TRUST_FOLDER, RUKO_YOLO_MODE, RUKO_HOST_STATE_DIR, dst.)
+  // hanya boleh datang dari proses/terminal pengguna, bukan dari repo asing.
+  // Tidak ada pengecualian testing (mis. RUKO_TEST_*): test runner wajib
+  // menyetel variabel pengujian langsung di memori proses.
+  if (upper.startsWith('RUKO_')) {
+    return true;
+  }
   if (DANGEROUS_WORKSPACE_ENV_VARS.has(key) || DANGEROUS_WORKSPACE_ENV_VARS.has(upper)) {
     return true;
   }
