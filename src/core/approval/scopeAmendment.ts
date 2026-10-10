@@ -26,7 +26,8 @@
  *  7. TC-FSM-01 Circuit Breaker: Lacak penolakan berturut-turut pada canonical
  *     path yang SAMA (pakai realpath). Setelah 3x penolakan identik berturut-turut
  *     pada path yang sama, trigger circuit-breaker: batalkan amandemen berikutnya
- *     ke path itu untuk sisa sesi, non-punitif, beri pesan jelas.
+ *     ke path itu untuk sisa sesi, non-punitif, beri pesan jelas. Approval path
+ *     lain, allow/reset/seed/kontraksi scope tidak membuka kembali path terblokir.
  *  8. TC-SCM-05 Scope Contraction: Method eksplisit untuk reset allowedPaths
  *     ke konfigurasi awal sesi (tanpa perlu sesi baru).
  *
@@ -89,7 +90,7 @@ const SCOPE_DENIAL_MESSAGES = {
   SCOPE_CONTAINMENT: 'Containment fisik gagal: symlink keluar dari subtree/workspace atau path tidak dapat di-resolve. Periksa path dan symlink; izin tidak diperluas.',
   SCOPE_OUTSIDE: 'Path di luar scope disetujui. Setujui prompt amandemen pada terminal interaktif atau gunakan /scope allow <path>.',
   SCOPE_AMENDMENT_DECLINED: 'Amandemen scope tidak disetujui (ditolak, timeout, atau input terputus). Izin tidak diperluas; tunggu otorisasi eksplisit pengguna.',
-  SCOPE_CIRCUIT_BREAKER: 'Circuit breaker aktif setelah 3 penolakan pada path yang sama. Jangan ulangi permintaan; tunggu otorisasi eksplisit pengguna.',
+  SCOPE_CIRCUIT_BREAKER: 'Circuit breaker aktif setelah 3 penolakan pada path yang sama, permanen selama sesi. Jangan ulangi permintaan; mulai sesi baru untuk meninjau izin path ini.',
   SCOPE_PLAN_ACTIVE: 'Plan mode aktif kembali saat menunggu persetujuan; mutasi diblok. Gunakan /plan off hanya setelah rencana disetujui.',
 };
 
@@ -264,7 +265,6 @@ export class ScopeAmendmentManager {
       correlationId: crypto.randomUUID(),
     };
     this.initialAllowedPaths = ['.'];
-    this.consecutiveRejections.clear();
   }
 
   /** Explicit user authorization; never called from model tool arguments. */
@@ -305,7 +305,6 @@ export class ScopeAmendmentManager {
     });
     if (updated) {
       if (initialized) this.initialAllowedPaths = this.state.approvalScope!.allowedPaths.slice();
-      this.consecutiveRejections.clear();
     }
     return updated;
   }
@@ -317,7 +316,6 @@ export class ScopeAmendmentManager {
       return true;
     });
     this.initialAllowedPaths = [];
-    this.consecutiveRejections.clear();
   }
 
   /** Persist scope changes through the pipeline mutator or its owned lock. */
@@ -558,6 +556,24 @@ export class ScopeAmendmentManager {
       return this.denyMutation('SCOPE_OUTSIDE_WORKSPACE', targetPath);
     }
 
+    // TC-FSM-01: Session-lifetime breaker wins over new subtree grants too.
+    // Track by canonical path to be consistent with TC-SCM-03 symlink hardening
+    const canonicalPath = this.getCanonicalPathForTracking(targetPath);
+    if (canonicalPath !== null) {
+      const rejectionCount = this.consecutiveRejections.get(canonicalPath) ?? 0;
+      if (rejectionCount >= 3) {
+        // Circuit breaker triggered: block further amendment requests to this path
+        // Non-punitif: return false without prompt, clear message to user/log
+        if (this.options.output && typeof this.options.output.write === 'function') {
+          this.options.output.write(
+            `\n[Ruko] Circuit breaker aktif: amandemen scope ke path yang sama ('${targetPath}') telah ditolak 3x berturut-turut. ` +
+            `Permintaan selanjutnya ke path ini diblokir untuk sisa sesi ini.\n`,
+          );
+        }
+        return this.denyMutation('SCOPE_CIRCUIT_BREAKER', targetPath);
+      }
+    }
+
     // 2. Subtree Containment: Auto-approve jika target berada di dalam folder yang sudah disetujui
     const inSubtree = this.state.approvalScope.allowedPaths.some((allowed) =>
       this.isWithinSubtree(targetPath, allowed),
@@ -574,24 +590,6 @@ export class ScopeAmendmentManager {
         return this.denyMutation('SCOPE_CONTAINMENT', targetPath);
       }
       return { allowed: true };
-    }
-
-    // TC-FSM-01: Circuit Breaker check before prompting
-    // Track by canonical path to be consistent with TC-SCM-03 symlink hardening
-    const canonicalPath = this.getCanonicalPathForTracking(targetPath);
-    if (canonicalPath !== null) {
-      const rejectionCount = this.consecutiveRejections.get(canonicalPath) ?? 0;
-      if (rejectionCount >= 3) {
-        // Circuit breaker triggered: block further amendment requests to this path
-        // Non-punitif: return false without prompt, clear message to user/log
-        if (this.options.output && typeof this.options.output.write === 'function') {
-          this.options.output.write(
-            `\n[Ruko] Circuit breaker aktif: amandemen scope ke path yang sama ('${targetPath}') telah ditolak 3x berturut-turut. ` +
-            `Permintaan selanjutnya ke path ini diblokir untuk sisa sesi ini.\n`,
-          );
-        }
-        return this.denyMutation('SCOPE_CIRCUIT_BREAKER', targetPath);
-      }
     }
 
     // 3. Target baru di luar subtree membutuhkan otorisasi eksplisit pengembang.
@@ -644,12 +642,18 @@ export class ScopeAmendmentManager {
       rl.close();
     }
 
+    // A concurrent rejection can latch this path while its prompt is open.
+    // Revalidate before an old approval can reset the counter or persist scope.
+    if (canonicalPath !== null && (this.consecutiveRejections.get(canonicalPath) ?? 0) >= 3) {
+      return this.denyMutation('SCOPE_CIRCUIT_BREAKER', targetPath);
+    }
+
     // TC-FSM-01: Track rejection/approval
     if (canonicalPath !== null) {
       if (confirmed) {
-        // On approval: reset counter for THIS path, and also reset all OTHER paths
-        // since user approved a different path (breaks consecutive chain)
-        this.consecutiveRejections.clear();
+        // Only this path's pre-threshold chain can end. A latched path never
+        // reaches the prompt; approval B must not reset or reopen path A.
+        this.consecutiveRejections.delete(canonicalPath);
       } else {
         // On rejection: increment counter for this canonical path
         const newCount = (this.consecutiveRejections.get(canonicalPath) ?? 0) + 1;
@@ -709,7 +713,6 @@ export class ScopeAmendmentManager {
       freshState.approvalScope.allowedPaths = this.initialAllowedPaths.slice();
       return true;
     });
-    if (contracted) this.consecutiveRejections.clear();
     return contracted;
   }
 

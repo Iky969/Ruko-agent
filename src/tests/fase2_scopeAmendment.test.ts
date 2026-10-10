@@ -13,11 +13,12 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Readable, Writable } from 'node:stream';
+import { PassThrough, Readable, Writable } from 'node:stream';
 import { after, describe, test } from 'node:test';
 import {
   computePlanHash,
   ScopeAmendmentManager,
+  type ScopeAmendmentOptions,
 } from '../core/approval/scopeAmendment.js';
 import { saveHostState, type HostState } from '../core/state/hostState.js';
 
@@ -284,48 +285,142 @@ describe('TC-FSM-01 Circuit Breaker: Consecutive Identical Rejections', () => {
     assert.equal(status3.isBlocked, false, 'Path 3 should not be blocked');
   });
 
-  test('TC-FSM-01: Counter reset saat user APPROVE permintaan ke path lain di antaranya', async () => {
+  test('TC-FSM-01: Path A tetap diblokir selama sesi setelah path B disetujui', async () => {
     createHostDir();
     const ws = createWorkspace();
     const state = createMockHostState('sess-fsm-03', ['src/core']);
     await saveHostState(state);
 
-    // Use PassThrough stream - we can write answers before each call
-    const { PassThrough } = await import('node:stream');
-    const input = new PassThrough();
-    const outStream = new Writable({ write(chunk, _enc, cb) { cb(); } });
-
-    const manager = new ScopeAmendmentManager(state, ws, {
-      input,
-      output: outStream,
+    let outputBuffer = '';
+    const options: ScopeAmendmentOptions = {
+      output: new Writable({ write(chunk, _enc, cb) { outputBuffer += chunk.toString(); cb(); } }),
       isTTY: true,
       promptTimeoutMs: 5000,
-    });
+    };
+    const manager = new ScopeAmendmentManager(state, ws, options);
 
-    // Helper to write answer and call evaluateMutationTarget
     const callWithAnswer = async (answer: string, target: string, reason: string) => {
-      input.write(answer + '\n');
+      options.input = Readable.from([answer + '\n']);
       return manager.evaluateMutationTarget(target, reason, true);
     };
 
-    const r1 = await callWithAnswer('n', 'src/secrets.env', 'akses env');
-    assert.equal(r1, false);
-
-    const r2 = await callWithAnswer('n', 'src/secrets.env', 'akses env lagi');
-    assert.equal(r2, false);
-
-    // Approve a DIFFERENT path - this should reset the consecutive counter for path A
-    const r3 = await callWithAnswer('y', 'src/config.json', 'akses config');
-    assert.equal(r3, true, 'Approval on different path should succeed');
-
-    // Now reject path A again - should be 1st rejection in new chain
-    const r4 = await callWithAnswer('n', 'src/secrets.env', 'akses env sekali lagi');
-    assert.equal(r4, false, 'Should still prompt (not blocked)');
-
-    // Check status - path A should only have 1 rejection now (counter reset by approval on B)
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      assert.equal(await callWithAnswer('n', 'src/secrets.env', 'akses env'), false);
+    }
+    assert.equal(manager.getCircuitBreakerStatus('src/secrets.env').isBlocked, true);
+    assert.equal(await callWithAnswer('y', 'src/config.json', 'akses config'), true);
+    assert.ok(manager.getState().approvalScope?.allowedPaths.includes('src/config.json'));
     const statusA = manager.getCircuitBreakerStatus('src/secrets.env');
-    assert.equal(statusA.rejectionCount, 1, 'Counter for path A should reset after approval on path B');
-    assert.equal(statusA.isBlocked, false, 'Path A should not be blocked');
+    assert.equal(statusA.rejectionCount, 3, 'Approval B must not reset counter A');
+    assert.equal(statusA.isBlocked, true, 'Path A remains blocked for the rest of this session');
+    const promptCount = outputBuffer.split('Izinkan amandemen scope ini?').length;
+    options.input = new Readable({ read() { assert.fail('blocked path must not read stdin'); } });
+    const decision = await manager.evaluateMutationDecision('src/secrets.env', 'ulang A', true);
+    assert.equal(decision.allowed, false);
+    if (!decision.allowed) assert.equal(decision.code, 'SCOPE_CIRCUIT_BREAKER');
+    assert.equal(outputBuffer.split('Izinkan amandemen scope ini?').length, promptCount);
+  });
+
+  for (const transition of ['allow different path', 'reset and allow', 'reset and seed', 'allow parent subtree']) {
+    test(`TC-FSM-01: Session breaker survives ${transition}`, async () => {
+      createHostDir();
+      const ws = createWorkspace();
+      mkdirSync(join(ws, 'src', 'core'), { recursive: true });
+      const state = createMockHostState(`sess-fsm-${transition.replaceAll(' ', '-')}`, ['src/core']);
+      await saveHostState(state);
+      const options: ScopeAmendmentOptions = {
+        isTTY: true, promptTimeoutMs: 5000,
+        output: new Writable({ write(_chunk, _enc, cb) { cb(); } }),
+      };
+      const manager = new ScopeAmendmentManager(state, ws, options);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        options.input = Readable.from(['n\n']);
+        assert.equal(await manager.evaluateMutationTarget('src/blocked.txt', 'reject A', true), false);
+      }
+      if (transition.startsWith('reset')) await manager.resetScope();
+      if (transition === 'reset and seed') manager.seedWorkspaceScope(true);
+      else await manager.allowPath(transition === 'allow parent subtree' ? 'src' : 'src/other.txt');
+      assert.equal(manager.getCircuitBreakerStatus('src/blocked.txt').rejectionCount, 3);
+      assert.equal(manager.getCircuitBreakerStatus('src/blocked.txt').isBlocked, true);
+      options.input = new Readable({ read() { assert.fail('latched breaker must not prompt'); } });
+      const decision = await manager.evaluateMutationDecision('src/./blocked.txt', 'canonical alias A', true);
+      assert.equal(decision.allowed, false);
+      if (!decision.allowed) assert.equal(decision.code, 'SCOPE_CIRCUIT_BREAKER');
+    });
+  }
+
+  test('TC-FSM-01: Approval B does not discard pre-threshold rejections for A', async () => {
+    createHostDir();
+    const ws = createWorkspace();
+    const state = createMockHostState('sess-fsm-partial', ['src/core']);
+    await saveHostState(state);
+    const options: ScopeAmendmentOptions = {
+      isTTY: true, promptTimeoutMs: 5000,
+      output: new Writable({ write(_chunk, _enc, cb) { cb(); } }),
+    };
+    const manager = new ScopeAmendmentManager(state, ws, options);
+    for (const [answer, target] of [
+      ['n', 'src/a.txt'], ['n', 'src/a.txt'], ['y', 'src/b.txt'], ['n', 'src/a.txt'],
+    ]) {
+      options.input = Readable.from([answer + '\n']);
+      assert.equal(await manager.evaluateMutationTarget(target, 'per-path sequence', true), answer === 'y');
+    }
+    assert.equal(manager.getCircuitBreakerStatus('src/a.txt').rejectionCount, 3);
+    assert.equal(manager.getCircuitBreakerStatus('src/a.txt').isBlocked, true);
+  });
+
+  test('TC-FSM-01: A new session starts without the previous session breaker', async () => {
+    createHostDir();
+    const ws = createWorkspace();
+    const state = createMockHostState('sess-fsm-old-session', ['src/core']);
+    await saveHostState(state);
+    const options: ScopeAmendmentOptions = {
+      isTTY: true, promptTimeoutMs: 5000,
+      output: new Writable({ write(_chunk, _enc, cb) { cb(); } }),
+    };
+    const oldManager = new ScopeAmendmentManager(state, ws, options);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      options.input = Readable.from(['n\n']);
+      await oldManager.evaluateMutationTarget('src/a.txt', 'reject in old session', true);
+    }
+    assert.equal(oldManager.getCircuitBreakerStatus('src/a.txt').isBlocked, true);
+    const newState = createMockHostState('sess-fsm-new-session', ['src/core']);
+    await saveHostState(newState);
+    const newManager = new ScopeAmendmentManager(newState, ws, {
+      isTTY: true, input: Readable.from(['y\n']), output: options.output,
+    });
+    assert.equal(newManager.getCircuitBreakerStatus('src/a.txt').rejectionCount, 0);
+    assert.equal(await newManager.evaluateMutationTarget('src/a.txt', 'new session approval', true), true);
+    assert.equal(oldManager.getCircuitBreakerStatus('src/a.txt').isBlocked, true);
+  });
+
+  test('TC-FSM-01: Approval already waiting cannot reopen A after another prompt latches its breaker', async (t) => {
+    createHostDir();
+    const ws = createWorkspace();
+    const state = createMockHostState('sess-fsm-pending', ['src/core']);
+    await saveHostState(state);
+    const options: ScopeAmendmentOptions = {
+      isTTY: true, promptTimeoutMs: 5000,
+      output: new Writable({ write(_chunk, _enc, cb) { cb(); } }),
+    };
+    const manager = new ScopeAmendmentManager(state, ws, options);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      options.input = Readable.from(['n\n']);
+      await manager.evaluateMutationTarget('src/a.txt', 'reject A', true);
+    }
+    const pendingInput = new PassThrough();
+    t.after(() => pendingInput.destroy());
+    options.input = pendingInput;
+    const pending = manager.evaluateMutationDecision('src/a.txt', 'pending approval A', true);
+    options.input = Readable.from(['n\n']);
+    assert.equal(await manager.evaluateMutationTarget('src/a.txt', 'third rejection A', true), false);
+    assert.equal(manager.getCircuitBreakerStatus('src/a.txt').isBlocked, true);
+    pendingInput.write('y\n');
+    const decision = await pending;
+    assert.equal(decision.allowed, false, 'late approval cannot reopen the latched path');
+    if (!decision.allowed) assert.equal(decision.code, 'SCOPE_CIRCUIT_BREAKER');
+    assert.equal(manager.getCircuitBreakerStatus('src/a.txt').isBlocked, true);
+    assert.equal(manager.getState().approvalScope?.allowedPaths.includes('src/a.txt'), false);
   });
 
   test('TC-FSM-01: Setelah breaker trigger, permintaan lanjutan ke path sama ditolak otomatis tanpa prompt', async () => {
@@ -398,26 +493,24 @@ describe('TC-SCM-05 Scope Contraction Utility', () => {
     assert.equal(afterContract.includes('scripts/deploy.sh'), false, 'Expanded paths should be removed');
   });
 
-  test('TC-SCM-05: Contract scope juga clear circuit breaker state', async () => {
+  test('TC-SCM-05: Contract scope tidak membuka kembali session circuit breaker', async () => {
     createHostDir();
     const ws = createWorkspace();
     const state = createMockHostState('sess-scm-06', ['src/core']);
     await saveHostState(state);
 
-    const inStream = Readable.from(['n\n', 'n\n', 'n\n']);
-    const outStream = new Writable({ write(chunk, _enc, cb) { cb(); } });
-
-    const manager = new ScopeAmendmentManager(state, ws, {
-      input: inStream,
-      output: outStream,
+    const options: ScopeAmendmentOptions = {
+      output: new Writable({ write(_chunk, _enc, cb) { cb(); } }),
       isTTY: true,
       promptTimeoutMs: 5000,
-    });
+    };
+    const manager = new ScopeAmendmentManager(state, ws, options);
 
     // Trigger circuit breaker on a path
-    await manager.evaluateMutationTarget('src/secrets.env', 'akses env', true);
-    await manager.evaluateMutationTarget('src/secrets.env', 'akses env lagi', true);
-    await manager.evaluateMutationTarget('src/secrets.env', 'akses env sekali lagi', true);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      options.input = Readable.from(['n\n']);
+      await manager.evaluateMutationTarget('src/secrets.env', 'akses env', true);
+    }
 
     // Verify circuit breaker is active
     let status = manager.getCircuitBreakerStatus('src/secrets.env');
@@ -426,10 +519,14 @@ describe('TC-SCM-05 Scope Contraction Utility', () => {
     // Contract scope
     await manager.contractScope();
 
-    // Circuit breaker should be cleared
+    // Contraction revokes scope, not the session-lifetime rejection policy.
     status = manager.getCircuitBreakerStatus('src/secrets.env');
-    assert.equal(status.rejectionCount, 0, 'Rejection count should be cleared');
-    assert.equal(status.isBlocked, false, 'Circuit breaker should be cleared');
+    assert.equal(status.rejectionCount, 3, 'Rejection count survives scope contraction');
+    assert.equal(status.isBlocked, true, 'Circuit breaker remains blocked for this session');
+    options.input = new Readable({ read() { assert.fail('blocked path must not read stdin'); } });
+    const decision = await manager.evaluateMutationDecision('src/secrets.env', 'retry after contraction', true);
+    assert.equal(decision.allowed, false);
+    if (!decision.allowed) assert.equal(decision.code, 'SCOPE_CIRCUIT_BREAKER');
   });
 
   test('TC-SCM-05: Regresi - alur approval normal (approve/reject biasa) tetap bekerja', async () => {
