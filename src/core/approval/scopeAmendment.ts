@@ -51,6 +51,8 @@ export interface ScopeAmendmentOptions {
    * Contoh: ['/repo/packages', '/repo/node_modules/.pnpm']
    */
   monorepoRoots?: string[];
+  /** The pipeline already holds this session lock for its entire lifetime. */
+  sessionLock?: FileLock;
 }
 
 export function normalizeCasePath(p: string): string {
@@ -89,6 +91,25 @@ function safeRealpathSync(p: string): string | null {
   }
 }
 
+/** Resolve a not-yet-created path through its nearest existing ancestor. */
+function resolveScopePath(p: string): string | null {
+  let current = path.resolve(p);
+  const segments: string[] = [];
+  while (true) {
+    try {
+      fsSync.lstatSync(current);
+      const canonical = safeRealpathSync(current);
+      return canonical ? path.join(canonical, ...segments) : null;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    segments.unshift(path.basename(current));
+    current = parent;
+  }
+}
+
 /**
  * TC-SCM-03: Memeriksa apakah `canonicalParent` berada di dalam salah satu
  * monorepo root yang terdaftar. Digunakan sebagai pengecualian untuk symlink
@@ -121,6 +142,107 @@ export class ScopeAmendmentManager {
 
   private consecutiveRejections: Map<string, number>;
   private initialAllowedPaths: string[];
+
+  /** Seed the workspace contract only after an explicit transition to ACT. */
+  seedWorkspaceScope(): void {
+    if (this.state.approvalScope) return;
+    if (!safeRealpathSync(this.workspaceRoot)) {
+      throw new Error('SCOPE_BOOTSTRAP_DENIED: workspace tidak dapat di-resolve.');
+    }
+    this.state.approvalScope = {
+      planHash: this.state.activePlanHash ?? computePlanHash(null, ['.'], this.workspaceRoot),
+      allowedPaths: ['.'],
+      approvedAt: new Date().toISOString(),
+      correlationId: crypto.randomUUID(),
+    };
+    this.initialAllowedPaths = ['.'];
+    this.consecutiveRejections.clear();
+  }
+
+  /** Explicit user authorization; never called from model tool arguments. */
+  async allowPath(targetPath: string): Promise<boolean> {
+    const absTarget = path.resolve(this.workspaceRoot, targetPath);
+    const normRoot = normalizeCasePath(this.workspaceRoot);
+    const normTarget = normalizeCasePath(absTarget);
+    const canonicalRoot = safeRealpathSync(this.workspaceRoot);
+    const canonicalTarget = resolveScopePath(absTarget);
+    if (
+      !targetPath ||
+      (normTarget !== normRoot && !normTarget.startsWith(normRoot + path.sep)) ||
+      !canonicalRoot || !canonicalTarget
+    ) {
+      throw new Error('SCOPE_PATH_DENIED: path harus berada di dalam workspace yang sah.');
+    }
+    const physicalRoot = normalizeCasePath(canonicalRoot);
+    const physicalTarget = normalizeCasePath(canonicalTarget);
+    if (physicalTarget !== physicalRoot && !physicalTarget.startsWith(physicalRoot + path.sep)) {
+      throw new Error('SCOPE_PATH_DENIED: symlink mengarah ke luar workspace.');
+    }
+    const allowedPath = path.relative(this.workspaceRoot, absTarget).replace(/\\/g, '/') || '.';
+    let initialized = false;
+    const updated = await this.updateScope((freshState) => {
+      initialized = !freshState.approvalScope;
+      if (!freshState.approvalScope) {
+        freshState.approvalScope = {
+          planHash: freshState.activePlanHash ?? computePlanHash(null, [allowedPath], this.workspaceRoot),
+          allowedPaths: [],
+          approvedAt: new Date().toISOString(),
+          correlationId: crypto.randomUUID(),
+        };
+      }
+      if (!freshState.approvalScope.allowedPaths.includes(allowedPath)) {
+        freshState.approvalScope.allowedPaths.push(allowedPath);
+      }
+      return true;
+    });
+    if (updated) {
+      if (initialized) this.initialAllowedPaths = this.state.approvalScope!.allowedPaths.slice();
+      this.consecutiveRejections.clear();
+    }
+    return updated;
+  }
+
+  /** Revoke all path authorization until the user explicitly approves again. */
+  async resetScope(): Promise<void> {
+    await this.updateScope((freshState) => {
+      freshState.approvalScope = null;
+      return true;
+    });
+    this.initialAllowedPaths = [];
+    this.consecutiveRejections.clear();
+  }
+
+  /** Reuse the pipeline's owned lock instead of deadlocking on a second acquire. */
+  private async updateScope(update: (state: HostState) => boolean): Promise<boolean> {
+    let release: (() => Promise<void>) | undefined;
+    if (this.options.sessionLock) {
+      const lock = this.options.sessionLock;
+      const nonce = lock.getCurrentNonce();
+      if (!nonce || lock.readMetadata()?.nonce !== nonce) {
+        throw new Error('SCOPE_LOCK_DENIED: session lock tidak lagi dimiliki pipeline.');
+      }
+    } else {
+      const hostDir = process.env.RUKO_HOST_STATE_DIR
+        ? path.resolve(process.env.RUKO_HOST_STATE_DIR)
+        : path.join(os.homedir(), '.ruko', 'sessions');
+      release = await new FileLock(path.join(hostDir, this.state.sessionId, 'state.json')).acquire();
+    }
+    try {
+      const freshState = await loadHostState(this.state.sessionId, { resume: false });
+      Object.assign(this.state, {
+        ...freshState,
+        approvalScope: freshState.approvalScope
+          ? { ...freshState.approvalScope, allowedPaths: freshState.approvalScope.allowedPaths.slice() }
+          : null,
+      });
+      if (!update(freshState)) return false;
+      await saveHostState(freshState);
+      Object.assign(this.state, freshState);
+      return true;
+    } finally {
+      await release?.();
+    }
+  }
 
   /**
    * Get canonical path for circuit breaker tracking (TC-FSM-01).
@@ -241,13 +363,13 @@ export class ScopeAmendmentManager {
     //  - Untuk target yang = allowed path itu sendiri (misal src/core): target sendiri yang cocok
     if (!this.state.approvalScope) return false;
 
-    // Resolve canonical target — bisa jadi target sendiri belum ada (file baru),
-    // jadi ini opsional (null = file belum ada, periksa parent saja).
-    const canonicalTarget = safeRealpathSync(absTarget);
+    // File/subtree baru di-resolve melalui ancestor yang eksis; kegagalan
+    // resolusi (termasuk dangling symlink) tetap fail-closed.
+    const canonicalTarget = resolveScopePath(absTarget);
 
     for (const allowed of this.state.approvalScope.allowedPaths) {
       const absAllowed = path.resolve(this.workspaceRoot, allowed);
-      const canonicalAllowed = safeRealpathSync(absAllowed);
+      const canonicalAllowed = resolveScopePath(absAllowed);
       // Jika allowedPath sendiri tidak bisa di-resolve, skip entry ini
       // (fail-closed per entry, coba entry lainnya)
       if (canonicalAllowed === null) continue;
@@ -379,27 +501,19 @@ export class ScopeAmendmentManager {
       return false;
     }
 
-    // 4. Perbarui izin pada state host dengan perlindungan atomic FileLock
-    const hostDir = process.env.RUKO_HOST_STATE_DIR
-      ? path.resolve(process.env.RUKO_HOST_STATE_DIR)
-      : path.join(os.homedir(), '.ruko', 'sessions');
-    const stateFile = path.join(hostDir, this.state.sessionId, 'state.json');
-    const lock = new FileLock(stateFile);
-    const release = await lock.acquire();
-    try {
-      const freshState = await loadHostState(this.state.sessionId, { resume: false });
-      if (!freshState.approvalScope) {
+    // 4. Persist under the standalone or already-owned pipeline session lock.
+    return this.updateScope((freshState) => {
+      if (
+        freshState.mode !== 'act' || !freshState.approvalScope ||
+        (freshState.activePlanHash && freshState.approvalScope.planHash !== freshState.activePlanHash)
+      ) {
         return false;
       }
       if (!freshState.approvalScope.allowedPaths.includes(targetPath)) {
         freshState.approvalScope.allowedPaths.push(targetPath);
-        await saveHostState(freshState);
-        this.state = freshState;
       }
       return true;
-    } finally {
-      await release();
-    }
+    });
   }
 
   /**
@@ -410,27 +524,16 @@ export class ScopeAmendmentManager {
   async contractScope(): Promise<boolean> {
     if (!this.state.approvalScope) return false;
 
-    const hostDir = process.env.RUKO_HOST_STATE_DIR
-      ? path.resolve(process.env.RUKO_HOST_STATE_DIR)
-      : path.join(os.homedir(), '.ruko', 'sessions');
-    const stateFile = path.join(hostDir, this.state.sessionId, 'state.json');
-    const lock = new FileLock(stateFile);
-    const release = await lock.acquire();
-    try {
-      const freshState = await loadHostState(this.state.sessionId, { resume: false });
+    const contracted = await this.updateScope((freshState) => {
       if (!freshState.approvalScope) {
         return false;
       }
       // Reset to initial allowedPaths
       freshState.approvalScope.allowedPaths = this.initialAllowedPaths.slice();
-      await saveHostState(freshState);
-      this.state = freshState;
-      // Also clear circuit breaker state
-      this.consecutiveRejections.clear();
       return true;
-    } finally {
-      await release();
-    }
+    });
+    if (contracted) this.consecutiveRejections.clear();
+    return contracted;
   }
 
   /**

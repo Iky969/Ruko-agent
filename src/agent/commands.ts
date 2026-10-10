@@ -326,19 +326,59 @@ const COMMANDS: CommandDef[] = [
     category: 'Operasi & Eksekusi',
     help: 'Mode rencana: hanya baca & usulkan, eksekusi diblokir di kode.',
     hint: 'on | off',
-    run: (args, env) => {
+    run: async (args, env) => {
       if (!env.agent) {
         console.log('Plan mode hanya tersedia di dalam REPL.');
         return;
       }
       const arg = args.trim().toLowerCase();
       const on = arg === 'on' || (arg === '' && !env.agent.planMode);
-      env.agent.planMode = on;
+      await env.agent.setPlanMode(on);
       console.log(
         on
           ? yellow('PLAN MODE aktif — tool eksekusi/write diblok; model hanya boleh membaca & menyusun langkah. /plan off untuk lanjut.')
           : green('Plan mode dinonaktifkan — eksekusi normal.'),
       );
+    },
+  },
+  {
+    name: 'scope',
+    category: 'Operasi & Eksekusi',
+    help: 'Kontrak path mutasi sesi.',
+    hint: 'allow <path> | status | reset',
+    run: async (args, env) => {
+      const manager = env.agent?.getScopeAmendmentManager();
+      if (!manager) {
+        console.log('Scope hanya tersedia di dalam REPL dengan pipeline keamanan aktif.');
+        return;
+      }
+      const match = args.trim().match(/^(allow|status|reset)(?:\s+(.+))?$/i);
+      const action = args.trim() === '' ? 'status' : match?.[1].toLowerCase();
+      const targetPath = match?.[2]?.trim();
+      if (!action || (action === 'allow' ? !targetPath : targetPath !== undefined)) {
+        console.log('Gunakan: /scope allow <path> | /scope status | /scope reset');
+        return;
+      }
+      if (action === 'status') {
+        const state = manager.getState();
+        console.log(renderBox('Scope', [
+          `Mode: ${state.mode.toUpperCase()}`,
+          `Scope: ${state.approvalScope?.allowedPaths.join(', ') || '(none)'}`,
+          'Atur dengan /scope allow <path>; /scope reset untuk mencabut izin.',
+        ]));
+        return;
+      }
+      try {
+        if (action === 'allow') {
+          await manager.allowPath(targetPath!);
+          console.log(green(`Scope disetujui: ${targetPath}. Plan Mode tidak berubah.`));
+        } else {
+          await manager.resetScope();
+          console.log(yellow('Scope direset: (none). Mutasi file diblok sampai /scope allow <path> atau /plan off.'));
+        }
+      } catch (err) {
+        console.log(yellow(`Scope tidak diubah: ${err instanceof Error ? err.message : String(err)}`));
+      }
     },
   },
   {

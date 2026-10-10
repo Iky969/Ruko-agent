@@ -205,6 +205,10 @@ Ruko menerapkan defense-in-depth:
 ### Plan Mode & Reasoning
 - **`/plan on`**: agent hanya baca & usulkan langkah; write/exec diblok di kode
 - Saat model menampilkan menu bernomor (`1. … / 2. …`), balas dengan nomor (atau `pilih 1`, `opsi 2`) → Plan Mode **otomatis off** dan opsi dieksekusi (tanpa `/plan off` manual)
+- **`/plan off` / pilihan rencana bernomor**: transisi ke ACT menyimpan kontrak scope default `.` (workspace) jika scope belum ada. Scope yang sudah disetujui tidak diperluas otomatis. Berlaku juga pada input non-TTY yang secara eksplisit meminta ACT; startup/resume tetap PLAN.
+- **`/scope allow <path>`**: setujui file/subtree di dalam workspace, termasuk path baru yang belum dibuat. Untuk scope sempit, jalankan `/scope allow src` saat PLAN sebelum `/plan off`. Perintah ini tidak mengubah Plan Mode; izin ditambahkan, bukan mengganti scope yang sudah ada.
+- **`/scope status`** (atau `/scope`): lihat mode dan path yang disetujui. **`/scope reset`** mencabut seluruh kontrak path; setelah reset, mutasi file ditolak sampai izin eksplisit baru diberikan. Reset lalu allow path sempit jika sebelumnya scope mencakup `.`.
+- `/plan on` dan resume sesi ACT membatalkan scope. Scope/YOLO tidak melewati pembatasan workspace, symlink escape, path sensitif, atau security core.
 - **`/reasoning low|medium|high`**: atur tingkat reasoning native (default `medium`); level lama `xhigh`/`max`/`extreme` sudah diseragamkan
 
 ---
@@ -262,6 +266,7 @@ Ruko menerapkan defense-in-depth:
 | `/clear` | Bersihkan memori percakapan |
 | `/compact` | Paksa kompresi history |
 | `/plan on\|off` | Mode rencana (blokir write/exec); balas nomor opsi → auto-off + eksekusi |
+| `/scope [allow <path>\|status\|reset]` | Setujui path mutasi, lihat kontrak, atau cabut seluruh scope sesi |
 | `/mode [default\|research\|code\|build]` | Mode operasional agen (AgentMode: `default`\|`research`\|`code`\|`build`) |
 | `/reasoning [low\|medium\|high]` | Tingkat reasoning native (default medium) |
 | `/yolo on\|off` | Mode auto-approve |

@@ -35,7 +35,6 @@ import { appendHistory, defaultHistoryPath, loadHistory } from './history.js';
 import { getWorkspaceRoot } from '../agent/tools.js';
 import { defaultProcessManager } from '../agent/processManager.js';
 import { detectPlanOptionSelection, parseNumberedOptions } from './plan.js';
-import { saveHostState } from './state/hostState.js';
 // Fase B (v1.9.0): EnvProfile singleton (deteksi murni, Fase A).
 import { getEnvProfile } from './env.js';
 import type { SecurityPipeline } from './securityPipeline.js';
@@ -458,12 +457,7 @@ export class SystemLoop {
             .find((m) => m.role === 'assistant');
           const planSelection = detectPlanOptionSelection(lastAssistant?.content, input);
           if (planSelection) {
-            this.agent.planMode = false;
-            const hs = this.agent.getHostState();
-            if (hs && hs.mode === 'plan') {
-              hs.mode = 'act';
-              void saveHostState(hs).catch(() => {});
-            }
+            await this.agent.setPlanMode(false);
             console.log(renderPlanAutoExecuteBox(planSelection.selectedNumber, planSelection.optionText));
             turnInstruction = planSelection.augmentedInstruction;
           }

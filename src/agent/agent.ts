@@ -239,6 +239,31 @@ export class Agent {
     return this.scopeAmendmentManager;
   }
 
+  /** Persist the host mode and its scope before allowing the next tool call. */
+  async setPlanMode(on: boolean): Promise<void> {
+    if (this.hostState) {
+      const previousMode = this.hostState.mode;
+      const previousScope = this.hostState.approvalScope;
+      try {
+        if (on) {
+          this.hostState.approvalScope = null;
+        } else if (!this.hostState.approvalScope) {
+          if (!this.scopeAmendmentManager) {
+            throw new Error('SCOPE_BOOTSTRAP_DENIED: scope manager belum terpasang.');
+          }
+          this.scopeAmendmentManager.seedWorkspaceScope();
+        }
+        this.hostState.mode = on ? 'plan' : 'act';
+        await saveHostState(this.hostState);
+      } catch (err) {
+        this.hostState.mode = previousMode;
+        this.hostState.approvalScope = previousScope;
+        throw err;
+      }
+    }
+    this.planMode = on;
+  }
+
   /** Replaces the approval prompt hook (wired by the loop once stdin is open). */
   setConfirm(confirm: Confirmer | null): void {
     this.confirm = confirm ?? null;
@@ -379,11 +404,7 @@ export class Agent {
         .find((m) => m.role === 'assistant');
       const planSelection = detectPlanOptionSelection(lastAssistant?.content, instruction);
       if (planSelection) {
-        this.planMode = false;
-        if (this.hostState && this.hostState.mode === 'plan') {
-          this.hostState.mode = 'act';
-          void saveHostState(this.hostState).catch(() => {});
-        }
+        await this.setPlanMode(false);
         instruction = planSelection.augmentedInstruction;
       }
     }

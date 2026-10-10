@@ -78,6 +78,7 @@ export async function bootstrapSecurityPipeline(
     const scopeManager = new ScopeAmendmentManager(hostState, wsRoot, {
       isTTY: options.isTTY ?? process.stdin.isTTY,
       monorepoRoots: options.monorepoRoots,
+      sessionLock: fileLock,
     });
 
     const pipeline: SecurityPipeline = {

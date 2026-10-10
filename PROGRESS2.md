@@ -51,8 +51,8 @@
 ---
 
 ## 3. Active Task / Next Focus
-- **Current Step:** Sisa Audit Remediasi (Section 15: UI Streaming Glitch, Subprocess Env Harmonization, E2E CLI Integration Harness) — [status: SELESAI-nunggu review]
-- **Action Item:** Menunggu review persetujuan untuk seluruh perbaikan Fase C, Section 14, dan Section 15 sebelum commit dan tagging rilis.
+- **Current Step:** Feedback v2 — PR-A batch 1: scope bootstrap ACT dan `/scope allow|status|reset` — [status: SELESAI-terverifikasi, STOP setelah 2 task]. Detail di §17.
+- **Action Item:** Menunggu instruksi batch berikutnya; checklist PR-A yang tersisa serta PR-B/PR-C/PR-D/PR-E belum dilanjutkan. Batch ini dicatat dalam commit lokal sesuai permintaan pengguna; tanpa push atau perubahan tag rilis.
 
 ---
 
@@ -269,5 +269,25 @@
 - **Review (disetujui pengguna):** kebijakan konservatif tolak semua `nlink > 1` disetujui. Strip `PYTHONPATH`/`PERL5LIB`/`RUBYLIB` dari `exec` user disetujui (konsisten dengan `NODE_PATH`). Seluruh test hardlink (a) **dipertahankan**: test tersebut lulus di bawah kebijakan konservatif dan menjadi regression coverage fix ini. Yang "mustahil lulus" hanya varian spesifikasi literal (AND `st_dev`), dan varian itu tidak diimplementasikan.
 - **Status rilis:** di-commit & di-push ke `main` (commit `9615be5`). Issue #31 diberi comment ringkasan fix, 3 item sisa (SSRF edge-case/redirect test, Guardian self-justifying injection, SSE/TUI quality) resmi dipindahkan ke issue baru [#32](https://github.com/Iky969/Ruko-agent/issues/32), dan issue #31 telah ditutup.
 - **Next step:** Follow-up 3 item sisa di issue #32.
+
+## 17. Feedback v2 — PR-A Batch 1: Bootstrap Scope ACT & Slash `/scope` [status: SELESAI-terverifikasi, STOP setelah 2 task]
+- **Tanggal / baseline:** 2026-10-10; checkout `main` @ `d09479f`. Laporan feedback merujuk tip berbeda; pada checkout ini `planMode` masih field biasa dan `/plan` belum menyinkronkan mode host, sehingga repro awal gagal dengan host tetap `plan`.
+- **Task 1 — SELESAI:** seed `approvalScope` di semua jalur runtime menuju ACT (`/plan off`/toggle, auto-off pilihan rencana di `Agent` dan `SystemLoop`). `Agent.setPlanMode()` menjadi jalur transisi bersama; seed default `allowedPaths: ['.']` hanya bila kontrak belum ada, memakai hash rencana aktif atau hash kanonis serta correlation ID baru. Persist atomik ditunggu sebelum melanjutkan tool/turn; kegagalan persist tidak membuka ACT. Kontrak sempit yang telah disetujui tidak diperluas.
+- **Task 2 — SELESAI:** `/scope allow <path>`, `/scope status` (juga `/scope`), dan `/scope reset`, terdaftar di help/autocomplete. Allow memvalidasi containment leksikal dan fisik termasuk subtree baru lewat ancestor yang eksis; reset mencabut seluruh kontrak, bukan mengganti mode; status read-only. Perintah tidak menyentuh kredensial/config atau melewati gate Plan Mode.
+- **Perbaikan pendukung dalam scope kedua task:**
+  - `ScopeAmendmentManager` menggunakan lock sesi yang sudah dimiliki pipeline (validasi nonce) untuk menghindari deadlock acquire ulang; pemanggilan standalone tetap mengambil FileLock sendiri.
+  - Pembaruan/kontraksi/reset menjaga identitas objek HostState yang dibagi pipeline, Agent, dan subagent, sehingga pencabutan setelah amandemen tidak meninggalkan izin usang.
+  - Snapshot persist gagal tidak memperluas izin live; hash rencana dan mode direvalidasi sebelum menyimpan persetujuan hasil prompt.
+- **Kebijakan A+C:** input `/plan off`/toggle atau pemilihan rencana bernomor merupakan persetujuan eksplisit masuk ACT, termasuk non-TTY. Startup/resume tetap PLAN; `/plan on` mencabut scope. Mutasi tanpa kontrak, di luar workspace/subtree (non-TTY), atau lewat symlink escape tetap fail-closed. Scope default tidak memberi izin path sensitif/security core dan tidak mematikan approval shell.
+- **File:** `src/agent/agent.ts`, `src/agent/commands.ts`, `src/core/loop.ts`, `src/core/approval/scopeAmendment.ts`, `src/core/securityPipeline.ts`; suite baru `src/tests/feedback_scope_bootstrap.test.ts`.
+- **Verifikasi aktual (Linux / Node v24.21.0):**
+  - TDD repro `/plan off`, auto-off Agent/REPL, `/scope allow`/reset, subtree baru, persist gagal, serta deadlock lock sesi: diamati gagal sebelum perbaikan lalu lulus.
+  - Suite baru: **17 tests / 17 pass / 0 fail**, termasuk CLI biner `dist/index.js`, write nyata, resume, PLAN + YOLO, scope sempit, traversal/symlink escape, lock hilang, dan hash rencana berubah.
+  - Baseline `npm run test`: **1251 tests / 1250 pass / 0 fail / 1 skip / 67 suites**.
+  - Sesudah `npm run test`: **1268 tests / 1267 pass / 0 fail / 1 skip / 68 suites**. Delta **+17 tests / +1 suite**; zero runtime dependency guard tetap lulus.
+  - `npm run typecheck`, `npm run build`, dan `git diff --check`: lulus.
+- **Dokumentasi:** tepat dua checkbox implementasi pertama PR-A di `feedback.txt` ditandai selesai beserta checkpoint; README menjelaskan bootstrap/default/narrow/reset scope; `CHANGELOGSv2.md` dibuat sesuai nama yang diminta pengguna (berbeda dari arsip `CHANGELOGv2.md`, yang tidak diubah).
+- **Catatan Git:** `feedback.txt` memang di-ignore oleh `.gitignore:14`; penandaan task tersimpan lokal dan tidak muncul pada `git diff`. Aturan ignore tidak diubah. Review independen belum dilakukan karena tidak ada tool delegasi atau CLI reviewer terpasang; verifikasi di atas berupa static/self-review dan eksekusi test.
+- **Batas batch / next step:** STOP setelah dua task implementasi ini. Checklist penerimaan PR-A yang tersisa belum ditutup sebagai task batch; PR-B (termasuk validasi argumen `/plan`), PR-C (approval/YOLO), PR-D, dan PR-E tidak dikerjakan. Commit lokal atas permintaan pengguna; belum push/tagging, menunggu instruksi berikutnya.
 
 
