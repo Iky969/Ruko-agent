@@ -51,8 +51,8 @@
 ---
 
 ## 3. Active Task / Next Focus
-- **Current Step:** Persiapan PR ke `main` pada branch `fix/feedback-scope-security-pr`: merge remote terbaru direkonsiliasi, panduan kontribusi ditambahkan, dan versi source/package disiapkan sebagai `2.2.0` unreleased. Detail §21.
-- **Action Item:** Ajukan branch fitur sebagai PR, lalu tunggu CI/review; jangan push langsung ke `main`, merge, atau buat tag/release. Installer tetap menggunakan `v2.1.0` sampai tag immutable `v2.2.0` diterbitkan.
+- **Current Step:** Empat perbaikan feedback PR selesai; rebase interaktif menghasilkan empat commit kode murni pada `fix/feedback-scope-security-pr`. Dokumentasi dikonsolidasikan ke satu commit docs terakhir (`CHANGELOGv2.md` dan `PROGRESS2.md`); verifikasi typecheck/build/full test pasca-rebase lulus, detail §22.
+- **Action Item:** STOP menunggu konfirmasi setelah verifikasi akhir. Jangan push, merge, mengubah repo utama `/workspaces/Ruko-agent`, atau membuat tag/release. Installer tetap mem-pin `v2.1.0`.
 
 ---
 
@@ -355,5 +355,58 @@
 - Verifikasi pasca-integrasi: `npm run typecheck` lulus; `npm run test` lulus **1336 tests / 1335 pass / 0 fail / 1 skip**, Node 24.21.0 Linux; `git diff --check` lulus. CI lintas OS tetap menunggu GitHub.
 - Verifikasi tambahan setelah metadata versi 2.2.0: `npm run typecheck`, `npm run build`, `npm test`, `npm run test:e2e`, `npm run test:urls`, `npm ls --omit=dev --all`, dan `git diff --check` lulus. CLI build menampilkan `ruko v2.2.0`; suite penuh **1336 / 1335 pass / 0 fail / 1 skip**. Skip file-URL khusus Windows pada host Linux.
 - Tag `v2.2.0` dan GitHub release belum ada; commit versi menyatakan Unreleased dan `install.sh` tetap mem-pin `v2.1.0`. Tidak membuat tag/release dan tidak mengubah kebijakan installer.
+
+## 22. Feedback PR — empat commit kode dan satu commit dokumentasi
+
+### Audit dokumentasi dan rebase interaktif
+- **Worktree / branch:** `/workspaces/Ruko-agent-pr`, `fix/feedback-scope-security-pr`. HEAD sebelum rebase `844816a`; parent empat commit `338f57c`. Hanya `ANALISIS_MOVE_FILE_FIX.md` yang untracked saat rebase dimulai; file itu tidak diubah atau dimasukkan ke commit.
+- Audit `git show --name-only` menemukan keempat commit lama mengubah `CHANGELOGSv2.md` dan `PROGRESS2.md`, bukan `CHANGELOGv2.md`. Koreksi atas permintaan pengguna: dokumentasi dikeluarkan dari commit kode lewat `git rebase --interactive 338f57c`, lalu catatan empat item digabung ke satu commit docs di akhir dengan nama file yang tepat: `CHANGELOGv2.md` dan `PROGRESS2.md`.
+- Mapping commit lama → baru:
+  - `39115ab` → `f0c92ae9480d641a3527173b4311274ae9e1be31` — `fix(security): check both sides of move_file and block .git/hooks mutations`.
+  - `8091d4f` → `6f95536ffe62ea0d7aaa37bf7979e82151bf358d` — `fix(approval): reject out-of-workspace paths in session allowlist`.
+  - `48c83f1` → `40e8fc0c706598a6fc03eba726bc546ebc019ec4` — `fix(approval): make amendment circuit breaker permanent per session`.
+  - `844816a` → `76ebe1e087923131e6ad7896fd23e083c45a3b72` — `fix(approval): align TTY fallback with runtime pipeline`.
+- Konflik rebase hanya pada dua file dokumentasi yang sengaja dikeluarkan; tidak ada konflik kode. Perbandingan `git ls-tree -r <commit> src` membuktikan source/test tree tiap commit baru identik dengan commit asalnya. Empat commit baru hanya memuat path `src/`; tidak ada dokumentasi atau catatan lain.
+- `CHANGELOGSv2.md` dipertahankan identik dengan baseline `338f57c`, sehingga batch sebelum empat item tetap utuh. Riwayat awal dan catatan sebelum rebase disimpan pada `/home/codespace/.hermes/cache/scratch/ruko-feedback-rebase/before-rebase.bundle`, `progress-before.md`, dan `docs-before.patch`.
+
+### Item 1 — move_file dan guard .git/hooks [SELESAI]
+- Commit kode `f0c92ae`: mempertahankan fix awal unstaged, mengevaluasi sumber dan tujuan dengan manager keputusan scope yang sama sebelum I/O/approval. Prioritas alias/nullish disamakan dengan handler (`source/from/path` dan `target/to/destination`) untuk menutup celah decoy destination.
+- `isSensitivePath` melindungi direktori `.git/hooks` beserta turunannya, termasuk absolut/nested/casing/backslash/encoding; `hooks-backup` tetap normal.
+- File kode/test: `src/agent/tools.ts`, `src/core/dispatcher/dispatcherGate.ts`, `src/tests/fase2_dispatcherGate_moveFile.test.ts`.
+- **12 tests** terhadap HEAD awal: 8 tes existing unstaged + 4 tambahan. Runtime denial memastikan sumber tetap ada/isi tetap sama, tujuan/undo tidak dibuat, serta move dalam scope dengan approval nyata berhasil. Regresi alias RED→GREEN; suite terkait checkpoint **51 total / 51 pass / 0 fail / 0 skip**, build/typecheck/diff-check lulus.
+
+### Item 2 — session allowlist workspace boundary [SELESAI]
+- Commit kode `6f95536`: path command diresolusikan dengan `path.resolve`/`path.relative` terhadap cwd dan workspace host. Traversal, absolut luar workspace, separator backslash, foreign Windows drives/drive-relative, serta opsi `--file=...`/`-I/...` ditolak untuk reusable grant; grammar backslash/dynamic shell existing tetap default-deny.
+- Handler `start_process` memasok workspace root dari host, bukan argumen model. Grant exact-command mengikat jenis operasi, cwd fisik dan root fisik. Nested cwd dapat memakai parent relatif yang masih dalam workspace; caller legacy tanpa root memakai cwd sebagai boundary.
+- File kode/test: `src/core/approval/sessionAllowlist.ts`, `src/agent/tools.ts`, `src/tests/sessionAllowlist.test.ts`, `src/tests/feedback_approval_session.test.ts`.
+- **15 tests**: 14 allowlist unit/runtime + 1 confirmer, memeriksa path luar tidak tersimpan/reused, setiap percobaan masih memerlukan keputusan, path lokal baru diingat setelah persetujuan pertama, dan binding host/root/cwd. Command luar workspace di fixture tidak dieksekusi. RED→GREEN; checkpoint suite **93 total / 93 pass / 0 fail / 0 skip**, build/typecheck/diff-check lulus. PLAN/scope/blocked/high-risk, one-shot dan pencabutan sesi tidak dilonggarkan.
+
+### Item 3 — circuit breaker permanen selama sesi [SELESAI]
+- Commit kode `40e8fc0`: setelah tiga penolakan per canonical path, path diblokir permanen selama sesi aktif. Approval B tidak mereset counter A; allow/reset/seed/kontraksi scope dan pemberian subtree induk tidak membuka kembali A.
+- Pemeriksaan breaker mendahului subtree auto-approve dan direvalidasi setelah prompt, sehingga approval tertunda yang datang setelah rejection ketiga tetap ditolak. Counter in-memory per manager sesi aktif, tidak dipersist lintas restart/sesi; sesi baru memiliki counter kosong. Pesan denial tidak menyarankan YOLO/reset sebagai bypass.
+- File kode/test: `src/core/approval/scopeAmendment.ts`, `src/tests/fase2_scopeAmendment.test.ts`.
+- **7 tests tambahan**, dua tes reset lama di-rename/diperkuat. Mencakup empat transisi scope, approval B sebelum/sesudah threshold A, sesi baru, dan concurrent late approval. Fresh input per prompt memastikan jawaban nyata, bukan stream habis/timeout. RED→GREEN; checkpoint scope/symlink/bootstrap **66 total / 66 pass / 0 fail / 0 skip**, build/typecheck/diff-check lulus.
+
+### Item 4 — fallback TTY konsisten dengan runtime [SELESAI]
+- Commit kode `76ebe1e`: fallback `options.isTTY ?? Boolean(process.stdin.isTTY)`, tanpa membaca CI; override host tetap didukung, selaras dengan runtime pipeline.
+- File kode/test: `src/core/approval/scopeAmendment.ts`, `src/tests/fase2_scopeAmendment.test.ts`.
+- **3 tests tambahan**: `CI=true` + stdin TTY tetap prompt/approve/persist, non-TTY dengan CI true/false fail-closed tanpa stdin/prompt/persist. Property stdin dan environment dipulihkan saat cleanup. RED→GREEN; checkpoint scope standalone **25 total / 25 pass / 0 fail / 0 skip**, build/typecheck/diff-check lulus.
+
+### Rekonsiliasi verifikasi implementasi sebelum rebase
+- Lingkungan Linux / Node v24.21.0 / npm 11.19.0. Baseline working tree `338f57c` memuat 8 tes move unstaged: **1344 total / 1343 pass / 0 fail / 1 skip / 69 suites**. Final pasca-empat-commit lama: **1373 total / 1372 pass / 0 fail / 1 skip / 69 suites**; delta **+29** terhadap working tree awal, **37 tests baru terhadap HEAD awal** (12 + 15 + 7 + 3).
+- TAP leaf records dan totals direkonsiliasi; dua rename breaker bukan penghapusan tes. Skip tetap drive-letter/UNC Windows-only pada Linux; tidak ada skip baru.
+- Full/typecheck/build/e2e final sebelum rebase lulus; E2E filter existing **1 total / 1 pass / 0 fail / 0 skip**. Suite standalone scope **25/25**, sessionAllowlist **14/14**, feedback_approval_session **11/11** pass. Log implementasi: `/home/codespace/.hermes/cache/scratch/ruko-feedback-pr/`.
+- Perintah diminta pasca-rebase dijalankan ulang dengan hasil nyata di bawah; angka checkpoint lama tidak dipakai sebagai pengganti run baru.
+
+### Verifikasi ulang pasca-rebase, sebelum commit docs
+- `npm run typecheck`: exit 0; tidak menjalankan test runner (total/pass/fail/skip N/A). Log `/home/codespace/.hermes/cache/scratch/ruko-feedback-rebase/pre-docs-1.log`.
+- `npm run build`: exit 0; tidak menjalankan test runner (total/pass/fail/skip N/A). Log `/home/codespace/.hermes/cache/scratch/ruko-feedback-rebase/pre-docs-2.log`.
+- `npm test`: exit 0, **1373 total / 1372 pass / 0 fail / 1 skip / 69 suites / 0 cancelled / 0 todo**. Perintah persis tanpa flag tambahan, tanpa perubahan runner/timeout/reporter. Log `/home/codespace/.hermes/cache/scratch/ruko-feedback-rebase/pre-docs-3.log`.
+- `git diff --check` lulus. Source/test tree pada setiap commit baru identik dengan asal, sehingga tidak ada perubahan perilaku atau jumlah tes akibat pemisahan dokumentasi. Seluruh source/dependency/version tetap sama.
+- Pada checkpoint ini branch/HEAD/status utama serta SHA-256 diff staged/unstaged masih identik dengan sebelum rebase. Setelah satu commit docs, perintah diminta dan pemeriksaan invariant diulang; hasil pasca-commit dilaporkan pada jawaban akhir. Hanya catatan ANALISIS existing tetap untracked, tidak ikut commit.
+
+### Batas pekerjaan
+- Repo utama `/workspaces/Ruko-agent` tetap `main` @ `1a9c91e`; status serta hash diff staged/unstaged disimpan sebelum rebase untuk dibandingkan setelah verifikasi/commit docs. Semua checkout/rebase/edit/build/staging/commit dilakukan hanya di worktree PR; staging memakai nama file eksplisit.
+- Commit docs terakhir hanya `CHANGELOGv2.md` dan `PROGRESS2.md`; `CLAUDE.md`, `ANALISIS_*`, feedback/catatan lain tidak dimasukkan. Tidak push/merge/tag/release atau perubahan source/dependency/version. Static/self-review implementasi saja, bukan review independen; pengujian hanya pada Linux Node v24.21.0.
 
 
