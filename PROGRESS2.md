@@ -51,8 +51,8 @@
 ---
 
 ## 3. Active Task / Next Focus
-- **Current Step:** Empat perbaikan feedback PR selesai; rebase interaktif menghasilkan empat commit kode murni pada `fix/feedback-scope-security-pr`. Dokumentasi dikonsolidasikan ke satu commit docs terakhir (`CHANGELOGv2.md` dan `PROGRESS2.md`); verifikasi typecheck/build/full test pasca-rebase lulus, detail §22.
-- **Action Item:** STOP menunggu konfirmasi setelah verifikasi akhir. Jangan push, merge, mengubah repo utama `/workspaces/Ruko-agent`, atau membuat tag/release. Installer tetap mem-pin `v2.1.0`.
+- **Current Step:** Empat commit kode murni hasil rebase + follow-up Windows path fix sudah diverifikasi lokal di `fix/feedback-scope-security-pr`; changelog/progress memuat catatan tindak lanjut CI. Detail §22.
+- **Action Item:** Push branch yang diminta, lalu pastikan seluruh CI untuk head terbaru hijau. Jika ada check gagal, perbaiki dan ulangi. STOP sebelum merge; jangan mengubah repo utama `/workspaces/Ruko-agent` atau membuat tag/release.
 
 ---
 
@@ -404,6 +404,13 @@
 - `npm test`: exit 0, **1373 total / 1372 pass / 0 fail / 1 skip / 69 suites / 0 cancelled / 0 todo**. Perintah persis tanpa flag tambahan, tanpa perubahan runner/timeout/reporter. Log `/home/codespace/.hermes/cache/scratch/ruko-feedback-rebase/pre-docs-3.log`.
 - `git diff --check` lulus. Source/test tree pada setiap commit baru identik dengan asal, sehingga tidak ada perubahan perilaku atau jumlah tes akibat pemisahan dokumentasi. Seluruh source/dependency/version tetap sama.
 - Pada checkpoint ini branch/HEAD/status utama serta SHA-256 diff staged/unstaged masih identik dengan sebelum rebase. Setelah satu commit docs, perintah diminta dan pemeriksaan invariant diulang; hasil pasca-commit dilaporkan pada jawaban akhir. Hanya catatan ANALISIS existing tetap untracked, tidak ikut commit.
+
+### Follow-up CI — Windows absolute path in-workspace
+- Push pertama ke PR #37 membawa head `b0b5edbd24955af98ddf19a47455a8d05d3bc558`; run `38080042867` gagal di `Test (windows-latest, Node 18.x)` dan `Test (windows-latest, Node 20.x)`. Kegagalan tunggal keduanya: `start_process always stores workspace-contained paths only after first approval` (`sessionAllowlist.test.ts`), dengan absolute temporary path `C:/Users/RUNNER~1/...` dalam workspace. Jobs Linux/macOS serta Analyze/CodeQL pass.
+- Root cause: path yang sudah absolute di-normalisasi dua kali dengan kombinasi `path.resolve(root, path.resolve(cwd, candidate))`. Resolusi absolute kini terpisah: absolute → `path.resolve(candidate)`, relative → `path.resolve(cwd, candidate)`, lalu containment dibandingkan ke workspace. Penolakan drive asing/traversal tetap diuji.
+- Commit code-only `889f4d1f9ee980e6d185edbaf8173138d90667f9` (`fix(approval): resolve absolute allowlist paths against workspace`); perubahan pada `src/core/approval/sessionAllowlist.ts` dan `src/tests/sessionAllowlist.test.ts`. Tambahan satu test absolute path in-workspace.
+- Verifikasi pasca-fix: `npm run typecheck` exit 0, `npm run build` exit 0, `npm test` exit 0 — **1374 total / 1373 pass / 0 fail / 1 skip / 69 suites / 0 cancelled / 0 todo**; `sessionAllowlist.test.js` **15/15 pass**. Log `/home/codespace/.hermes/cache/scratch/ruko-feedback-rebase/post-windows-fix-{1,2,3}.log`.
+- Run Windows yang gagal adalah run head sebelumnya dan belum membuktikan status commit fix. Periksa semua check pada head setelah push; bila ada kegagalan, jangan melaporkan tugas selesai dan jangan merge. Static-check repo utama tetap identik; tidak stage/commit catatan ANALISIS.
 
 ### Batas pekerjaan
 - Repo utama `/workspaces/Ruko-agent` tetap `main` @ `1a9c91e`; status serta hash diff staged/unstaged disimpan sebelum rebase untuk dibandingkan setelah verifikasi/commit docs. Semua checkout/rebase/edit/build/staging/commit dilakukan hanya di worktree PR; staging memakai nama file eksplisit.

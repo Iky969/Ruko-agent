@@ -31,6 +31,12 @@ Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tun
 - Semua pekerjaan hanya pada `/workspaces/Ruko-agent-pr`, branch `fix/feedback-scope-security-pr`; repo utama dan catatan `ANALISIS_*` tidak diubah. Tidak push, merge, perubahan versi/dependency, tag, atau release. Backup riwayat awal disimpan sebagai bundle lokal di scratch.
 - Verifikasi ulang setelah rebase pada Linux / Node v24.21.0 / npm 11.19.0: `npm run typecheck` exit 0, `npm run build` exit 0, dan `npm test` (tanpa perubahan runner/reporter) exit 0 — **1373 total / 1372 pass / 0 fail / 1 skip / 69 suites**, cancelled/todo 0. `git diff --check` lulus. Log: `/home/codespace/.hermes/cache/scratch/ruko-feedback-rebase/pre-docs-{1,2,3}.log`. Hasil akhir setelah commit docs dilaporkan pada jawaban; STOP tanpa push/merge.
 
+### CI follow-up — absolute path Windows
+- Pada commit `b0b5edb`, CI Windows (Node 18 dan 20) menemukan regresi nyata: path absolut in-workspace memakai path `RUNNER~1` dan ditolak allowlist; job Windows gagal sementara Linux/macOS lolos. Diagnosis berasal dari `gh run view 38080042867 --log-failed`, bukan diasumsikan flaky.
+- Fix `889f4d1` menguji containment path absolut langsung terhadap workspace; path relatif tetap diresolusikan dari cwd. Unit test tetap menggunakan temp path yang memang berada di workspace. Tidak melonggarkan penolakan path absolut di luar workspace atau drive letter asing.
+- Verifikasi setelah fix: `npm run typecheck`, `npm run build`, `npm test` exit 0; full suite **1374 total / 1373 pass / 0 fail / 1 skip / 69 suites**. Suite `sessionAllowlist.test.js` **15/15 pass**. Delta follow-up +1 test terhadap full suite sebelum fix; skip tetap Windows-only.
+- Run CI sebelumnya gagal dua job Windows; fix telah dibuat lokal dan menunggu push + CI baru. Jangan anggap hijau sampai `gh pr checks` membaca semua check sukses untuk head commit terbaru.
+
 Rilis ini belum diterbitkan. `install.sh` sengaja tetap mem-pin `v2.1.0` hingga tag immutable `v2.2.0` tersedia.
 
 ---
