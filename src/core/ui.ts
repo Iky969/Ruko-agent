@@ -512,6 +512,8 @@ export interface StatusBarInput {
   role?: string;
   /** Plan mode flag shows `⏸ PLAN` in the bar so the block state is visible. */
   planMode?: boolean;
+  /** Host-approved paths; null means no contract, undefined preserves legacy layout. */
+  scopePaths?: readonly string[] | null;
   /** YOLO mode flag shows `[YOLO]` in the bar when confirmation is bypassed. */
   yoloMode?: boolean;
   /** True while the AI is thinking/executing tools (v0.7 live input). */
@@ -563,6 +565,17 @@ export function formatProcessSummary(
   return names.length > 0 ? `${count} proc (${names.join(', ')})` : `${count} proc`;
 }
 
+/** Compact host authorization summary, kept ahead of optional status details. */
+function authorizationStatus(planMode: boolean | undefined, paths: readonly string[] | null, width: number): string {
+  const mode = planMode ? 'PLAN' : 'ACT';
+  const prefix = `${mode}${width < 24 ? ' ' : ' · '}scope: `;
+  const available = Math.max(1, width - visibleLength(prefix));
+  const suffix = paths && paths.length > 1 ? ` (+${paths.length - 1})` : '';
+  const first = paths?.length ? stripAnsi(sanitizeTerminalOutput(paths[0])).replace(/[\r\n\t]/g, ' ') : '(none)';
+  const summary = truncateVisible(first, Math.max(1, available - visibleLength(suffix))) + suffix;
+  return truncateVisible(prefix + summary, width);
+}
+
 /** `⚡ [model] | ctx 41% (12.3k/30k) · ↑3.2k ↓800 | / perintah` dark-green bar. */
 export function buildStatusBar(input: StatusBarInput): string {
   const w = input.width ?? terminalWidth();
@@ -573,6 +586,30 @@ export function buildStatusBar(input: StatusBarInput): string {
   const pct = input.budgetChars > 0
     ? Math.min(100, Math.round((input.usedChars / input.budgetChars) * 100))
     : 0;
+
+  if (input.scopePaths !== undefined) {
+    let line = authorizationStatus(input.planMode, input.scopePaths, Math.min(40, targetWidth));
+    const details = [
+      input.yoloMode ? '[YOLO]' : '',
+      `ctx ${pct}%`,
+      `[${shortModelName(input.model)}]`,
+      input.busy ? 'AI bekerja' : '',
+      input.mode ? `mode:${input.mode}` : '',
+      input.reasoning ? `reasoning:${input.reasoning}` : '',
+      input.role && input.role !== 'default' ? input.role : '',
+      input.pending ? `${input.pending} menunggu` : '',
+      formatProcessSummary(input.activeProcesses, true),
+      input.flavor && input.flavor !== 'none' ? input.flavor : '',
+      input.turn ? `↑${formatK(input.turn.promptChars)} ↓${formatK(input.turn.completionChars)}` : '',
+      input.turn?.durationMs ? formatDuration(input.turn.durationMs) : '',
+      `${formatK(input.usedChars)}/${formatK(input.budgetChars)}`,
+      '/ perintah · Ctrl+C batal',
+    ];
+    for (const detail of details) {
+      if (detail && visibleLength(`${line} · ${detail}`) <= targetWidth) line += ` · ${detail}`;
+    }
+    return onDarkGreen(line);
+  }
 
   const procCount = input.activeProcesses?.length ?? 0;
 
@@ -728,6 +765,8 @@ export interface StatusPanelInput {
   /** YOLO badge — hidden entirely when confirmation is still enforced. */
   yoloMode?: boolean;
   planMode?: boolean;
+  /** Host-approved paths; null explicitly renders scope: (none). */
+  scopePaths?: readonly string[] | null;
   busy?: boolean;
   role?: string;
   /** Last turn's char counts (rendered as token estimates). */
@@ -827,7 +866,10 @@ export function buildStatusPanel(input: StatusPanelInput): string[] {
     const sep = `├${widths.map((w) => '─'.repeat(w + 2)).join('┴')}┤`;
     const hintRow = `│ ${padVisible(truncateVisible(hint, inner - 2), inner - 2)} │`;
     const bottom = `└${'─'.repeat(inner)}┘`;
-    return [top, content, sep, hintRow, bottom].map((l) => dim(l));
+    const authorizationRow = input.scopePaths === undefined ? [] : [
+      `│ ${padVisible(authorizationStatus(input.planMode, input.scopePaths, inner - 2), inner - 2)} │`,
+    ];
+    return [top, content, sep, ...authorizationRow, hintRow, bottom].map((l) => dim(l));
   };
 
   // Widest layout first; a leaner candidate is preferred over truncating the

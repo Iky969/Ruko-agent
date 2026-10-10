@@ -672,7 +672,7 @@ export function assertNotSecurityCore(targetPath: string, workspaceRoot: string 
  * - .env, .env.*
  * - .git-credentials, .git-credentials.*
  * - id_rsa, id_ed25519, *.pem, *.key
- * - .git/config
+ * - .git/config, .git/hooks/**
  *
  * Case-insensitive, handles URL-encoding (%2e%2e%2f) and escape characters (\).
  */
@@ -794,11 +794,16 @@ export function isSensitivePath(targetPath: string, workspaceRoot: string = getW
       return true;
     }
 
-    // 6. .git/config
+    // 6. .git/config dan .git/hooks/** (hooks dapat menjalankan arbitrary code)
     if (
       relLower === '.git/config' ||
       relLower.endsWith('/.git/config') ||
-      absLower.endsWith('/.git/config')
+      absLower.endsWith('/.git/config') ||
+      relLower.startsWith('.git/hooks/') ||
+      relLower.includes('/.git/hooks/') ||
+      relLower === '.git/hooks' ||
+      absLower.includes('/.git/hooks/') ||
+      absLower.endsWith('/.git/hooks')
     ) {
       return true;
     }
@@ -1847,7 +1852,6 @@ export async function runToolCall(call: ToolCall, deps: ToolDeps = {}): Promise<
     args: call,
     hostState: deps.hostState,
     planMode: deps.planMode,
-    yoloMode: deps.config ? !deps.config.approvalEnabled : false,
     scopeManager: deps.scopeAmendmentManager,
     isInteractive: (deps.subagentDepth ?? 0) === 0 && deps.confirm !== undefined,
     workspaceRoot: ws,
@@ -2670,6 +2674,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         const ok = await deps.confirm(
           `start_process ${command}`,
           `menjalankan proses latar belakang "${command}"`,
+          { kind: 'start_process', cwd: resolvedCwd, workspaceRoot: ws, command },
         );
         if (!ok) {
           return JSON.stringify({

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { Agent } from '../agent/agent.js';
 import { buildHelpText, handleCommand, listCommands } from '../agent/commands.js';
 import { Confirmer, isYoloMode } from './approval.js';
+import { SessionApprovalAllowlist } from './approval/sessionAllowlist.js';
 import { saveConfig } from './config.js';
 import { AgentConfig } from '../types.js';
 import { Context } from './context.js';
@@ -35,7 +36,6 @@ import { appendHistory, defaultHistoryPath, loadHistory } from './history.js';
 import { getWorkspaceRoot } from '../agent/tools.js';
 import { defaultProcessManager } from '../agent/processManager.js';
 import { detectPlanOptionSelection, parseNumberedOptions } from './plan.js';
-import { saveHostState } from './state/hostState.js';
 // Fase B (v1.9.0): EnvProfile singleton (deteksi murni, Fase A).
 import { getEnvProfile } from './env.js';
 import type { SecurityPipeline } from './securityPipeline.js';
@@ -76,6 +76,7 @@ export class SystemLoop {
   private queue: string[] = [];
   /** Abort handle for the in-flight turn (v0.7 #3 "kirim sekarang"). */
   private turnAbort: AbortController | null = null;
+  private approvalAllowlist = new SessionApprovalAllowlist();
 
   constructor(
     private readonly ctx: Context,
@@ -238,13 +239,15 @@ export class SystemLoop {
   /** Dark-green status bar, refreshed before every input (§3/§8). */
   private statusBarLine(width?: number): string {
     const isYolo = !this.config.approvalEnabled || isYoloMode();
+    const host = this.agent.getHostState();
     return buildStatusBar({
       width,
       model: this.agent.llm.model,
       usedChars: this.ctx.totalChars,
       budgetChars: this.config.maxContextChars,
       role: this.config.role ?? 'default',
-      planMode: this.agent.planMode,
+      planMode: host ? host.mode === 'plan' : this.agent.planMode,
+      scopePaths: host?.approvalScope?.allowedPaths ?? null,
       yoloMode: isYolo,
       // v0.7: busy flag + queue badge live in the bar (same redraw machine).
       busy: this.busy,
@@ -273,6 +276,7 @@ export class SystemLoop {
    */
   private statusPanel(width?: number): string {
     const isYolo = !this.config.approvalEnabled || isYoloMode();
+    const host = this.agent.getHostState();
     const cols = width ?? terminalWidth();
     return renderStatusPanel({
       width: cols,
@@ -280,7 +284,8 @@ export class SystemLoop {
       usedChars: this.ctx.totalChars,
       budgetChars: this.config.maxContextChars,
       role: this.config.role ?? 'default',
-      planMode: this.agent.planMode,
+      planMode: host ? host.mode === 'plan' : this.agent.planMode,
+      scopePaths: host?.approvalScope?.allowedPaths ?? null,
       yoloMode: isYolo,
       busy: this.busy,
       pending: this.queue.length,
@@ -342,6 +347,7 @@ export class SystemLoop {
   /** Stops the loop, saves the session and closes input. */
   private stop(): void {
     this.running = false;
+    this.approvalAllowlist = new SessionApprovalAllowlist();
     this.saveSession();
     this.agent.activityTray.clear();
     this.editor?.close();
@@ -360,31 +366,42 @@ export class SystemLoop {
 
   /** Approval prompt hook (auto-denies when not a TTY). */
   private makeConfirmer(): Confirmer {
-    return async (command, reason) => {
+    return async (command, reason, request) => {
+      if (!this.editor && (!process.stdin.isTTY || !this.rl)) return false;
+      const allowlist = this.approvalAllowlist;
+      if (allowlist.allows(command, request)) return true;
+      const canRemember = allowlist.canRemember(command, request);
       const box = renderApprovalBox(command, reason);
-      const promptStr = `${APPROVAL_LABELS.prompt}[${bold(green('Y'))}/${bold(red('N'))}] `;
+      const promptStr = canRemember
+        ? `${APPROVAL_LABELS.prompt}[a/y/n] a=selalu command persis ini (sesi), y=sekali, n=tolak: `
+        : `${APPROVAL_LABELS.prompt}[${bold(green('Y'))}/${bold(red('N'))}] `;
+      const decide = (answer: string | null): boolean => {
+        // An in-flight prompt from a previous session must not grant access.
+        if (allowlist !== this.approvalAllowlist) return false;
+        const always = answer?.trim().toLowerCase() === 'a';
+        const approved = always
+          ? canRemember && allowlist.remember(command, request)
+          : answer !== null && /^(y|yes|ya)$/i.test(answer.trim());
+        process.stdout.write(`${renderApprovalDecision(approved)}${approved && always ? ' — command persis ini diizinkan selama sesi' : ''}\n`);
+        return approved;
+      };
       if (this.editor) {
         process.stdout.write(`${box}\n`);
         // feedback.txt item 2: read the y/N answer with echo suppressed — the
         // editor erases its prompt row instead of committing it to scrollback,
         // and the one-line decision below takes its place.
         const answer = await this.editor.readLine({ prompt: promptStr, hideEcho: true });
-        const approved = answer !== null && /^(y|yes|ya)$/i.test(answer.trim());
-        process.stdout.write(`${renderApprovalDecision(approved)}\n`);
-        return approved;
+        return decide(answer);
       }
-      if (!process.stdin.isTTY || !this.rl) return false;
       return new Promise((resolve) => {
         this.rl?.question(`${box}\n${promptStr}`, (answer) => {
-          const approved = /^(y|yes|ya)$/i.test(answer.trim());
           // readline echoes the typed answer on that same row: climb back over
           // it and overwrite the prompt with the decision line (feedback item 2)
           // so no `y/n` artifact is left in the terminal history.
           if (process.stdout.isTTY) {
             process.stdout.write(ERASE_PREVIOUS_LINE);
           }
-          process.stdout.write(`${renderApprovalDecision(approved)}\n`);
-          resolve(approved);
+          resolve(decide(answer));
         });
       });
     };
@@ -443,6 +460,7 @@ export class SystemLoop {
               stop: () => this.stop(),
               getSessionId: () => this.sessionId,
               setSessionId: (id) => {
+                this.approvalAllowlist = new SessionApprovalAllowlist();
                 this.sessionId = id;
               },
             },
@@ -458,12 +476,7 @@ export class SystemLoop {
             .find((m) => m.role === 'assistant');
           const planSelection = detectPlanOptionSelection(lastAssistant?.content, input);
           if (planSelection) {
-            this.agent.planMode = false;
-            const hs = this.agent.getHostState();
-            if (hs && hs.mode === 'plan') {
-              hs.mode = 'act';
-              void saveHostState(hs).catch(() => {});
-            }
+            await this.agent.setPlanMode(false, { userAuthorized: true });
             console.log(renderPlanAutoExecuteBox(planSelection.selectedNumber, planSelection.optionText));
             turnInstruction = planSelection.augmentedInstruction;
           }

@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { Confirmer, guardedExecute } from '../core/approval.js';
+import type { Confirmer } from '../core/approval.js';
 import { join, relative as relativeFromCwd, resolve as resolvePath } from 'node:path';
 import { Context } from '../core/context.js';
 import { ALLOWED_API_KEY_ENV_VARS, isHostnameOrSubdomain, isPrivateOrLocalHost, saveConfig } from '../core/config.js';
@@ -8,12 +8,11 @@ import { bold, cyan, dim, formatDuration, formatK, green, renderBox, terminalWid
 import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
-import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot, safeExecPrecheck } from './tools.js';
+import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot, runToolCall } from './tools.js';
 import { AgentConfig, AgentMode, createDefaultSessionState, DEFAULT_CONFIG, ProviderProfile, ReasoningLevel, SessionState, UiMode } from '../types.js';
 import { ConnectionResult, createProvider, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
-import { clearFileReadCache } from './filetools.js';
-import { saveHostState } from '../core/state/hostState.js';
+
 import { scanSkills } from '../core/skills.js';
 import type { SelectorOptions } from '../core/tui.js';
 import type { Agent } from './agent.js';
@@ -329,34 +328,62 @@ const COMMANDS: CommandDef[] = [
     help: 'Mode rencana: hanya baca & usulkan, eksekusi diblokir di kode.',
     hint: 'on | off',
     run: async (args, env) => {
+      const arg = args.trim().toLowerCase();
+      if (arg !== '' && arg !== 'on' && arg !== 'off') {
+        console.log('Error: gunakan /plan [on|off] atau /plan tanpa argumen untuk toggle.');
+        return;
+      }
       if (!env.agent) {
         console.log('Plan mode hanya tersedia di dalam REPL.');
         return;
       }
-      const arg = args.trim().toLowerCase();
       const on = arg === 'on' || (arg === '' && !env.agent.planMode);
-      env.agent.planMode = on;
-
-      // WP-04 (v2.1.0): sinkronkan hostState.mode secara langsung dan PERSIST
-      // atomik. Saat plan mode dinyalakan, cakupan izin sementara dikosongkan
-      // sehingga tidak ada mutasi otomatis yang lolos dari rencana sebelumnya.
-      const hostState = env.agent.getHostState();
-      if (hostState) {
-        hostState.mode = on ? 'plan' : 'act';
-        if (on) {
-          hostState.approvalScope = null;
-        }
-        try {
-          await saveHostState(hostState);
-        } catch (err) {
-          console.log(dim(`(gagal menyimpan state mode plan: ${err instanceof Error ? err.message : String(err)})`));
-        }
-      }
+      await env.agent.setPlanMode(on, { userAuthorized: true });
       console.log(
         on
           ? yellow('PLAN MODE aktif — tool eksekusi/write diblok; model hanya boleh membaca & menyusun langkah. /plan off untuk lanjut.')
           : green('Plan mode dinonaktifkan — eksekusi normal.'),
       );
+    },
+  },
+  {
+    name: 'scope',
+    category: 'Operasi & Eksekusi',
+    help: 'Kontrak path mutasi sesi.',
+    hint: 'allow <path> | status | reset',
+    run: async (args, env) => {
+      const manager = env.agent?.getScopeAmendmentManager();
+      if (!manager) {
+        console.log('Scope hanya tersedia di dalam REPL dengan pipeline keamanan aktif.');
+        return;
+      }
+      const match = args.trim().match(/^(allow|status|reset)(?:\s+(.+))?$/i);
+      const action = args.trim() === '' ? 'status' : match?.[1].toLowerCase();
+      const targetPath = match?.[2]?.trim();
+      if (!action || (action === 'allow' ? !targetPath : targetPath !== undefined)) {
+        console.log('Gunakan: /scope allow <path> | /scope status | /scope reset');
+        return;
+      }
+      if (action === 'status') {
+        const state = manager.getState();
+        console.log(renderBox('Scope', [
+          `Mode: ${state.mode.toUpperCase()}`,
+          `Scope: ${state.approvalScope?.allowedPaths.join(', ') || '(none)'}`,
+          'Atur dengan /scope allow <path>; /scope reset untuk mencabut izin.',
+        ]));
+        return;
+      }
+      try {
+        if (action === 'allow') {
+          await manager.allowPath(targetPath!);
+          console.log(green(`Scope disetujui: ${targetPath}. Plan Mode tidak berubah.`));
+        } else {
+          await manager.resetScope();
+          console.log(yellow('Scope direset: (none). Mutasi file diblok sampai /scope allow <path> atau /plan off.'));
+        }
+      } catch (err) {
+        console.log(yellow(`Scope tidak diubah: ${err instanceof Error ? err.message : String(err)}`));
+      }
     },
   },
   {
@@ -657,20 +684,15 @@ const COMMANDS: CommandDef[] = [
         console.log('Usage: /exec <command>');
         return;
       }
-      // WP-03: jalur /exec memakai pemeriksaan pra-eksekusi bersama dengan tool
-      // exec dan pesan perintah manual `run` (sebelumnya /exec tanpa guard).
-      const precheck = safeExecPrecheck(args, getWorkspaceRoot());
-      if (precheck.blocked) {
-        console.log(yellow(`⚠ ${precheck.message}`));
+      const result = JSON.parse(await runToolCall({ tool: 'exec', command: args }, {
+        config: env.config, confirm: env.confirm, llmProvider: env.llm,
+        workspaceRoot: getWorkspaceRoot(), hostState: env.agent?.getHostState(),
+        planMode: env.agent?.planMode, scopeAmendmentManager: env.agent?.getScopeAmendmentManager(),
+      }));
+      if (result.error) {
+        console.log(result.error);
         return;
       }
-      const result = await guardedExecute(
-        args,
-        { timeoutMs: env.config.execTimeoutMs, confirm: env.confirm, llmProvider: env.llm },
-        env.config,
-      );
-      // WP-03: shell dapat mengubah berkas mana pun → cache baca dibersihkan.
-      clearFileReadCache();
       console.log(result.output || '(no output)');
       console.log(
         `\n[exit code: ${result.code ?? 'killed'} | ${result.durationMs}ms` +

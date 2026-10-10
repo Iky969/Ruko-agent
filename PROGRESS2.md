@@ -51,8 +51,8 @@
 ---
 
 ## 3. Active Task / Next Focus
-- **Current Step:** Sisa Audit Remediasi (Section 15: UI Streaming Glitch, Subprocess Env Harmonization, E2E CLI Integration Harness) — [status: SELESAI-nunggu review]
-- **Action Item:** Menunggu review persetujuan untuk seluruh perbaikan Fase C, Section 14, dan Section 15 sebelum commit dan tagging rilis.
+- **Current Step:** Commit rebase, Windows short-path fix, dan klarifikasi review sudah didorong ke PR #37. Seluruh status checks PR pada head terakhir lulus, detail §22.
+- **Action Item:** PR #37 tetap open; jangan merge tanpa instruksi eksplisit. Repo utama `/workspaces/Ruko-agent` tidak diubah. Workflow Advanced Security AI terpisah gagal karena kuota bulanan, bukan hasil finding.
 
 ---
 
@@ -269,5 +269,153 @@
 - **Review (disetujui pengguna):** kebijakan konservatif tolak semua `nlink > 1` disetujui. Strip `PYTHONPATH`/`PERL5LIB`/`RUBYLIB` dari `exec` user disetujui (konsisten dengan `NODE_PATH`). Seluruh test hardlink (a) **dipertahankan**: test tersebut lulus di bawah kebijakan konservatif dan menjadi regression coverage fix ini. Yang "mustahil lulus" hanya varian spesifikasi literal (AND `st_dev`), dan varian itu tidak diimplementasikan.
 - **Status rilis:** di-commit & di-push ke `main` (commit `9615be5`). Issue #31 diberi comment ringkasan fix, 3 item sisa (SSRF edge-case/redirect test, Guardian self-justifying injection, SSE/TUI quality) resmi dipindahkan ke issue baru [#32](https://github.com/Iky969/Ruko-agent/issues/32), dan issue #31 telah ditutup.
 - **Next step:** Follow-up 3 item sisa di issue #32.
+
+## 17. Feedback v2 — PR-A Batch 1: Bootstrap Scope ACT & Slash `/scope` [status: SELESAI-terverifikasi, STOP setelah 2 task]
+- **Tanggal / baseline:** 2026-10-10; checkout `main` @ `d09479f`. Laporan feedback merujuk tip berbeda; pada checkout ini `planMode` masih field biasa dan `/plan` belum menyinkronkan mode host, sehingga repro awal gagal dengan host tetap `plan`.
+- **Task 1 — SELESAI:** seed `approvalScope` di semua jalur runtime menuju ACT (`/plan off`/toggle, auto-off pilihan rencana di `Agent` dan `SystemLoop`). `Agent.setPlanMode()` menjadi jalur transisi bersama; seed default `allowedPaths: ['.']` hanya bila kontrak belum ada, memakai hash rencana aktif atau hash kanonis serta correlation ID baru. Persist atomik ditunggu sebelum melanjutkan tool/turn; kegagalan persist tidak membuka ACT. Kontrak sempit yang telah disetujui tidak diperluas.
+- **Task 2 — SELESAI:** `/scope allow <path>`, `/scope status` (juga `/scope`), dan `/scope reset`, terdaftar di help/autocomplete. Allow memvalidasi containment leksikal dan fisik termasuk subtree baru lewat ancestor yang eksis; reset mencabut seluruh kontrak, bukan mengganti mode; status read-only. Perintah tidak menyentuh kredensial/config atau melewati gate Plan Mode.
+- **Perbaikan pendukung dalam scope kedua task:**
+  - `ScopeAmendmentManager` menggunakan lock sesi yang sudah dimiliki pipeline (validasi nonce) untuk menghindari deadlock acquire ulang; pemanggilan standalone tetap mengambil FileLock sendiri.
+  - Pembaruan/kontraksi/reset menjaga identitas objek HostState yang dibagi pipeline, Agent, dan subagent, sehingga pencabutan setelah amandemen tidak meninggalkan izin usang.
+  - Snapshot persist gagal tidak memperluas izin live; hash rencana dan mode direvalidasi sebelum menyimpan persetujuan hasil prompt.
+- **Kebijakan A+C:** input `/plan off`/toggle atau pemilihan rencana bernomor merupakan persetujuan eksplisit masuk ACT, termasuk non-TTY. Startup/resume tetap PLAN; `/plan on` mencabut scope. Mutasi tanpa kontrak, di luar workspace/subtree (non-TTY), atau lewat symlink escape tetap fail-closed. Scope default tidak memberi izin path sensitif/security core dan tidak mematikan approval shell.
+- **File:** `src/agent/agent.ts`, `src/agent/commands.ts`, `src/core/loop.ts`, `src/core/approval/scopeAmendment.ts`, `src/core/securityPipeline.ts`; suite baru `src/tests/feedback_scope_bootstrap.test.ts`.
+- **Verifikasi aktual (Linux / Node v24.21.0):**
+  - TDD repro `/plan off`, auto-off Agent/REPL, `/scope allow`/reset, subtree baru, persist gagal, serta deadlock lock sesi: diamati gagal sebelum perbaikan lalu lulus.
+  - Suite baru: **17 tests / 17 pass / 0 fail**, termasuk CLI biner `dist/index.js`, write nyata, resume, PLAN + YOLO, scope sempit, traversal/symlink escape, lock hilang, dan hash rencana berubah.
+  - Baseline `npm run test`: **1251 tests / 1250 pass / 0 fail / 1 skip / 67 suites**.
+  - Sesudah `npm run test`: **1268 tests / 1267 pass / 0 fail / 1 skip / 68 suites**. Delta **+17 tests / +1 suite**; zero runtime dependency guard tetap lulus.
+  - `npm run typecheck`, `npm run build`, dan `git diff --check`: lulus.
+- **Dokumentasi:** tepat dua checkbox implementasi pertama PR-A di `feedback.txt` ditandai selesai beserta checkpoint; README menjelaskan bootstrap/default/narrow/reset scope; `CHANGELOGSv2.md` dibuat sesuai nama yang diminta pengguna (berbeda dari arsip `CHANGELOGv2.md`, yang tidak diubah).
+- **Catatan Git:** `feedback.txt` memang di-ignore oleh `.gitignore:14`; penandaan task tersimpan lokal dan tidak muncul pada `git diff`. Aturan ignore tidak diubah. Review independen belum dilakukan karena tidak ada tool delegasi atau CLI reviewer terpasang; verifikasi di atas berupa static/self-review dan eksekusi test.
+- **Batas batch / next step:** STOP setelah dua task implementasi ini. Checklist penerimaan PR-A yang tersisa belum ditutup sebagai task batch; PR-B (termasuk validasi argumen `/plan`), PR-C (approval/YOLO), PR-D, dan PR-E tidak dikerjakan. Commit lokal atas permintaan pengguna; belum push/tagging, menunggu instruksi berikutnya.
+
+## 18. Feedback v2 — PR-A Batch 2: Task 3–4, Non-TTY Fail-Closed & Write Workspace [status: SELESAI-terverifikasi, STOP setelah 2 task]
+- **Tanggal / baseline:** 2026-10-10; checkout `main` @ `1502dd7`, clean saat mulai. Ruang lingkup hanya checkbox ketiga dan keempat PR-A di `feedback.txt`; tidak melanjutkan task 5–6 atau PR lain.
+- **Task 3 — SELESAI: fail-closed seed implisit pada non-TTY.**
+  - Investigasi menunjukkan `Agent.setPlanMode(false)` sebelumnya dapat membuat kontrak workspace tanpa penanda persetujuan user. Test reproduksi gagal dengan `Missing expected rejection` sebelum perbaikan.
+  - `ScopeAmendmentManager.seedWorkspaceScope()` sekarang default-deny dan mensyaratkan boolean `true` dari host. `Agent.setPlanMode()` menerima opsi `userAuthorized`; hanya handler `/plan` serta kedua jalur pilihan rencana bernomor yang memasok penanda tersebut. Ini kebijakan A+C yang sama, tanpa toggle/config baru.
+  - TTY, YOLO, keberadaan confirmer, dan field `userAuthorized` dalam argumen tool model tidak menggantikan otorisasi host. Seed tanpa persetujuan melempar `SCOPE_BOOTSTRAP_DENIED` sebelum perubahan scope atau persist; mode dan berkas state tetap sama.
+  - Kontrak sempit yang sudah disetujui tetap dapat dipakai tanpa seed baru. Setelah `/scope reset`, mutasi non-TTY dengan scope null tetap ditolak tanpa membuat file. Mutasi luar subtree non-TTY tidak membaca stdin, tidak menampilkan prompt, tidak memanggil confirmer, dan tidak memperluas izin; write dalam subtree sah tetap berhasil.
+- **Task 4 — SELESAI: sesi baru → `/plan off` → write workspace.**
+  - Test integrasi command/pipeline yang sudah ada dipertahankan; ditambah E2E `dist/index.js` dengan stdin pipe, workspace/HOME/state test terisolasi, dan server provider OpenAI-compatible fixture lokal pada port ephemeral. Tidak menghubungi API eksternal atau menggunakan kredensial riil.
+  - Test menunggu readiness CLI (bukan blind sleep), memastikan startup PLAN + scope null, lalu mengirim `/plan off` dan instruksi write. Server menerima request hanya setelah state ACT + scope `.` tersimpan; tool `write_file` diproses oleh Agent/dispatcher yang sebenarnya.
+  - Hasil tool yang dikirim balik ke provider diperiksa, file `cli.txt` dibaca ulang dan cocok dengan isi yang diminta, final scope disk tetap `.`, tidak ada `SECURITY_DENIED`/prompt amandemen, dan proses keluar dengan kode 0. Write diuji pada file workspace, bukan fitur pembuatan parent directory baru.
+- **File kode/test yang berubah:** `src/core/approval/scopeAmendment.ts`, `src/agent/agent.ts`, `src/agent/commands.ts`, `src/core/loop.ts`, dan `src/tests/feedback_scope_bootstrap.test.ts`.
+- **Verifikasi aktual (Linux / Node v24.21.0 / npm 11.19.0):**
+  - Suite scope: **22 tests / 22 pass / 0 fail**; sebelumnya 17 tests. Delta **+5 tests** (4 fail-closed + 1 E2E CLI).
+  - Baseline di arsip HEAD terisolasi, tanpa stash/reset checkout user: `npm run test -- --test-reporter=tap` → **1268 tests / 1267 pass / 0 fail / 1 skip / 68 suites**.
+  - Final perintah yang sama → **1273 tests / 1272 pass / 0 fail / 1 skip / 68 suites**. Delta **+5 tests / +0 suite**; angka diparse dari output runner dan total direkonsiliasi. Skip existing khusus path Windows, bukan test baru.
+  - `npm run typecheck`, `npm run build`, dan `git diff --check`: lulus. Test existing Plan Mode, resume, auto-off Agent/REPL, fail-closed persist, symlink/traversal, subagent, serta guard zero runtime dependency lulus sebagai regresi; checkbox task 5–6 tetap terbuka sesuai batas batch.
+  - Percobaan pertama `npm run test` dengan reporter default terhenti watchdog idle 60 detik sebelum menghasilkan total. Run penuh baseline/final di atas memakai reporter TAP yang didukung runner; runner dan timeout tidak diubah. Run TAP awal yang overlap dengan penambahan test RED tidak dipakai sebagai baseline; baseline dihitung ulang dari HEAD terisolasi.
+  - Static/self-review: scan added-lines menandai credential placeholder fixture, bukan secret riil; tidak ditemukan tambahan eval/shell injection atau import package runtime. Review independen tidak dilakukan: tool delegasi dan CLI `codex`/`claude`/`opencode` tidak tersedia.
+  - Log baseline: `/home/codespace/.hermes/cache/scratch/ruko-feedback-batch2-head-baseline.log`; log final: `/home/codespace/.hermes/cache/scratch/ruko-feedback-batch2-final.log`.
+- **Dokumentasi / Git:** checkbox task 3–4 dan checkpoint batch 2 di `feedback.txt` diperbarui; berkas tetap di-ignore oleh `.gitignore:14` (perubahan lokal). Fokus aktif di §3 dan catatan ini diperbarui; `CHANGELOGSv2.md` ditambah batch 2. Arsip `CHANGELOGv2.md`, README, package/lockfile, dan aturan ignore tidak diubah.
+- **Batas batch / next step:** STOP. Task 5–6 PR-A dan semua PR-B/PR-C/PR-D/PR-E tetap backlog, termasuk validasi argumen `/plan`, messaging error, status bar, approval UX, dan kebijakan persist YOLO. Tidak staging/commit/push/tag/release; menunggu instruksi berikutnya.
+
+## 19. Feedback v2 — Batch 3: Task 5–8 & Audit Referensi Mode [status: SELESAI-terverifikasi, STOP untuk review]
+- **Tanggal / baseline:** 2026-10-10; `main` @ `1502dd7`, tujuh file staged dari batch 2 saat mulai. Baseline diambil dari working tree aktual sebelum edit (bukan angka HEAD/arsip); index awal disimpan dan dibandingkan byte-for-byte, tetap tidak berubah.
+- **Task 5 — PLAN:** regresi `/plan on` memakai payload valid untuk seluruh 11 tool mutasi/subprocess, bukan payload kurang lengkap. Verifikasi file existing tidak berubah, tidak ada file/metadata baru, state disk tetap sama, dan confirmer tidak dipanggil. Tambahan test memastikan scope yang sudah disetujui saat PLAN serta fallback `planMode: false` tidak membypass mode host, baik approval aktif maupun nonaktif pada fixture; read-only tetap berjalan.
+- **Task 6 — Zero runtime dependency:** empat guard manifest/lockfile/import source/import hasil build lulus; `npm ls --omit=dev --all` menghasilkan `(empty)`. Package/lockfile tidak diedit; tidak ada dependency baru.
+- **Task 7 — Pesan scope per penyebab:** `ScopeAmendmentManager.evaluateMutationDecision()` mengembalikan keputusan beserta kode dan alasan; `evaluateMutationTarget()` tetap boolean kompatibel. Dispatcher meneruskan pesan spesifik: scope kosong, plan hash berubah, luar workspace, containment fisik gagal, luar subtree, prompt tidak disetujui, circuit breaker, atau kembali PLAN saat prompt. Pesan menyertakan mode/scope/target dan pemulihan tanpa menyarankan `/mode`, `/role`, atau YOLO sebagai bypass. Pemulihan plan berubah memakai `/scope reset` lalu `/scope allow <path>` dan diuji menghasilkan kontrak hash baru. Gate/approval/persist policy tidak dilonggarkan.
+- **Task 8 — Validasi `/plan`:** argumen selain `on`, `off`, atau kosong ditolak dengan usage sebelum memanggil transisi. Test pada PLAN dan ACT memeriksa tidak ada perubahan mode, identitas scope, config, state disk, atau pemanggilan setter. Toggle kosong dan normalisasi huruf/spasi existing tetap diuji.
+- **Tambahan `halo.txt` — mode:** `roles.ts` sudah berisi `/mode` generik pada awal sesi, sehingga tidak diubah. API `/settings mode` masih mengatur UiMode `beginner|pro`; AgentMode `default|research|code|build` memakai `/mode` dan `sessionState`. Test diperkuat dengan `/mode code`, output sukses, state sesi, serta tidak ada persist config; cakupan UiMode tetap diuji dari nilai awal berbeda plus patch config aktual, agar tidak lulus hanya karena default `pro`. Ditambah regresi saran `/mode` pada prompt beginner. Scan seluruh `src/` untuk `(?i)\bmode\s+(pro|beginner)\b` tidak menemukan literal lama.
+- **File utama:** `src/core/approval/scopeAmendment.ts`, `src/core/dispatcher/dispatcherGate.ts`, `src/agent/commands.ts`; test di `feedback_scope_bootstrap.test.ts`, `thought_and_feedback_bugs.test.ts`, dan `security_pipeline_wiring.test.ts`. Dokumentasi: empat checkbox + checkpoint `feedback.txt`, bagian ini/fokus aktif, `CHANGELOGSv2.md` batch 3.
+- **Verifikasi aktual (Linux / Node v24.21.0 / npm 11.19.0):**
+  - Baseline `npm run test -- --test-reporter=tap`: **1273 tests / 1272 pass / 0 fail / 1 skip / 68 suites**.
+  - Final perintah yang sama: **1283 tests / 1282 pass / 0 fail / 1 skip / 68 suites**. Delta **+10 tests / +0 suite**: 9 scope/plan dan 1 prompt. Satu test settings di-rename/diperkuat, tidak ada test dihapus. Rekonsiliasi menghitung record test TAP dan summary, bukan hanya jumlah baris `ok` yang mencakup suite. Skip tetap test drive-letter/UNC khusus Windows.
+  - Full run pertama: 1283 tests / 1281 pass / 1 fail / 1 skip. Kegagalan adalah assertion pesan generik di wiring test, bukan kebocoran izin; diganti pemeriksaan kode `SCOPE_OUTSIDE`, scope/target/hint, dan kontrak tetap sempit. Full run ulang lulus seperti di atas; tidak men-skip test untuk menyembunyikan kegagalan.
+  - Suite terkait task 7: **57/57 pass**; suite relevan final (scope, wiring, thought/settings, AgentMode, dependency guard): **81/81 pass**. `npm run typecheck`, `npm run build`, `git diff --check`: lulus. Test sebab penolakan dan argumen invalid diamati RED sebelum implementasi, lalu GREEN.
+  - Log: `/home/codespace/.hermes/cache/scratch/ruko-feedback-batch3/baseline.tap`, `final.tap` (run gagal), `final-green.tap`, `relevant.tap`.
+  - Static/self-review dilakukan; scan added-lines tidak menemukan assignment credential/eval/shell injection baru. Review independen belum dilakukan: tool delegasi dan CLI reviewer (`codex`/`claude`/`opencode`) tidak tersedia.
+- **Batas / Git:** task 5→8 selesai berurutan; task 9–12 dan task berikutnya tetap terbuka. Tidak menyalakan Ruko YOLO runtime atau mengubah approval global; approval nonaktif hanya fixture regresi. `dist/` hanya diperbarui otomatis lewat build. `feedback.txt` tetap di-ignore dan diperbarui lokal; tidak mengubah aturan ignore. Tidak staging/commit/push/tag/release; STOP menunggu review pengguna.
+
+## 20. Feedback v2 — Batch 4: Task 9–12 [status: SELESAI-terverifikasi, STOP untuk review]
+- **Task 9 — simpan state:** `/plan` dan kedua jalur auto-off tetap berbagi `Agent.setPlanMode()`; bukti menghitung tepat satu persist atomik per transisi. Kegagalan `saveHostState` kini menyertakan kode `HOST_STATE_SAVE_FAILED`, operasi, arah PLAN/ACT, sesi, kode I/O, dan sebab; rollback state/mode tetap berjalan. REPL melaporkan sekali, pemanggil Agent langsung menerima error dengan `cause`. Test ENOSPC tiga jalur memeriksa state disk/live tetap PLAN, tidak ada pemanggilan provider/turn lanjutan.
+- **Task 10 — status:** `SystemLoop` memberikan PLAN/ACT dari HostState otoritatif (field Agent hanya fallback saat HostState absen) serta scope paths atau `(none)` ke status line/panel. Status line memprioritaskan status otorisasi sebelum detail opsional; panel menambahkan baris status khusus, semua baris tetap clamped. Test menelusuri allow/off/reset/on dan host state vs flag Agent stale; regresi UI mencakup 24–120 kolom, scope kosong/satu/banyak/path panjang Unicode, serta sanitasi karakter kontrol.
+- **Task 11 — `yoloMode`:** field `DispatcherGateOptions.yoloMode` kini deprecated/ignored untuk kompatibilitas. `runToolCall` tidak lagi membaca `config.approvalEnabled` untuk mengisinya. Getter ber-throw membuktikan gate tidak membaca opsi mati; test PLAN, ACT dan read-only.
+- **Task 12 — approval sesi `[a/y/n]`:** `a` menyimpan command exact-match hanya untuk loop/session aktif; `y` mengizinkan sekali, `n`/kosong/invalid/EOF menolak. Grant diikat pada jenis operasi (`exec`/`start_process`), teks command tepat, dan `realpath(cwd)`; tidak memakai prefix dan tidak mengubah `approvalAllowlist` config.
+  - Tombol `a` hanya tersedia untuk command sederhana non-blocked, non-high-risk dan bukan direct `git push`, command destruktif, interpreter/dynamic shell, shell operator/substitusi, variable expansion, atau environment interpolation. `BLOCKED_PATTERNS` tetap selalu menang dan tidak bisa diingat.
+  - Grant disimpan di RAM `SystemLoop`, dicabut `/new`, penggantian sesi, dan stop. Callback prompt lama memeriksa epoch allowlist sehingga jawaban `a` setelah sesi berubah ditolak. Non-TTY tidak mengizinkan persetujuan, bahkan jika command sebelumnya pernah diingat.
+  - `/exec`, instruksi manual `run`, `exec` melalui agent, dan `start_process` kini melewati gate/path-security yang sama sebelum guarded execution. Regresi membuktikan izin sesi tidak melewati PLAN atau scope null; config allowlist yang telah ada tetap dihormati guardedExecute.
+- **File utama:** `src/agent/agent.ts`, `src/agent/commands.ts`, `src/agent/tools.ts`, `src/core/approval.ts`, `src/core/approval/sessionAllowlist.ts` (baru), `src/core/loop.ts`, `src/core/ui.ts`, `src/core/dispatcher/dispatcherGate.ts`; test baru `src/tests/feedback_approval_session.test.ts`, `src/tests/feedback_status_scope.test.ts`, serta regresi `feedback_scope_bootstrap.test.ts`/`fase2_dispatcherGate.test.ts`.
+- **Verifikasi actual (Linux / Node v24.21.0 / npm 11.19.0):**
+  - Baseline setelah commit `24598da`: `npm run test -- --test-reporter=tap` — **1283 tests / 1282 pass / 0 fail / 1 skip / 68 suites**.
+  - Final perintah yang sama — **1303 tests / 1302 pass / 0 fail / 1 skip / 68 suites**. Delta **+20 test / +0 suite**; TAP leaf records direkonsiliasi terhadap ringkasan total, tak ada test dihapus/rename. Skip existing untuk path Windows.
+  - Suite terkait final: **241/241 pass**. `npm run typecheck`, build di `npm run test`, `git diff --check`: lulus. Empat guard zero-runtime-dependency terpilih tetap lulus; `npm ls --omit=dev --all` menghasilkan `(empty)`.
+  - Satu full run awal selama iterasi berakhir saat fixture `start_process git --version` diklasifikasikan non-risk dan tak menampilkan opsi `a`; fixture diperbaiki menjadi `echo git push`, yang benar-benar memicu approval gate. Full run akhir lulus semua. Tak ada blocker tersembunyi atau test di-skip untuk menutupi kegagalan.
+  - Static self-review: tak ada assignment credential literal, `eval()` atau `shell=True` pada tambahan. Review independen tidak dilakukan karena reviewer CLI/delegasi tidak tersedia.
+- **Dokumentasi/Git:** task 9–12 dicentang dan checkpoint ditambahkan lokal di `feedback.txt` (tetap ignored oleh `.gitignore:14`). §3/§20 dan `CHANGELOGSv2.md` diperbarui. Baseline commit `24598da` tetap lokal; batch 4 belum di-stage/commit. Tidak push/tag/release. Task PR-B lain seperti `/config approval` dan kebijakan persist/banner YOLO tetap terbuka; task 9–12 selesai dan sesi berhenti untuk review.
+
+## 21. Persiapan Pull Request — scope, security, dokumentasi, dan versi 2.2.0
+- Perubahan lokal `1502dd7`, `24598da`, dan `1a9c91e` dipertahankan pada branch fitur, lalu direkonsiliasi dengan `origin/main` terbaru (`c73bff6`). Konflik API scope diselesaikan dengan mempertahankan validasi lock pipeline dan state-mutator serial; mutasi scope menolak bila pipeline kehilangan nonce lock.
+- Ditambahkan `docs/CONTRIBUTING.md` dan tautan README. Versi package/lockfile, badge README, dan User-Agent diselaraskan ke `2.2.0` sebagai versi source belum dirilis. Installer sengaja tetap pada `v2.1.0`; pemeriksaan GitHub memastikan tag/release `v2.2.0` belum tersedia.
+- `RUKO-UX-BUG-APPROVAL-REPORT-v2.md` sudah dihapus pada `origin/main` commit `c73bff6`; file tersebut tidak ada di branch PR maupun remote main. `halo.txt` tetap lokal/ignored dan tidak masuk PR.
+- Branch `fix/feedback-scope-security-pr` disiapkan untuk PR ke `main`; belum ada PR/push pada saat catatan ini ditulis. Tidak ada force-push atau commit langsung ke `main`. Periksa hasil CI/review sebelum merge.
+- Verifikasi pasca-integrasi: `npm run typecheck` lulus; `npm run test` lulus **1336 tests / 1335 pass / 0 fail / 1 skip**, Node 24.21.0 Linux; `git diff --check` lulus. CI lintas OS tetap menunggu GitHub.
+- Verifikasi tambahan setelah metadata versi 2.2.0: `npm run typecheck`, `npm run build`, `npm test`, `npm run test:e2e`, `npm run test:urls`, `npm ls --omit=dev --all`, dan `git diff --check` lulus. CLI build menampilkan `ruko v2.2.0`; suite penuh **1336 / 1335 pass / 0 fail / 1 skip**. Skip file-URL khusus Windows pada host Linux.
+- Tag `v2.2.0` dan GitHub release belum ada; commit versi menyatakan Unreleased dan `install.sh` tetap mem-pin `v2.1.0`. Tidak membuat tag/release dan tidak mengubah kebijakan installer.
+
+## 22. Feedback PR — empat commit kode dan satu commit dokumentasi
+
+### Audit dokumentasi dan rebase interaktif
+- **Worktree / branch:** `/workspaces/Ruko-agent-pr`, `fix/feedback-scope-security-pr`. HEAD sebelum rebase `844816a`; parent empat commit `338f57c`. Hanya `ANALISIS_MOVE_FILE_FIX.md` yang untracked saat rebase dimulai; file itu tidak diubah atau dimasukkan ke commit.
+- Audit `git show --name-only` menemukan keempat commit lama mengubah `CHANGELOGSv2.md` dan `PROGRESS2.md`, bukan `CHANGELOGv2.md`. Koreksi atas permintaan pengguna: dokumentasi dikeluarkan dari commit kode lewat `git rebase --interactive 338f57c`, lalu catatan empat item digabung ke satu commit docs di akhir dengan nama file yang tepat: `CHANGELOGv2.md` dan `PROGRESS2.md`.
+- Mapping commit lama → baru:
+  - `39115ab` → `f0c92ae9480d641a3527173b4311274ae9e1be31` — `fix(security): check both sides of move_file and block .git/hooks mutations`.
+  - `8091d4f` → `6f95536ffe62ea0d7aaa37bf7979e82151bf358d` — `fix(approval): reject out-of-workspace paths in session allowlist`.
+  - `48c83f1` → `40e8fc0c706598a6fc03eba726bc546ebc019ec4` — `fix(approval): make amendment circuit breaker permanent per session`.
+  - `844816a` → `76ebe1e087923131e6ad7896fd23e083c45a3b72` — `fix(approval): align TTY fallback with runtime pipeline`.
+- Konflik rebase hanya pada dua file dokumentasi yang sengaja dikeluarkan; tidak ada konflik kode. Perbandingan `git ls-tree -r <commit> src` membuktikan source/test tree tiap commit baru identik dengan commit asalnya. Empat commit baru hanya memuat path `src/`; tidak ada dokumentasi atau catatan lain.
+- `CHANGELOGSv2.md` dipertahankan identik dengan baseline `338f57c`, sehingga batch sebelum empat item tetap utuh. Riwayat awal dan catatan sebelum rebase disimpan pada `/home/codespace/.hermes/cache/scratch/ruko-feedback-rebase/before-rebase.bundle`, `progress-before.md`, dan `docs-before.patch`.
+
+### Item 1 — move_file dan guard .git/hooks [SELESAI]
+- Commit kode `f0c92ae`: mempertahankan fix awal unstaged, mengevaluasi sumber dan tujuan dengan manager keputusan scope yang sama sebelum I/O/approval. Prioritas alias/nullish disamakan dengan handler (`source/from/path` dan `target/to/destination`) untuk menutup celah decoy destination.
+- `isSensitivePath` melindungi direktori `.git/hooks` beserta turunannya, termasuk absolut/nested/casing/backslash/encoding; `hooks-backup` tetap normal.
+- File kode/test: `src/agent/tools.ts`, `src/core/dispatcher/dispatcherGate.ts`, `src/tests/fase2_dispatcherGate_moveFile.test.ts`.
+- **12 tests** terhadap HEAD awal: 8 tes existing unstaged + 4 tambahan. Runtime denial memastikan sumber tetap ada/isi tetap sama, tujuan/undo tidak dibuat, serta move dalam scope dengan approval nyata berhasil. Regresi alias RED→GREEN; suite terkait checkpoint **51 total / 51 pass / 0 fail / 0 skip**, build/typecheck/diff-check lulus.
+
+### Item 2 — session allowlist workspace boundary [SELESAI]
+- Commit kode `6f95536`: path command diresolusikan dengan `path.resolve`/`path.relative` terhadap cwd dan workspace host. Traversal, absolut luar workspace, separator backslash, foreign Windows drives/drive-relative, serta opsi `--file=...`/`-I/...` ditolak untuk reusable grant; grammar backslash/dynamic shell existing tetap default-deny.
+- Handler `start_process` memasok workspace root dari host, bukan argumen model. Grant exact-command mengikat jenis operasi, cwd fisik dan root fisik. Nested cwd dapat memakai parent relatif yang masih dalam workspace; caller legacy tanpa root memakai cwd sebagai boundary.
+- File kode/test: `src/core/approval/sessionAllowlist.ts`, `src/agent/tools.ts`, `src/tests/sessionAllowlist.test.ts`, `src/tests/feedback_approval_session.test.ts`.
+- **15 tests**: 14 allowlist unit/runtime + 1 confirmer, memeriksa path luar tidak tersimpan/reused, setiap percobaan masih memerlukan keputusan, path lokal baru diingat setelah persetujuan pertama, dan binding host/root/cwd. Command luar workspace di fixture tidak dieksekusi. RED→GREEN; checkpoint suite **93 total / 93 pass / 0 fail / 0 skip**, build/typecheck/diff-check lulus. PLAN/scope/blocked/high-risk, one-shot dan pencabutan sesi tidak dilonggarkan.
+
+### Item 3 — circuit breaker permanen selama sesi [SELESAI]
+- Commit kode `40e8fc0`: setelah tiga penolakan per canonical path, path diblokir permanen selama sesi aktif. Approval B tidak mereset counter A; allow/reset/seed/kontraksi scope dan pemberian subtree induk tidak membuka kembali A.
+- Pemeriksaan breaker mendahului subtree auto-approve dan direvalidasi setelah prompt, sehingga approval tertunda yang datang setelah rejection ketiga tetap ditolak. Counter in-memory per manager sesi aktif, tidak dipersist lintas restart/sesi; sesi baru memiliki counter kosong. Pesan denial tidak menyarankan YOLO/reset sebagai bypass.
+- File kode/test: `src/core/approval/scopeAmendment.ts`, `src/tests/fase2_scopeAmendment.test.ts`.
+- **7 tests tambahan**, dua tes reset lama di-rename/diperkuat. Mencakup empat transisi scope, approval B sebelum/sesudah threshold A, sesi baru, dan concurrent late approval. Fresh input per prompt memastikan jawaban nyata, bukan stream habis/timeout. RED→GREEN; checkpoint scope/symlink/bootstrap **66 total / 66 pass / 0 fail / 0 skip**, build/typecheck/diff-check lulus.
+
+### Item 4 — fallback TTY konsisten dengan runtime [SELESAI]
+- Commit kode `76ebe1e`: fallback `options.isTTY ?? Boolean(process.stdin.isTTY)`, tanpa membaca CI; override host tetap didukung, selaras dengan runtime pipeline.
+- File kode/test: `src/core/approval/scopeAmendment.ts`, `src/tests/fase2_scopeAmendment.test.ts`.
+- **3 tests tambahan**: `CI=true` + stdin TTY tetap prompt/approve/persist, non-TTY dengan CI true/false fail-closed tanpa stdin/prompt/persist. Property stdin dan environment dipulihkan saat cleanup. RED→GREEN; checkpoint scope standalone **25 total / 25 pass / 0 fail / 0 skip**, build/typecheck/diff-check lulus.
+
+### Rekonsiliasi verifikasi implementasi sebelum rebase
+- Lingkungan Linux / Node v24.21.0 / npm 11.19.0. Baseline working tree `338f57c` memuat 8 tes move unstaged: **1344 total / 1343 pass / 0 fail / 1 skip / 69 suites**. Final pasca-empat-commit lama: **1373 total / 1372 pass / 0 fail / 1 skip / 69 suites**; delta **+29** terhadap working tree awal, **37 tests baru terhadap HEAD awal** (12 + 15 + 7 + 3).
+- TAP leaf records dan totals direkonsiliasi; dua rename breaker bukan penghapusan tes. Skip tetap drive-letter/UNC Windows-only pada Linux; tidak ada skip baru.
+- Full/typecheck/build/e2e final sebelum rebase lulus; E2E filter existing **1 total / 1 pass / 0 fail / 0 skip**. Suite standalone scope **25/25**, sessionAllowlist **14/14**, feedback_approval_session **11/11** pass. Log implementasi: `/home/codespace/.hermes/cache/scratch/ruko-feedback-pr/`.
+- Perintah diminta pasca-rebase dijalankan ulang dengan hasil nyata di bawah; angka checkpoint lama tidak dipakai sebagai pengganti run baru.
+
+### Verifikasi ulang pasca-rebase, sebelum commit docs
+- `npm run typecheck`: exit 0; tidak menjalankan test runner (total/pass/fail/skip N/A). Log `/home/codespace/.hermes/cache/scratch/ruko-feedback-rebase/pre-docs-1.log`.
+- `npm run build`: exit 0; tidak menjalankan test runner (total/pass/fail/skip N/A). Log `/home/codespace/.hermes/cache/scratch/ruko-feedback-rebase/pre-docs-2.log`.
+- `npm test`: exit 0, **1373 total / 1372 pass / 0 fail / 1 skip / 69 suites / 0 cancelled / 0 todo**. Perintah persis tanpa flag tambahan, tanpa perubahan runner/timeout/reporter. Log `/home/codespace/.hermes/cache/scratch/ruko-feedback-rebase/pre-docs-3.log`.
+- `git diff --check` lulus. Source/test tree pada setiap commit baru identik dengan asal, sehingga tidak ada perubahan perilaku atau jumlah tes akibat pemisahan dokumentasi. Seluruh source/dependency/version tetap sama.
+- Pada checkpoint ini branch/HEAD/status utama serta SHA-256 diff staged/unstaged masih identik dengan sebelum rebase. Setelah satu commit docs, perintah diminta dan pemeriksaan invariant diulang; hasil pasca-commit dilaporkan pada jawaban akhir. Hanya catatan ANALISIS existing tetap untracked, tidak ikut commit.
+
+### Follow-up CI — Windows temporary paths
+- Push pertama PR #37 memakai head `b0b5edb`; run `38080042867` gagal Windows Node 18/20 karena grammar allowlist menolak `~` pada komponen path literal `RUNNER~1`. Rebase sudah diikuti commit path absolute `889f4d1`; retry `38080881880` memakai head lama `d8281da` (belum berisi grammar fix), jadi dua kegagalan yang sama bukan bukti untuk commit terbaru.
+- Fix `d105d88` menambah `~` dalam charset safe command sambil memblokir shell-leading `~/...` dan `=~/...`. Coverage meliputi `RUNNER~1` literal in-workspace, tilde expansion, serta traversal/absolute luar/drive asing tetap ditolak.
+- Tes absolute-path memakai temp workspace sebagai cwd dan workspaceRoot bersama; path tersebut memang berada di workspace (tidak melemahkan containment). Perubahan test hanya menormalkan slash pada Windows saat menyusun command path, sedangkan production resolver menerima separators Windows native/forward slash.
+- Commit `d105d88` berisi fix short-name grammar plus test. Commit `1784b38` berisi fixture test workspace-internal plus koreksi PROGRESS2. Dua commit terbaru telah dipush; full verification setelah commit terakhir: typecheck/build exit 0; `npm test` **1375 / 1374 pass / 0 fail / 1 skip / 69 suites**; sessionAllowlist **16/16**.
+- Klarifikasi eksplisit review PR #37 diposting: “Temuan #2 (exec vs start_process) dianggap perilaku yang disengaja, bukan bug.”
+- CI final PR #37 untuk head `1784b3888e80caae0d4af9e96057c103657542ee`: CI Node 18/20/22 pada Ubuntu, Node 18/20 Windows, Node 18/20 macOS, CodeQL Analysis, CodeQL, dan Analyze JavaScript/TypeScript semuanya pass. PR state OPEN, merge state CLEAN; tidak merge.
+- Workflow GitHub Advanced Security `Code scanning AI findings` terpisah gagal karena kuota bulanan Copilot (HTTP 402); tidak ada laporan finding. Status check rollup required untuk PR tetap seluruhnya pass. PR tetap open dan belum di-merge.
+
+### Batas pekerjaan
+- Repo utama `/workspaces/Ruko-agent` tetap `main` @ `1a9c91e`; status serta hash diff staged/unstaged disimpan sebelum rebase untuk dibandingkan setelah verifikasi/commit docs. Semua checkout/rebase/edit/build/staging/commit dilakukan hanya di worktree PR; staging memakai nama file eksplisit.
+- Commit docs terakhir hanya `CHANGELOGv2.md` dan `PROGRESS2.md`; `CLAUDE.md`, `ANALISIS_*`, feedback/catatan lain tidak dimasukkan. Tidak push/merge/tag/release atau perubahan source/dependency/version. Static/self-review implementasi saja, bukan review independen; pengujian hanya pada Linux Node v24.21.0.
 
 

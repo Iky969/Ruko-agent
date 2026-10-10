@@ -76,7 +76,7 @@ export async function bootstrapSecurityPipeline(
   try {
     const hostState = await loadHostState(sessionId, { resume: options.resume ?? true });
 
-    // WP-04 (v2.1.0) — Single-Writer State: mutasi state.json dari
+    // Single-Writer State: mutasi state.json dari
     // ScopeAmendmentManager didelegasikan ke mutator terpusat ini dan
     // diserialkan oleh in-process mutex (promise chain). Manager tidak lagi
     // membuat FileLock baru, sehingga tidak ada self-deadlock LOCK_TIMEOUT
@@ -84,6 +84,10 @@ export async function bootstrapSecurityPipeline(
     let stateMutationChain: Promise<unknown> = Promise.resolve();
     const stateMutator: HostStateMutator = (targetSessionId, mutate) => {
       const task = stateMutationChain.then(async () => {
+        const nonce = fileLock.getCurrentNonce();
+        if (!nonce || fileLock.readMetadata()?.nonce !== nonce) {
+          throw new Error('SCOPE_LOCK_DENIED: session lock tidak lagi dimiliki pipeline.');
+        }
         const freshState = await loadHostState(targetSessionId, { resume: false });
         return mutate(freshState);
       });
