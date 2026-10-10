@@ -55,6 +55,21 @@ export interface ScopeAmendmentOptions {
   sessionLock?: FileLock;
 }
 
+const SCOPE_DENIAL_MESSAGES = {
+  SCOPE_MISSING: 'approvalScope kosong (belum ada kontrak path). Gunakan /scope allow <path> atau /plan off setelah rencana disetujui.',
+  SCOPE_PLAN_CHANGED: 'Rencana aktif berubah; izin scope lama tidak berlaku. Tinjau rencana, lalu /scope reset dan /scope allow <path> untuk menyetujui kontrak baru.',
+  SCOPE_OUTSIDE_WORKSPACE: 'Target di luar workspace. Gunakan path di dalam workspace; amandemen scope tidak dapat mengizinkan pelarian path.',
+  SCOPE_CONTAINMENT: 'Containment fisik gagal: symlink keluar dari subtree/workspace atau path tidak dapat di-resolve. Periksa path dan symlink; izin tidak diperluas.',
+  SCOPE_OUTSIDE: 'Path di luar scope disetujui. Setujui prompt amandemen pada terminal interaktif atau gunakan /scope allow <path>.',
+  SCOPE_AMENDMENT_DECLINED: 'Amandemen scope tidak disetujui (ditolak, timeout, atau input terputus). Izin tidak diperluas; tunggu otorisasi eksplisit pengguna.',
+  SCOPE_CIRCUIT_BREAKER: 'Circuit breaker aktif setelah 3 penolakan pada path yang sama. Jangan ulangi permintaan; tunggu otorisasi eksplisit pengguna.',
+  SCOPE_PLAN_ACTIVE: 'Plan mode aktif kembali saat menunggu persetujuan; mutasi diblok. Gunakan /plan off hanya setelah rencana disetujui.',
+};
+
+export type ScopeMutationDecision =
+  | { allowed: true }
+  | { allowed: false; code: keyof typeof SCOPE_DENIAL_MESSAGES; reason: string };
+
 export function normalizeCasePath(p: string): string {
   const resolved = path.resolve(p);
   return process.platform === 'win32' || process.platform === 'darwin'
@@ -143,9 +158,12 @@ export class ScopeAmendmentManager {
   private consecutiveRejections: Map<string, number>;
   private initialAllowedPaths: string[];
 
-  /** Seed the workspace contract only after an explicit transition to ACT. */
-  seedWorkspaceScope(): void {
+  /** Seed only at a host-controlled, explicitly user-authorized ACT transition. */
+  seedWorkspaceScope(userAuthorized: boolean = false): void {
     if (this.state.approvalScope) return;
+    if (userAuthorized !== true) {
+      throw new Error('SCOPE_BOOTSTRAP_DENIED: seed implisit ditolak; gunakan /plan off atau /scope allow <path>.');
+    }
     if (!safeRealpathSync(this.workspaceRoot)) {
       throw new Error('SCOPE_BOOTSTRAP_DENIED: workspace tidak dapat di-resolve.');
     }
@@ -395,13 +413,29 @@ export class ScopeAmendmentManager {
     return false;
   }
 
+  private denyMutation(code: keyof typeof SCOPE_DENIAL_MESSAGES, targetPath: string): ScopeMutationDecision {
+    return {
+      allowed: false,
+      code,
+      reason: `SECURITY_DENIED: [${code}] ${SCOPE_DENIAL_MESSAGES[code]}\n` +
+        `  Mode: ${this.state.mode.toUpperCase()} · Scope: ${this.state.approvalScope?.allowedPaths.join(', ') || '(none)'}\n` +
+        `  Target: ${targetPath}`,
+    };
+  }
+
+  /** Boolean compatibility for callers that only need the authorization result. */
   async evaluateMutationTarget(targetPath: string, reason: string, isInteractive: boolean): Promise<boolean> {
-    if (!this.state.approvalScope) return false;
+    return (await this.evaluateMutationDecision(targetPath, reason, isInteractive)).allowed;
+  }
+
+  /** Return the cause with its decision, never via mutable last-error state. */
+  async evaluateMutationDecision(targetPath: string, reason: string, isInteractive: boolean): Promise<ScopeMutationDecision> {
+    if (!this.state.approvalScope) return this.denyMutation('SCOPE_MISSING', targetPath);
 
     // Kriptografi Kontrak Scope: jika activePlanHash diset dan berbeda dari approvalScope.planHash,
     // modifikasi hash rencana membatalkan izin eksekusi secara otomatis
     if (this.state.activePlanHash && this.state.approvalScope.planHash !== this.state.activePlanHash) {
-      return false;
+      return this.denyMutation('SCOPE_PLAN_CHANGED', targetPath);
     }
 
     const normTarget = normalizeCasePath(path.resolve(this.workspaceRoot, targetPath));
@@ -409,7 +443,7 @@ export class ScopeAmendmentManager {
 
     // 1. Validasi batas root workspace (pelarian di luar root ditolak mutlak)
     if (!normTarget.startsWith(normRoot + path.sep) && normTarget !== normRoot) {
-      return false;
+      return this.denyMutation('SCOPE_OUTSIDE_WORKSPACE', targetPath);
     }
 
     // 2. Subtree Containment: Auto-approve jika target berada di dalam folder yang sudah disetujui
@@ -425,9 +459,9 @@ export class ScopeAmendmentManager {
         // Symlink escape terdeteksi — tolak mutasi (fail-closed).
         // TIDAK memunculkan prompt; ini bukan amandemen scope biasa,
         // ini adalah upaya pelarian hierarki.
-        return false;
+        return this.denyMutation('SCOPE_CONTAINMENT', targetPath);
       }
-      return true;
+      return { allowed: true };
     }
 
     // TC-FSM-01: Circuit Breaker check before prompting
@@ -444,7 +478,7 @@ export class ScopeAmendmentManager {
             `Permintaan selanjutnya ke path ini diblokir untuk sisa sesi ini.\n`,
           );
         }
-        return false;
+        return this.denyMutation('SCOPE_CIRCUIT_BREAKER', targetPath);
       }
     }
 
@@ -452,7 +486,7 @@ export class ScopeAmendmentManager {
     // Fail-Closed di lingkungan headless/CI tanpa TTY (QA.md §1.7)
     const effectiveTTY = this.options.isTTY ?? (Boolean(process.stdin.isTTY) && process.env.CI !== 'true');
     if (!isInteractive || !effectiveTTY) {
-      return false;
+      return this.denyMutation('SCOPE_OUTSIDE', targetPath);
     }
 
     // Micro-Prompt Terminal dengan timeout 30 detik
@@ -498,11 +532,11 @@ export class ScopeAmendmentManager {
     }
 
     if (!confirmed) {
-      return false;
+      return this.denyMutation('SCOPE_AMENDMENT_DECLINED', targetPath);
     }
 
     // 4. Persist under the standalone or already-owned pipeline session lock.
-    return this.updateScope((freshState) => {
+    const updated = await this.updateScope((freshState) => {
       if (
         freshState.mode !== 'act' || !freshState.approvalScope ||
         (freshState.activePlanHash && freshState.approvalScope.planHash !== freshState.activePlanHash)
@@ -514,6 +548,13 @@ export class ScopeAmendmentManager {
       }
       return true;
     });
+    if (updated) return { allowed: true };
+    if (this.state.mode !== 'act') return this.denyMutation('SCOPE_PLAN_ACTIVE', targetPath);
+    if (!this.state.approvalScope) return this.denyMutation('SCOPE_MISSING', targetPath);
+    if (this.state.activePlanHash && this.state.approvalScope.planHash !== this.state.activePlanHash) {
+      return this.denyMutation('SCOPE_PLAN_CHANGED', targetPath);
+    }
+    return this.denyMutation('SCOPE_OUTSIDE', targetPath);
   }
 
   /**

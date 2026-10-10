@@ -250,7 +250,11 @@ describe('P0-1: Security Pipeline Wiring & Anti-Phantom Security', () => {
       // Attempting to evaluate tool call outside allowed scope ('other/file.txt') in headless mode
       const decision = await pipeline.evaluateToolCall('write_file', { path: 'other/file.txt' }, false);
       assert.equal(decision.allowed, false, 'Out-of-scope mutation must be rejected in headless mode');
-      assert.match(decision.reason || '', /di luar scope yang diizinkan|ditolak/i);
+      assert.match(decision.reason || '', /^SECURITY_DENIED: \[SCOPE_OUTSIDE\]/);
+      assert.match(decision.reason || '', /Scope: src/);
+      assert.match(decision.reason || '', /Target: other\/file\.txt/);
+      assert.match(decision.reason || '', /\/scope allow/);
+      assert.deepEqual(pipeline.hostState.approvalScope.allowedPaths, ['src']);
     } finally {
       await pipeline.releaseLock();
     }

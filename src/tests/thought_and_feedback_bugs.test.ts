@@ -19,6 +19,7 @@ import { Agent } from '../agent/agent.js';
 import { Context } from '../core/context.js';
 import { DEFAULT_CONFIG } from '../types.js';
 import { handleCommand, listCommands } from '../agent/commands.js';
+import { modeAddendum } from '../agent/roles.js';
 
 // ============================================================================
 // 1. ThoughtSlidingWindow Tests
@@ -525,7 +526,7 @@ test('buildStatusBar strictly never exceeds target width on extra narrow screens
 // 8. /settings Command and /? Help Alias
 // ============================================================================
 
-test('/settings command displays unified dashboard and allows tuning context, max-tokens, role, mode, approval', async () => {
+test('/settings dashboard tunes configuration while /mode updates the agent session independently', async () => {
   const commands = listCommands();
   const names = new Set(commands.map((c) => c.name));
   assert.ok(names.has('settings'), 'missing /settings command');
@@ -590,10 +591,25 @@ test('/settings command displays unified dashboard and allows tuning context, ma
     await handleCommand('/settings role reviewer', env);
     assert.equal(config.role, 'reviewer');
 
-    // 6. /settings mode
+    // 6. UiMode remains a configuration setting, separate from AgentMode.
+    for (const uiMode of ['beginner', 'pro'] as const) {
+      config.mode = uiMode === 'pro' ? 'beginner' : 'pro';
+      updatedPatch = null;
+      await handleCommand(`/settings mode ${uiMode}`, env);
+      assert.equal(config.mode, uiMode);
+      assert.deepEqual(updatedPatch, { mode: uiMode });
+      assert.match(stripAnsi(logs.join('\n')), /Mode UI diubah/);
+    }
+
+    // AgentMode uses /mode and must not pass by reading an unchanged config default.
     logs.length = 0;
-    await handleCommand('/settings mode pro', env);
+    updatedPatch = null;
+    await handleCommand('/mode code', env);
+    assert.equal(env.sessionState.mode, 'code');
     assert.equal(config.mode, 'pro');
+    assert.equal(updatedPatch, null, 'agent mode is session-only, not persisted configuration');
+    assert.match(stripAnsi(logs.join('\n')), /Mode aktif: Code/);
+    assert.doesNotMatch(logs.join('\n'), /Error:|tidak dikenal/);
 
     // 7. /settings approval
     logs.length = 0;
@@ -602,6 +618,15 @@ test('/settings command displays unified dashboard and allows tuning context, ma
   } finally {
     console.log = origLog;
   }
+});
+
+test('beginner prompt recommends the current /mode command without a legacy mode name', () => {
+  const prompt = modeAddendum('beginner');
+  assert.ok(prompt);
+  assert.match(prompt, /\/mode\)/);
+  const recommendation = prompt.match(/\/mode(?:\s+([a-z]+))?/);
+  assert.ok(recommendation);
+  assert.ok(!recommendation[1] || ['default', 'research', 'code', 'build'].includes(recommendation[1]));
 });
 
 // ============================================================================

@@ -240,7 +240,7 @@ export class Agent {
   }
 
   /** Persist the host mode and its scope before allowing the next tool call. */
-  async setPlanMode(on: boolean): Promise<void> {
+  async setPlanMode(on: boolean, options: { userAuthorized?: boolean } = {}): Promise<void> {
     if (this.hostState) {
       const previousMode = this.hostState.mode;
       const previousScope = this.hostState.approvalScope;
@@ -251,7 +251,7 @@ export class Agent {
           if (!this.scopeAmendmentManager) {
             throw new Error('SCOPE_BOOTSTRAP_DENIED: scope manager belum terpasang.');
           }
-          this.scopeAmendmentManager.seedWorkspaceScope();
+          this.scopeAmendmentManager.seedWorkspaceScope(options.userAuthorized === true);
         }
         this.hostState.mode = on ? 'plan' : 'act';
         await saveHostState(this.hostState);
@@ -404,7 +404,7 @@ export class Agent {
         .find((m) => m.role === 'assistant');
       const planSelection = detectPlanOptionSelection(lastAssistant?.content, instruction);
       if (planSelection) {
-        await this.setPlanMode(false);
+        await this.setPlanMode(false, { userAuthorized: true });
         instruction = planSelection.augmentedInstruction;
       }
     }

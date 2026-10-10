@@ -457,7 +457,7 @@ export class SystemLoop {
             .find((m) => m.role === 'assistant');
           const planSelection = detectPlanOptionSelection(lastAssistant?.content, input);
           if (planSelection) {
-            await this.agent.setPlanMode(false);
+            await this.agent.setPlanMode(false, { userAuthorized: true });
             console.log(renderPlanAutoExecuteBox(planSelection.selectedNumber, planSelection.optionText));
             turnInstruction = planSelection.augmentedInstruction;
           }

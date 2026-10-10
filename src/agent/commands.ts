@@ -327,13 +327,17 @@ const COMMANDS: CommandDef[] = [
     help: 'Mode rencana: hanya baca & usulkan, eksekusi diblokir di kode.',
     hint: 'on | off',
     run: async (args, env) => {
+      const arg = args.trim().toLowerCase();
+      if (arg !== '' && arg !== 'on' && arg !== 'off') {
+        console.log('Error: gunakan /plan [on|off] atau /plan tanpa argumen untuk toggle.');
+        return;
+      }
       if (!env.agent) {
         console.log('Plan mode hanya tersedia di dalam REPL.');
         return;
       }
-      const arg = args.trim().toLowerCase();
       const on = arg === 'on' || (arg === '' && !env.agent.planMode);
-      await env.agent.setPlanMode(on);
+      await env.agent.setPlanMode(on, { userAuthorized: true });
       console.log(
         on
           ? yellow('PLAN MODE aktif — tool eksekusi/write diblok; model hanya boleh membaca & menyusun langkah. /plan off untuk lanjut.')

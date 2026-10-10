@@ -72,17 +72,12 @@ export async function evaluateDispatcherGate(
   if (opts.scopeManager && isMutationTool(opts.tool)) {
     const targetPath = extractTargetPath(opts.tool, opts.args || {});
     if (targetPath) {
-      const allowed = await opts.scopeManager.evaluateMutationTarget(
+      const decision = await opts.scopeManager.evaluateMutationDecision(
         targetPath,
         opts.args?.reason || `Mutasi berkas via ${opts.tool}`,
         Boolean(opts.isInteractive),
       );
-      if (!allowed) {
-        return {
-          allowed: false,
-          reason: `SECURITY_DENIED: Target mutasi di luar scope yang diizinkan (${targetPath})`,
-        };
-      }
+      if (!decision.allowed) return decision;
     }
   }
 
