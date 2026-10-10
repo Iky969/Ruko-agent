@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -70,7 +69,24 @@ test('start_process always approval is bound to its actual command and physical 
     const proc = defaultProcessManager.getProcess(result.process_id)!;
     assert.equal(proc.command, 'git --version');
     assert.equal(proc.cwd, root);
-    if (proc.child?.exitCode === null) await once(proc.child, 'close');
+    if (proc.child?.exitCode === null) {
+      await new Promise<void>((resolve, reject) => {
+        const child = proc.child!;
+        child.ref();
+        const timer = setTimeout(() => reject(new Error('start_process did not close within 5 seconds')), 5_000);
+        const onClose = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        child.once('close', onClose);
+        if (child.exitCode !== null) {
+          child.unref();
+          onClose();
+        } else {
+          child.once('close', () => child.unref());
+        }
+      });
+    }
     assert.equal(proc.exitCode, 0);
     assert.match(proc.logs.map((entry) => entry.text).join('\n'), /git version/i);
   }
