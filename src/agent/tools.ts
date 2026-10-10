@@ -2674,7 +2674,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
         const ok = await deps.confirm(
           `start_process ${command}`,
           `menjalankan proses latar belakang "${command}"`,
-          { kind: 'start_process', cwd: resolvedCwd, command },
+          { kind: 'start_process', cwd: resolvedCwd, workspaceRoot: ws, command },
         );
         if (!ok) {
           return JSON.stringify({

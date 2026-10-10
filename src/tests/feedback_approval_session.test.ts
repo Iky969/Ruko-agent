@@ -104,6 +104,21 @@ test('once approval does not remember; no, empty input, invalid input and cancel
   assert.deepEqual(f.config.approvalAllowlist, []);
 });
 
+test('always answers for outside-workspace start_process commands deny and never become cached approvals', async (t) => {
+  const ws = mkdtempSync(join(tmpdir(), 'ruko-session-outside-'));
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  const f = fixture(['a', 'a', 'a', 'a']);
+  for (const command of ['cat ../outside.txt', 'cat /etc/passwd']) {
+    const request: ApprovalRequest = { kind: 'start_process', cwd: ws, command };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      assert.equal(await f.confirm(`start_process ${command}`, 'test only; never executed', request), false);
+      assert.doesNotMatch(stripAnsi(f.prompts.at(-1)!.prompt), /\[a\/y\/n\]/i);
+    }
+  }
+  assert.equal(f.prompts.length, 4, 'each attempt still requires a decision; no grant was cached');
+  assert.deepEqual(f.config.approvalAllowlist, []);
+});
+
 test('configured approvalAllowlist is enforced by guardedExecute for an exact safe test command', async () => {
   const f = fixture([]);
   (f.config as any).approvalAllowlist = ['echo git push'];
