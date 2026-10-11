@@ -252,7 +252,9 @@ describe('F1-T2 FileLock', () => {
   test('EPERM saat openSync di-retry hanya pada win32', async (t) => {
     const dir = tempDir('ruko-lock-eperm-');
     const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const originalOpenSyncDescriptor = Object.getOwnPropertyDescriptor(fs, 'openSync');
     assert.ok(originalPlatform);
+    assert.ok(originalOpenSyncDescriptor);
     const originalOpenSync = fs.openSync.bind(fs);
 
     try {
@@ -287,10 +289,43 @@ describe('F1-T2 FileLock', () => {
         (error: NodeJS.ErrnoException) => error === persistentError,
       );
       assert.ok(timeoutAttempts >= 2, 'win32 EPERM harus dicoba ulang sampai timeout');
+    } finally {
+      try {
+        t.mock.restoreAll();
+      } finally {
+        try {
+          Object.defineProperty(fs, 'openSync', originalOpenSyncDescriptor);
+          syncBuiltinESMExports();
+        } finally {
+          Object.defineProperty(process, 'platform', originalPlatform);
+        }
+      }
+    }
+  });
 
-      t.mock.restoreAll();
-      syncBuiltinESMExports();
-      Object.defineProperty(process, 'platform', originalPlatform);
+  test('EPERM non-win32 tidak boleh di-retry', async (t) => {
+    const dir = tempDir('ruko-lock-eperm-posix-');
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const originalOpenSyncDescriptor = Object.getOwnPropertyDescriptor(fs, 'openSync');
+    assert.ok(originalPlatform);
+    assert.ok(originalOpenSyncDescriptor);
+
+    try {
+      let platformOverridden = false;
+      try {
+        Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'linux' });
+        platformOverridden = process.platform === 'linux';
+      } catch {
+        // A Windows runner may not permit overriding process.platform.
+      }
+
+      if (!platformOverridden) {
+        if (originalPlatform.value === 'win32') {
+          t.skip('Tidak dapat override process.platform menjadi linux pada runner Windows');
+          return;
+        }
+        assert.fail('process.platform harus dapat dioverride menjadi linux untuk test non-win32');
+      }
 
       let posixAttempts = 0;
       t.mock.method(fs, 'openSync', () => {
@@ -305,9 +340,16 @@ describe('F1-T2 FileLock', () => {
       );
       assert.equal(posixAttempts, 1, 'EPERM non-win32 tidak boleh di-retry');
     } finally {
-      t.mock.restoreAll();
-      syncBuiltinESMExports();
-      Object.defineProperty(process, 'platform', originalPlatform);
+      try {
+        t.mock.restoreAll();
+      } finally {
+        try {
+          Object.defineProperty(fs, 'openSync', originalOpenSyncDescriptor);
+          syncBuiltinESMExports();
+        } finally {
+          Object.defineProperty(process, 'platform', originalPlatform);
+        }
+      }
     }
   });
 
