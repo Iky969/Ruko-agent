@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { Agent } from '../agent/agent.js';
 import { handleCommand } from '../agent/commands.js';
 import { Context } from '../core/context.js';
+import { ScopeAmendmentManager } from '../core/approval/scopeAmendment.js';
 import { loadHostState, saveHostState } from '../core/state/hostState.js';
 import { DEFAULT_CONFIG } from '../types.js';
 
@@ -60,6 +61,7 @@ test('WP-04: /plan on menyinkronkan hostState.mode secara persisten & mengosongk
   const provider: any = { name: 'test-provider', model: 'test-model', isConfigured: false };
   const agent = new Agent(ctx, provider, config, null, ws);
   agent.setHostState(state);
+  agent.setScopeAmendmentManager(new ScopeAmendmentManager(state, ws));
 
   assert.equal(agent.planMode, false, 'mode awal harus act');
 

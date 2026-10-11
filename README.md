@@ -1,10 +1,10 @@
 # Ruko — AI Coding Agent CLI
 
-[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-2.2.0--unreleased-blue.svg)](package.json)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-1244%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-1335%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-Linux%20%7C%20Windows%20%7C%20macOS-blue.svg)](.github/workflows/ci.yml)
 [![Security](https://img.shields.io/badge/security-CodeQL%20%7C%20Secret%20Scanning%20%7C%20Dependabot-success.svg)](.github/SECURITY.md)
@@ -19,7 +19,7 @@ cd /proyek-anda
 ruko
 ```
 
-> Installer mem-pin tag release immutable `v2.1.0`, build dari source, memasang `ruko` global, dan otomatis mem-backup instalasi lama. Windows & Jupyter/Colab: lihat bagian [Instalasi per Platform](#-instalasi--memulai-cepat).
+> Versi source saat ini `2.2.0` (belum dirilis). Installer tetap mem-pin tag immutable `v2.1.0` sampai tag `v2.2.0` benar-benar diterbitkan; instalasi tag terbaru yang belum ada sengaja tidak diaktifkan. Windows & Jupyter/Colab: lihat bagian [Instalasi per Platform](#-instalasi--memulai-cepat).
 
 ---
 
@@ -205,6 +205,10 @@ Ruko menerapkan defense-in-depth:
 ### Plan Mode & Reasoning
 - **`/plan on`**: agent hanya baca & usulkan langkah; write/exec diblok di kode
 - Saat model menampilkan menu bernomor (`1. … / 2. …`), balas dengan nomor (atau `pilih 1`, `opsi 2`) → Plan Mode **otomatis off** dan opsi dieksekusi (tanpa `/plan off` manual)
+- **`/plan off` / pilihan rencana bernomor**: transisi ke ACT menyimpan kontrak scope default `.` (workspace) jika scope belum ada. Scope yang sudah disetujui tidak diperluas otomatis. Berlaku juga pada input non-TTY yang secara eksplisit meminta ACT; startup/resume tetap PLAN.
+- **`/scope allow <path>`**: setujui file/subtree di dalam workspace, termasuk path baru yang belum dibuat. Untuk scope sempit, jalankan `/scope allow src` saat PLAN sebelum `/plan off`. Perintah ini tidak mengubah Plan Mode; izin ditambahkan, bukan mengganti scope yang sudah ada.
+- **`/scope status`** (atau `/scope`): lihat mode dan path yang disetujui. **`/scope reset`** mencabut seluruh kontrak path; setelah reset, mutasi file ditolak sampai izin eksplisit baru diberikan. Reset lalu allow path sempit jika sebelumnya scope mencakup `.`.
+- `/plan on` dan resume sesi ACT membatalkan scope. Scope/YOLO tidak melewati pembatasan workspace, symlink escape, path sensitif, atau security core.
 - **`/reasoning low|medium|high`**: atur tingkat reasoning native (default `medium`); level lama `xhigh`/`max`/`extreme` sudah diseragamkan
 
 ---
@@ -262,6 +266,7 @@ Ruko menerapkan defense-in-depth:
 | `/clear` | Bersihkan memori percakapan |
 | `/compact` | Paksa kompresi history |
 | `/plan on\|off` | Mode rencana (blokir write/exec); balas nomor opsi → auto-off + eksekusi |
+| `/scope [allow <path>\|status\|reset]` | Setujui path mutasi, lihat kontrak, atau cabut seluruh scope sesi |
 | `/mode [default\|research\|code\|build]` | Mode operasional agen (AgentMode: `default`\|`research`\|`code`\|`build`) |
 | `/reasoning [low\|medium\|high]` | Tingkat reasoning native (default medium) |
 | `/yolo on\|off` | Mode auto-approve |
@@ -319,7 +324,7 @@ Config di `./.ruko/config.json` mode `0o600`:
 
 ```bash
 npm run typecheck   # static type check
-npm test            # 1018 tests
+npm test            # 1336 tests (1 skip khusus Windows pada Linux)
 npm run test:e2e    # E2E test
 ```
 
@@ -413,6 +418,7 @@ MIT License — lihat [LICENSE](LICENSE)
 
 ## 🤝 Kontribusi & Keamanan
 
+- **Panduan kontribusi:** [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)
 - **Security Policy**: [.github/SECURITY.md](.github/SECURITY.md) — Secret Scanning enabled, Push Protection enabled, Dependabot enabled, CodeQL enabled
 - **Contributors**: [CONTRIBUTORS.md](CONTRIBUTORS.md)
 - **Changelog**: [CHANGELOG.md](CHANGELOG.md) & [CHANGELOGv2.md](CHANGELOGv2.md) (ringkasan kerja detail di [PROGRESS.md](PROGRESS.md) & [PROGRESS2.md](PROGRESS2.md))

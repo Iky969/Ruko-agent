@@ -4,6 +4,7 @@ import { AgentConfig, ExecResult } from '../types.js';
 import { execute } from './executor.js';
 import { green } from './ui.js';
 import type { LLMProvider } from '../agent/llm.js';
+import type { ApprovalRequest } from './approval/sessionAllowlist.js';
 
 /**
  * Approval gate — blocks or asks before running risky shell commands.
@@ -687,8 +688,8 @@ export function writeGuardianAuditLog(
   }
 }
 
-/** User confirmation hook; returns true to allow execution. */
-export type Confirmer = (command: string, reason: string) => Promise<boolean>;
+/** Boolean approval hook; optional host context enables session-only exact-command grants. */
+export type Confirmer = (command: string, reason: string, request?: ApprovalRequest) => Promise<boolean>;
 
 export interface GuardOptions {
   /** Prompt hook; when null/absent, dangerous commands are refused. */
@@ -771,7 +772,7 @@ export async function guardedExecute(
       }
     }
 
-    const ok = await options.confirm(command, reason);
+    const ok = await options.confirm(command, reason, { kind: 'exec', cwd: process.cwd(), command });
     if (!ok) return denialResult(command, reason, verdict.risk);
   }
   const effectiveTimeout = options.timeoutMs ?? config.execTimeoutMs;

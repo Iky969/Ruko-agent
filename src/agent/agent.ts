@@ -1,5 +1,5 @@
 import { sep } from 'node:path';
-import { Confirmer, guardedExecute } from '../core/approval.js';
+import type { Confirmer } from '../core/approval.js';
 import { Context } from '../core/context.js';
 import { ActivityTray } from '../core/activity.js';
 import { isFileMutationLogLine, parseFileMutationLogLine, renderMutationSummary } from '../core/diffui.js';
@@ -133,7 +133,7 @@ export class Agent {
   private _planMode = false;
 
   /**
-   * WP-04 (v2.1.0): status plan mode adalah PROYEKSI langsung dari
+   * Status plan mode adalah PROYEKSI langsung dari
    * `hostState.mode` ('plan' | 'act') bila HostState terikat — sehingga
    * `/plan on`, auto-off pemilihan rencana, dan reset saat resume tidak pernah
    * menyimpang dari state kanonis di ~/.ruko/sessions/.
@@ -258,6 +258,42 @@ export class Agent {
 
   getScopeAmendmentManager(): ScopeAmendmentManager | null {
     return this.scopeAmendmentManager;
+  }
+
+  /** Persist the host mode and its scope before allowing the next tool call. */
+  async setPlanMode(on: boolean, options: { userAuthorized?: boolean } = {}): Promise<void> {
+    if (this.hostState) {
+      const previousMode = this.hostState.mode;
+      const previousScope = this.hostState.approvalScope;
+      try {
+        if (on) {
+          this.hostState.approvalScope = null;
+        } else if (!this.hostState.approvalScope) {
+          if (!this.scopeAmendmentManager) {
+            throw new Error('SCOPE_BOOTSTRAP_DENIED: scope manager belum terpasang.');
+          }
+          this.scopeAmendmentManager.seedWorkspaceScope(options.userAuthorized === true);
+        }
+        this.hostState.mode = on ? 'plan' : 'act';
+        try {
+          await saveHostState(this.hostState);
+        } catch (cause) {
+          const code = cause instanceof Error ? (cause as NodeJS.ErrnoException).code : undefined;
+          const detail = cause instanceof Error ? cause.message : String(cause);
+          // The REPL logs the propagated error once; direct callers retain its cause.
+          throw new Error(
+            `HOST_STATE_SAVE_FAILED: saveHostState gagal untuk transisi ${previousMode.toUpperCase()} → ${on ? 'PLAN' : 'ACT'}` +
+            ` (${this.hostState.sessionId})${code ? ` [${code}]` : ''}: ${detail}. Transisi dibatalkan.`,
+            { cause },
+          );
+        }
+      } catch (err) {
+        this.hostState.mode = previousMode;
+        this.hostState.approvalScope = previousScope;
+        throw err;
+      }
+    }
+    this.planMode = on;
   }
 
   /** Replaces the approval prompt hook (wired by the loop once stdin is open). */
@@ -400,11 +436,7 @@ export class Agent {
         .find((m) => m.role === 'assistant');
       const planSelection = detectPlanOptionSelection(lastAssistant?.content, instruction);
       if (planSelection) {
-        this.planMode = false;
-        if (this.hostState && this.hostState.mode === 'plan') {
-          this.hostState.mode = 'act';
-          void saveHostState(this.hostState).catch(() => {});
-        }
+        await this.setPlanMode(false, { userAuthorized: true });
         instruction = planSelection.augmentedInstruction;
       }
     }
@@ -430,17 +462,12 @@ export class Agent {
     if (match) {
       const cmd = match[1];
       const ws = this.workspaceRoot ?? getWorkspaceRoot();
-      // WP-03: jalur `run <cmd>` memakai pemeriksaan pra-eksekusi bersama
-      // ( env sensitif + berkas sensitif + mutasi tersembunyi workspace).
-      const precheck = safeExecPrecheck(cmd, ws);
-      if (precheck.blocked) {
-        return precheck.message ?? 'exec ditolak: akses ke file sensitif diblokir.';
-      }
-      const result = await guardedExecute(
-        cmd,
-        { timeoutMs: this.config.execTimeoutMs, confirm: this.confirm, llmProvider: this.llmProvider },
-        this.config,
-      );
+      const result = JSON.parse(await runToolCall({ tool: 'exec', command: cmd }, {
+        config: this.config, confirm: this.confirm, llmProvider: this.llmProvider,
+        workspaceRoot: ws, hostState: this.hostState, planMode: this.planMode,
+        scopeAmendmentManager: this.scopeAmendmentManager,
+      }));
+      if (result.error) return result.error;
       return (
         `${result.output || '(no output)'}\n` +
         `[exit code: ${result.code ?? 'killed'} | ${result.durationMs}ms` +

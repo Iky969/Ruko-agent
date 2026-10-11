@@ -12,12 +12,11 @@
  *  2. Kriptografi Kontrak Scope: Perubahan path di luar subtree memicu prompt
  *     konfirmasi interaktif; modifikasi hash rencana membatalkan izin eksekusi
  *     secara otomatis (fail-closed).
- *  3. Fail-Closed non-TTY / CI: Jika berada di lingkungan headless/CI tanpa
- *     TTY interaktif, amandemen otomatis ditolak tanpa menggantung sesi.
+ *  3. Fail-Closed non-TTY: Tanpa TTY interaktif, amandemen otomatis ditolak
+ *     tanpa menggantung sesi; variabel CI tidak menggantikan status stdin TTY.
  *  4. Interactive Timeout 30 detik untuk sesi lokal agar tidak menggantung.
- *  5. WP-04 (v2.1.0): Mutasi host state didelegasikan ke mutator terpusat yang
- *     dimiliki SecurityPipeline (single-writer in-process mutex). Manager TIDAK
- *     membuat FileLock baru — mencegah self-deadlock LOCK_TIMEOUT.
+ *  5. Mutasi host state menggunakan mutator serial Pipeline atau lock sesi
+ *     milik pipeline — mencegah self-deadlock LOCK_TIMEOUT.
  *  5b. WP-05 (v2.1.0): Persetujuan amandemen terikat hash muatan argumen teknis
  *     dan menampilkan fakta riil (alat, jalur kanonikal, badge risiko, diff).
  *  6. TC-SCM-03 Symlink Hardening: Resolusi fisik (realpathSync) pada parent
@@ -27,7 +26,8 @@
  *  7. TC-FSM-01 Circuit Breaker: Lacak penolakan berturut-turut pada canonical
  *     path yang SAMA (pakai realpath). Setelah 3x penolakan identik berturut-turut
  *     pada path yang sama, trigger circuit-breaker: batalkan amandemen berikutnya
- *     ke path itu untuk sisa sesi, non-punitif, beri pesan jelas.
+ *     ke path itu untuk sisa sesi, non-punitif, beri pesan jelas. Approval path
+ *     lain, allow/reset/seed/kontraksi scope tidak membuka kembali path terblokir.
  *  8. TC-SCM-05 Scope Contraction: Method eksplisit untuk reset allowedPaths
  *     ke konfigurasi awal sesi (tanpa perlu sesi baru).
  *
@@ -40,9 +40,11 @@ import * as fsSync from 'node:fs';
 import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { HostState, saveHostState, loadHostState } from '../state/hostState.js';
+import { FileLock } from '../state/fileLock.js';
+import * as os from 'node:os';
 
 /**
- * WP-04 (v2.1.0): delegasi mutasi state.json ke pemilik lock tunggal.
+ * Delegasi mutasi state.json ke pemilik lock tunggal.
  *
  * Manager TIDAK boleh membuat instance FileLock baru di dalam dirinya: pada
  * runtime nyata SecurityPipeline sudah memegang lock eksklusif kernel untuk
@@ -77,7 +79,24 @@ export interface ScopeAmendmentOptions {
    * Contoh: ['/repo/packages', '/repo/node_modules/.pnpm']
    */
   monorepoRoots?: string[];
+  /** Pipeline-owned lock: validate and reuse it instead of acquiring again. */
+  sessionLock?: FileLock;
 }
+
+const SCOPE_DENIAL_MESSAGES = {
+  SCOPE_MISSING: 'approvalScope kosong (belum ada kontrak path). Gunakan /scope allow <path> atau /plan off setelah rencana disetujui.',
+  SCOPE_PLAN_CHANGED: 'Rencana aktif berubah; izin scope lama tidak berlaku. Tinjau rencana, lalu /scope reset dan /scope allow <path> untuk menyetujui kontrak baru.',
+  SCOPE_OUTSIDE_WORKSPACE: 'Target di luar workspace. Gunakan path di dalam workspace; amandemen scope tidak dapat mengizinkan pelarian path.',
+  SCOPE_CONTAINMENT: 'Containment fisik gagal: symlink keluar dari subtree/workspace atau path tidak dapat di-resolve. Periksa path dan symlink; izin tidak diperluas.',
+  SCOPE_OUTSIDE: 'Path di luar scope disetujui. Setujui prompt amandemen pada terminal interaktif atau gunakan /scope allow <path>.',
+  SCOPE_AMENDMENT_DECLINED: 'Amandemen scope tidak disetujui (ditolak, timeout, atau input terputus). Izin tidak diperluas; tunggu otorisasi eksplisit pengguna.',
+  SCOPE_CIRCUIT_BREAKER: 'Circuit breaker aktif setelah 3 penolakan pada path yang sama, permanen selama sesi. Jangan ulangi permintaan; mulai sesi baru untuk meninjau izin path ini.',
+  SCOPE_PLAN_ACTIVE: 'Plan mode aktif kembali saat menunggu persetujuan; mutasi diblok. Gunakan /plan off hanya setelah rencana disetujui.',
+};
+
+export type ScopeMutationDecision =
+  | { allowed: true }
+  | { allowed: false; code: keyof typeof SCOPE_DENIAL_MESSAGES; reason: string };
 
 export function normalizeCasePath(p: string): string {
   const resolved = path.resolve(p);
@@ -94,7 +113,7 @@ export function canonicalize(obj: any): string {
 }
 
 /**
- * WP-05 (v2.1.0): token persetujuan deterministik berbasis hash dari muatan
+ * Token persetujuan deterministik berbasis hash dari muatan
  * argumen TEKNIS (nama alat + jalur target + argumen). Dipakai untuk membatalkan
  * eksekusi bila argumen berubah setelah tombol persetujuan ditekan.
  */
@@ -178,6 +197,25 @@ function safeRealpathSync(p: string): string | null {
   }
 }
 
+/** Resolve a not-yet-created path through its nearest existing ancestor. */
+function resolveScopePath(p: string): string | null {
+  let current = path.resolve(p);
+  const segments: string[] = [];
+  while (true) {
+    try {
+      fsSync.lstatSync(current);
+      const canonical = safeRealpathSync(current);
+      return canonical ? path.join(canonical, ...segments) : null;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    segments.unshift(path.basename(current));
+    current = parent;
+  }
+}
+
 /**
  * TC-SCM-03: Memeriksa apakah `canonicalParent` berada di dalam salah satu
  * monorepo root yang terdaftar. Digunakan sebagai pengecualian untuk symlink
@@ -210,6 +248,114 @@ export class ScopeAmendmentManager {
 
   private consecutiveRejections: Map<string, number>;
   private initialAllowedPaths: string[];
+
+  /** Seed only at a host-controlled, explicitly user-authorized ACT transition. */
+  seedWorkspaceScope(userAuthorized: boolean = false): void {
+    if (this.state.approvalScope) return;
+    if (userAuthorized !== true) {
+      throw new Error('SCOPE_BOOTSTRAP_DENIED: seed implisit ditolak; gunakan /plan off atau /scope allow <path>.');
+    }
+    if (!safeRealpathSync(this.workspaceRoot)) {
+      throw new Error('SCOPE_BOOTSTRAP_DENIED: workspace tidak dapat di-resolve.');
+    }
+    this.state.approvalScope = {
+      planHash: this.state.activePlanHash ?? computePlanHash(null, ['.'], this.workspaceRoot),
+      allowedPaths: ['.'],
+      approvedAt: new Date().toISOString(),
+      correlationId: crypto.randomUUID(),
+    };
+    this.initialAllowedPaths = ['.'];
+  }
+
+  /** Explicit user authorization; never called from model tool arguments. */
+  async allowPath(targetPath: string): Promise<boolean> {
+    const absTarget = path.resolve(this.workspaceRoot, targetPath);
+    const normRoot = normalizeCasePath(this.workspaceRoot);
+    const normTarget = normalizeCasePath(absTarget);
+    const canonicalRoot = safeRealpathSync(this.workspaceRoot);
+    const canonicalTarget = resolveScopePath(absTarget);
+    if (
+      !targetPath ||
+      (normTarget !== normRoot && !normTarget.startsWith(normRoot + path.sep)) ||
+      !canonicalRoot || !canonicalTarget
+    ) {
+      throw new Error('SCOPE_PATH_DENIED: path harus berada di dalam workspace yang sah.');
+    }
+    const physicalRoot = normalizeCasePath(canonicalRoot);
+    const physicalTarget = normalizeCasePath(canonicalTarget);
+    if (physicalTarget !== physicalRoot && !physicalTarget.startsWith(physicalRoot + path.sep)) {
+      throw new Error('SCOPE_PATH_DENIED: symlink mengarah ke luar workspace.');
+    }
+    const allowedPath = path.relative(this.workspaceRoot, absTarget).replace(/\\/g, '/') || '.';
+    let initialized = false;
+    const updated = await this.updateScope((freshState) => {
+      initialized = !freshState.approvalScope;
+      if (!freshState.approvalScope) {
+        freshState.approvalScope = {
+          planHash: freshState.activePlanHash ?? computePlanHash(null, [allowedPath], this.workspaceRoot),
+          allowedPaths: [],
+          approvedAt: new Date().toISOString(),
+          correlationId: crypto.randomUUID(),
+        };
+      }
+      if (!freshState.approvalScope.allowedPaths.includes(allowedPath)) {
+        freshState.approvalScope.allowedPaths.push(allowedPath);
+      }
+      return true;
+    });
+    if (updated) {
+      if (initialized) this.initialAllowedPaths = this.state.approvalScope!.allowedPaths.slice();
+    }
+    return updated;
+  }
+
+  /** Revoke all path authorization until the user explicitly approves again. */
+  async resetScope(): Promise<void> {
+    await this.updateScope((freshState) => {
+      freshState.approvalScope = null;
+      return true;
+    });
+    this.initialAllowedPaths = [];
+  }
+
+  /** Persist scope changes through the pipeline mutator or its owned lock. */
+  private async updateScope(update: (state: HostState) => boolean): Promise<boolean> {
+    const apply = async (freshState: HostState): Promise<boolean> => {
+      Object.assign(this.state, {
+        ...freshState,
+        approvalScope: freshState.approvalScope
+          ? { ...freshState.approvalScope, allowedPaths: freshState.approvalScope.allowedPaths.slice() }
+          : null,
+      });
+      if (!update(freshState)) return false;
+      await saveHostState(freshState);
+      Object.assign(this.state, freshState);
+      return true;
+    };
+
+    if (this.options.stateMutator) {
+      return this.options.stateMutator(this.state.sessionId, apply);
+    }
+
+    let release: (() => Promise<void>) | undefined;
+    if (this.options.sessionLock) {
+      const lock = this.options.sessionLock;
+      const nonce = lock.getCurrentNonce();
+      if (!nonce || lock.readMetadata()?.nonce !== nonce) {
+        throw new Error('SCOPE_LOCK_DENIED: session lock tidak lagi dimiliki pipeline.');
+      }
+    } else {
+      const hostDir = process.env.RUKO_HOST_STATE_DIR
+        ? path.resolve(process.env.RUKO_HOST_STATE_DIR)
+        : path.join(os.homedir(), '.ruko', 'sessions');
+      release = await new FileLock(path.join(hostDir, this.state.sessionId, 'state.json')).acquire();
+    }
+    try {
+      return await apply(await loadHostState(this.state.sessionId, { resume: false }));
+    } finally {
+      await release?.();
+    }
+  }
 
   /**
    * Get canonical path for circuit breaker tracking (TC-FSM-01).
@@ -330,13 +476,13 @@ export class ScopeAmendmentManager {
     //  - Untuk target yang = allowed path itu sendiri (misal src/core): target sendiri yang cocok
     if (!this.state.approvalScope) return false;
 
-    // Resolve canonical target — bisa jadi target sendiri belum ada (file baru),
-    // jadi ini opsional (null = file belum ada, periksa parent saja).
-    const canonicalTarget = safeRealpathSync(absTarget);
+    // File/subtree baru di-resolve melalui ancestor yang eksis; kegagalan
+    // resolusi (termasuk dangling symlink) tetap fail-closed.
+    const canonicalTarget = resolveScopePath(absTarget);
 
     for (const allowed of this.state.approvalScope.allowedPaths) {
       const absAllowed = path.resolve(this.workspaceRoot, allowed);
-      const canonicalAllowed = safeRealpathSync(absAllowed);
+      const canonicalAllowed = resolveScopePath(absAllowed);
       // Jika allowedPath sendiri tidak bisa di-resolve, skip entry ini
       // (fail-closed per entry, coba entry lainnya)
       if (canonicalAllowed === null) continue;
@@ -362,27 +508,34 @@ export class ScopeAmendmentManager {
     return false;
   }
 
-  /**
-   * WP-04: satu-satunya jalur mutasi state.json — via mutator terpusat bila
-   * tersedia (SecurityPipeline), atau load-modify langsung tanpa FileLock
-   * (fallback standalone/unit test).
-   */
-  private async mutateHostState(mutate: (fresh: HostState) => Promise<boolean>): Promise<boolean> {
-    const mutator = this.options.stateMutator;
-    if (mutator) {
-      return mutator(this.state.sessionId, mutate);
-    }
-    const freshState = await loadHostState(this.state.sessionId, { resume: false });
-    return mutate(freshState);
+  private denyMutation(code: keyof typeof SCOPE_DENIAL_MESSAGES, targetPath: string): ScopeMutationDecision {
+    return {
+      allowed: false,
+      code,
+      reason: `SECURITY_DENIED: [${code}] ${SCOPE_DENIAL_MESSAGES[code]}\n` +
+        `  Mode: ${this.state.mode.toUpperCase()} · Scope: ${this.state.approvalScope?.allowedPaths.join(', ') || '(none)'}\n` +
+        `  Target: ${targetPath}`,
+    };
   }
 
+  /** Boolean compatibility for callers that only need the authorization result. */
   async evaluateMutationTarget(
     targetPath: string,
     reason: string,
     isInteractive: boolean,
     meta?: ApprovalBindingMeta,
   ): Promise<boolean> {
-    if (!this.state.approvalScope) return false;
+    return (await this.evaluateMutationDecision(targetPath, reason, isInteractive, meta)).allowed;
+  }
+
+  /** Return the cause with its decision, never via mutable last-error state. */
+  async evaluateMutationDecision(
+    targetPath: string,
+    reason: string,
+    isInteractive: boolean,
+    meta?: ApprovalBindingMeta,
+  ): Promise<ScopeMutationDecision> {
+    if (!this.state.approvalScope) return this.denyMutation('SCOPE_MISSING', targetPath);
 
     // WP-05: token binding dihitung SEBELUM prompt — dibandingkan ulang setelah
     // pengguna menyetujui. Argumen teknis yang berubah di tengah proses
@@ -392,7 +545,7 @@ export class ScopeAmendmentManager {
     // Kriptografi Kontrak Scope: jika activePlanHash diset dan berbeda dari approvalScope.planHash,
     // modifikasi hash rencana membatalkan izin eksekusi secara otomatis
     if (this.state.activePlanHash && this.state.approvalScope.planHash !== this.state.activePlanHash) {
-      return false;
+      return this.denyMutation('SCOPE_PLAN_CHANGED', targetPath);
     }
 
     const normTarget = normalizeCasePath(path.resolve(this.workspaceRoot, targetPath));
@@ -400,7 +553,25 @@ export class ScopeAmendmentManager {
 
     // 1. Validasi batas root workspace (pelarian di luar root ditolak mutlak)
     if (!normTarget.startsWith(normRoot + path.sep) && normTarget !== normRoot) {
-      return false;
+      return this.denyMutation('SCOPE_OUTSIDE_WORKSPACE', targetPath);
+    }
+
+    // TC-FSM-01: Session-lifetime breaker wins over new subtree grants too.
+    // Track by canonical path to be consistent with TC-SCM-03 symlink hardening
+    const canonicalPath = this.getCanonicalPathForTracking(targetPath);
+    if (canonicalPath !== null) {
+      const rejectionCount = this.consecutiveRejections.get(canonicalPath) ?? 0;
+      if (rejectionCount >= 3) {
+        // Circuit breaker triggered: block further amendment requests to this path
+        // Non-punitif: return false without prompt, clear message to user/log
+        if (this.options.output && typeof this.options.output.write === 'function') {
+          this.options.output.write(
+            `\n[Ruko] Circuit breaker aktif: amandemen scope ke path yang sama ('${targetPath}') telah ditolak 3x berturut-turut. ` +
+            `Permintaan selanjutnya ke path ini diblokir untuk sisa sesi ini.\n`,
+          );
+        }
+        return this.denyMutation('SCOPE_CIRCUIT_BREAKER', targetPath);
+      }
     }
 
     // 2. Subtree Containment: Auto-approve jika target berada di dalam folder yang sudah disetujui
@@ -416,34 +587,16 @@ export class ScopeAmendmentManager {
         // Symlink escape terdeteksi — tolak mutasi (fail-closed).
         // TIDAK memunculkan prompt; ini bukan amandemen scope biasa,
         // ini adalah upaya pelarian hierarki.
-        return false;
+        return this.denyMutation('SCOPE_CONTAINMENT', targetPath);
       }
-      return true;
-    }
-
-    // TC-FSM-01: Circuit Breaker check before prompting
-    // Track by canonical path to be consistent with TC-SCM-03 symlink hardening
-    const canonicalPath = this.getCanonicalPathForTracking(targetPath);
-    if (canonicalPath !== null) {
-      const rejectionCount = this.consecutiveRejections.get(canonicalPath) ?? 0;
-      if (rejectionCount >= 3) {
-        // Circuit breaker triggered: block further amendment requests to this path
-        // Non-punitif: return false without prompt, clear message to user/log
-        if (this.options.output && typeof this.options.output.write === 'function') {
-          this.options.output.write(
-            `\n[Ruko] Circuit breaker aktif: amandemen scope ke path yang sama ('${targetPath}') telah ditolak 3x berturut-turut. ` +
-            `Permintaan selanjutnya ke path ini diblokir untuk sisa sesi ini.\n`,
-          );
-        }
-        return false;
-      }
+      return { allowed: true };
     }
 
     // 3. Target baru di luar subtree membutuhkan otorisasi eksplisit pengembang.
     // Fail-Closed di lingkungan headless/CI tanpa TTY (QA.md §1.7)
-    const effectiveTTY = this.options.isTTY ?? (Boolean(process.stdin.isTTY) && process.env.CI !== 'true');
+    const effectiveTTY = this.options.isTTY ?? Boolean(process.stdin.isTTY);
     if (!isInteractive || !effectiveTTY) {
-      return false;
+      return this.denyMutation('SCOPE_OUTSIDE', targetPath);
     }
 
     // Micro-Prompt Terminal dengan timeout 30 detik
@@ -489,12 +642,18 @@ export class ScopeAmendmentManager {
       rl.close();
     }
 
+    // A concurrent rejection can latch this path while its prompt is open.
+    // Revalidate before an old approval can reset the counter or persist scope.
+    if (canonicalPath !== null && (this.consecutiveRejections.get(canonicalPath) ?? 0) >= 3) {
+      return this.denyMutation('SCOPE_CIRCUIT_BREAKER', targetPath);
+    }
+
     // TC-FSM-01: Track rejection/approval
     if (canonicalPath !== null) {
       if (confirmed) {
-        // On approval: reset counter for THIS path, and also reset all OTHER paths
-        // since user approved a different path (breaks consecutive chain)
-        this.consecutiveRejections.clear();
+        // Only this path's pre-threshold chain can end. A latched path never
+        // reaches the prompt; approval B must not reset or reopen path A.
+        this.consecutiveRejections.delete(canonicalPath);
       } else {
         // On rejection: increment counter for this canonical path
         const newCount = (this.consecutiveRejections.get(canonicalPath) ?? 0) + 1;
@@ -503,33 +662,39 @@ export class ScopeAmendmentManager {
     }
 
     if (!confirmed) {
-      return false;
+      return this.denyMutation('SCOPE_AMENDMENT_DECLINED', targetPath);
     }
 
-    // WP-05: Deterministic Approval Binding — muatan argumen teknis berubah
-    // setelah tombol persetujuan ditekan → batalkan eksekusi.
+    // Approval must still describe the exact tool payload that the user saw.
     if (bindingToken !== null && meta && computeApprovalBindingToken(meta, targetPath) !== bindingToken) {
       if (outStream && typeof outStream.write === 'function') {
         outStream.write(
           '[Ruko] Argumen teknis berubah setelah persetujuan → eksekusi DIBATALKAN (approval binding mismatch).\n',
         );
       }
-      return false;
+      return this.denyMutation('SCOPE_AMENDMENT_DECLINED', targetPath);
     }
 
-    // 4. Perbarui izin pada state host lewat mutator terpusat (WP-04 — tidak ada
-    //    FileLock baru di sini agar tidak self-deadlock dengan lock pipeline).
-    return this.mutateHostState(async (freshState) => {
-      if (!freshState.approvalScope) {
+    // 4. Persist under the pipeline mutator or owned session lock.
+    const updated = await this.updateScope((freshState) => {
+      if (
+        freshState.mode !== 'act' || !freshState.approvalScope ||
+        (freshState.activePlanHash && freshState.approvalScope.planHash !== freshState.activePlanHash)
+      ) {
         return false;
       }
       if (!freshState.approvalScope.allowedPaths.includes(targetPath)) {
         freshState.approvalScope.allowedPaths.push(targetPath);
-        await saveHostState(freshState);
-        this.state = freshState;
       }
       return true;
     });
+    if (updated) return { allowed: true };
+    if (this.state.mode !== 'act') return this.denyMutation('SCOPE_PLAN_ACTIVE', targetPath);
+    if (!this.state.approvalScope) return this.denyMutation('SCOPE_MISSING', targetPath);
+    if (this.state.activePlanHash && this.state.approvalScope.planHash !== this.state.activePlanHash) {
+      return this.denyMutation('SCOPE_PLAN_CHANGED', targetPath);
+    }
+    return this.denyMutation('SCOPE_OUTSIDE', targetPath);
   }
 
   /**
@@ -540,19 +705,15 @@ export class ScopeAmendmentManager {
   async contractScope(): Promise<boolean> {
     if (!this.state.approvalScope) return false;
 
-    // WP-04: mutasi lewat mutator terpusat (tanpa FileLock lokal).
-    return this.mutateHostState(async (freshState) => {
+    const contracted = await this.updateScope((freshState) => {
       if (!freshState.approvalScope) {
         return false;
       }
       // Reset to initial allowedPaths
       freshState.approvalScope.allowedPaths = this.initialAllowedPaths.slice();
-      await saveHostState(freshState);
-      this.state = freshState;
-      // Also clear circuit breaker state
-      this.consecutiveRejections.clear();
       return true;
     });
+    return contracted;
   }
 
   /**
