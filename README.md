@@ -1,4 +1,4 @@
-<p align="center">
+<div align="center">
 
 ![ruko](ruko/terminal.png)
 # Ruko — AI Coding Agent CLI
@@ -14,7 +14,7 @@
 
 **Ruko** adalah AI Coding Agent CLI yang cepat, minimalis, dan *security-hardened*. Dibangun murni di atas **Node.js (ESM) + TypeScript tanpa runtime dependencies**, Ruko menghadirkan pair-programming yang andal langsung dari terminal.
 
-</p>
+</div>
 
 ### Install Cepat (macOS / Linux / WSL / Termux)
 
