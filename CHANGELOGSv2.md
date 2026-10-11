@@ -13,6 +13,11 @@ Berkas ini mencatat batch implementasi feedback sesuai permintaan pengguna. Riwa
 
 ## [Unreleased] — 2026-10-10
 
+### Fix Windows exclusive lock acquisition on EPERM
+- Pada `src/core/state/fileLock.ts`, retry `EPERM` dari `openSync('wx')` hanya pada Windows; loop/timeout tetap berlaku dan error `EPERM` terakhir dilempar setelah timeout. Cabang POSIX serta logika stale/PID tidak berubah.
+- Menambahkan test mock `openSync` di `src/tests/fase1_fileLock.test.ts` untuk retry Windows, mempertahankan error asli setelah timeout, dan memastikan EPERM non-Windows langsung dilempar.
+- Verifikasi: `npm run typecheck`, `npm run build`, dan `node --test dist/tests/fase1_fileLock.test.js` lulus; suite FileLock **12/12 pass**.
+
 ### Batch 4 — Task 9–12, status/scope, dan approval sesi
 
 #### Fixed

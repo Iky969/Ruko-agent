@@ -145,6 +145,7 @@ export class FileLock {
     }
 
     const currentNonce = crypto.randomUUID();
+    let lastWindowsOpenError: NodeJS.ErrnoException | null = null;
 
     while (attempts === 0 || Date.now() - start < timeoutMs) {
       attempts++;
@@ -201,6 +202,11 @@ export class FileLock {
         }
 
         const code = err.code;
+        if (code === 'EPERM' && process.platform === 'win32') {
+          lastWindowsOpenError = err;
+          await wait(retryIntervalMs);
+          continue;
+        }
         if (code !== 'EEXIST' && code !== 'EISDIR') {
           throw err;
         }
@@ -312,6 +318,7 @@ export class FileLock {
       }
     }
 
+    if (lastWindowsOpenError) throw lastWindowsOpenError;
     throw new Error(`LOCK_TIMEOUT: Gagal memperoleh lock pada ${this.lockPath} setelah ${timeoutMs}ms`);
   }
 

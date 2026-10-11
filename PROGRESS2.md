@@ -414,6 +414,11 @@
 - CI final PR #37 untuk head `1784b3888e80caae0d4af9e96057c103657542ee`: CI Node 18/20/22 pada Ubuntu, Node 18/20 Windows, Node 18/20 macOS, CodeQL Analysis, CodeQL, dan Analyze JavaScript/TypeScript semuanya pass. PR state OPEN, merge state CLEAN; tidak merge.
 - Workflow GitHub Advanced Security `Code scanning AI findings` terpisah gagal karena kuota bulanan Copilot (HTTP 402); tidak ada laporan finding. Status check rollup required untuk PR tetap seluruhnya pass. PR tetap open dan belum di-merge.
 
+### Follow-up — retry Windows EPERM pada exclusive FileLock
+- `src/core/state/fileLock.ts`: EPERM pada `openSync('wx')` di-retry hanya di `win32`; loop/timeout yang ada digunakan kembali dan error asli terakhir dilempar setelah timeout. Tidak mengubah POSIX atau logika stale/PID.
+- `src/tests/fase1_fileLock.test.ts`: mock `openSync` memastikan retry Windows, error asli tetap dilempar setelah timeout, dan EPERM non-win32 langsung dilempar. Assertion existing tidak diubah.
+- Verifikasi Linux / Node v24.21.0: `npm run typecheck`, `npm run build`, dan `node --test dist/tests/fase1_fileLock.test.js` lulus (**12 tests / 12 pass / 0 fail**); `git diff --check` lulus.
+
 ### Batas pekerjaan
 - Repo utama `/workspaces/Ruko-agent` tetap `main` @ `1a9c91e`; status serta hash diff staged/unstaged disimpan sebelum rebase untuk dibandingkan setelah verifikasi/commit docs. Semua checkout/rebase/edit/build/staging/commit dilakukan hanya di worktree PR; staging memakai nama file eksplisit.
 - Commit docs terakhir hanya `CHANGELOGv2.md` dan `PROGRESS2.md`; `CLAUDE.md`, `ANALISIS_*`, feedback/catatan lain tidak dimasukkan. Tidak push/merge/tag/release atau perubahan source/dependency/version. Static/self-review implementasi saja, bukan review independen; pengujian hanya pada Linux Node v24.21.0.

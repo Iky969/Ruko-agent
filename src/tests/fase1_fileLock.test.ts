@@ -7,6 +7,7 @@
  * konkurensi 50 proses, heartbeat mtime, release idempoten, dan LOCK_TIMEOUT).
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {
   mkdtempSync,
   rmSync,
@@ -16,6 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { execFile } from 'node:child_process';
@@ -245,6 +247,68 @@ describe('F1-T2 FileLock', () => {
     const release = await lock.acquire({ heartbeatIntervalMs: 50 });
     await release();
     await assert.doesNotReject(() => release());
+  });
+
+  test('EPERM saat openSync di-retry hanya pada win32', async (t) => {
+    const dir = tempDir('ruko-lock-eperm-');
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    assert.ok(originalPlatform);
+    const originalOpenSync = fs.openSync.bind(fs);
+
+    try {
+      Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'win32' });
+      let windowsAttempts = 0;
+      t.mock.method(fs, 'openSync', (...args: Parameters<typeof fs.openSync>) => {
+        windowsAttempts += 1;
+        if (windowsAttempts === 1) {
+          throw Object.assign(new Error('temporary open failure'), { code: 'EPERM' });
+        }
+        return originalOpenSync(...args);
+      });
+      syncBuiltinESMExports();
+
+      const windowsLock = new FileLock(join(dir, 'windows.json'));
+      const release = await windowsLock.acquire({ timeoutMs: 100, retryIntervalMs: 5 });
+      assert.ok(windowsAttempts >= 2, 'win32 EPERM harus menyebabkan percobaan ulang');
+      await release();
+
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+      let timeoutAttempts = 0;
+      const persistentError = Object.assign(new Error('persistent Windows open failure'), { code: 'EPERM' });
+      t.mock.method(fs, 'openSync', () => {
+        timeoutAttempts += 1;
+        throw persistentError;
+      });
+      syncBuiltinESMExports();
+
+      await assert.rejects(
+        () => new FileLock(join(dir, 'windows-timeout.json')).acquire({ timeoutMs: 20, retryIntervalMs: 5 }),
+        (error: NodeJS.ErrnoException) => error === persistentError,
+      );
+      assert.ok(timeoutAttempts >= 2, 'win32 EPERM harus dicoba ulang sampai timeout');
+
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+      Object.defineProperty(process, 'platform', originalPlatform);
+
+      let posixAttempts = 0;
+      t.mock.method(fs, 'openSync', () => {
+        posixAttempts += 1;
+        throw Object.assign(new Error('posix open failure'), { code: 'EPERM' });
+      });
+      syncBuiltinESMExports();
+
+      await assert.rejects(
+        () => new FileLock(join(dir, 'posix.json')).acquire({ timeoutMs: 100, retryIntervalMs: 5 }),
+        (error: NodeJS.ErrnoException) => error.code === 'EPERM',
+      );
+      assert.equal(posixAttempts, 1, 'EPERM non-win32 tidak boleh di-retry');
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+      Object.defineProperty(process, 'platform', originalPlatform);
+    }
   });
 
   test('TC-LCK-01 lintas proses: child proses terpisah menunggu lock (fisik)', async () => {
