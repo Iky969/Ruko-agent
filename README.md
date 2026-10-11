@@ -1,3 +1,6 @@
+<p align="center">
+
+![ruko](ruko/terminal.png)
 # Ruko — AI Coding Agent CLI
 
 [![Version](https://img.shields.io/badge/version-2.2.0--unreleased-blue.svg)](package.json)
@@ -10,6 +13,8 @@
 [![Security](https://img.shields.io/badge/security-CodeQL%20%7C%20Secret%20Scanning%20%7C%20Dependabot-success.svg)](.github/SECURITY.md)
 
 **Ruko** adalah AI Coding Agent CLI yang cepat, minimalis, dan *security-hardened*. Dibangun murni di atas **Node.js (ESM) + TypeScript tanpa runtime dependencies**, Ruko menghadirkan pair-programming yang andal langsung dari terminal.
+
+</p>
 
 ### Install Cepat (macOS / Linux / WSL / Termux)
 
