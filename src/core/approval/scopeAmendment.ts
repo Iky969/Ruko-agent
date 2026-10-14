@@ -40,7 +40,7 @@ import * as fsSync from 'node:fs';
 import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { HostState, saveHostState, loadHostState } from '../state/hostState.js';
-import { FileLock } from '../state/fileLock.js';
+import { FileLock, isPidAlive } from '../state/fileLock.js';
 import * as os from 'node:os';
 
 /**
@@ -53,7 +53,13 @@ import * as os from 'node:os';
  */
 export type HostStateMutator = (
   sessionId: string,
-  mutate: (fresh: HostState) => Promise<boolean>,
+  /**
+   * `beforeSave` (Issue #38-4): hook kepemilikan lock yang dipanggil mutator
+   * tepat sebelum dan sesudah `saveHostState`. Melempar `SCOPE_LOCK_DENIED`
+   * bila nonce pemegang lock tidak lagi cocok — load→apply→save wajib berada
+   * di bawah kepemilikan lock yang sama.
+   */
+  mutate: (fresh: HostState, beforeSave?: () => void) => Promise<boolean>,
 ) => Promise<boolean>;
 
 /**
@@ -318,9 +324,21 @@ export class ScopeAmendmentManager {
     this.initialAllowedPaths = [];
   }
 
+  /**
+   * Issue #38-4: kontrak kepemilikan lock — nonce pada berkas lock harus masih
+   * sama dengan nonce yang dipegang instance lock sesi. Melempar
+   * `SCOPE_LOCK_DENIED` bila kepemilikan hilang (release, force, atau steal).
+   */
+  private static assertLockOwnership(lock: FileLock): void {
+    const nonce = lock.getCurrentNonce();
+    if (!nonce || lock.readMetadata()?.nonce !== nonce) {
+      throw new Error('SCOPE_LOCK_DENIED: session lock tidak lagi dimiliki pipeline.');
+    }
+  }
+
   /** Persist scope changes through the pipeline mutator or its owned lock. */
   private async updateScope(update: (state: HostState) => boolean): Promise<boolean> {
-    const apply = async (freshState: HostState): Promise<boolean> => {
+    const apply = async (freshState: HostState, beforeSave?: () => void): Promise<boolean> => {
       Object.assign(this.state, {
         ...freshState,
         approvalScope: freshState.approvalScope
@@ -328,8 +346,12 @@ export class ScopeAmendmentManager {
           : null,
       });
       if (!update(freshState)) return false;
+      // Issue #38-4: kepemilikan lock divalidasi tepat sebelum dan sesudah
+      // penulisan, bukan hanya sekali di depan.
+      beforeSave?.();
       await saveHostState(freshState);
       Object.assign(this.state, freshState);
+      beforeSave?.();
       return true;
     };
 
@@ -340,16 +362,34 @@ export class ScopeAmendmentManager {
     let release: (() => Promise<void>) | undefined;
     if (this.options.sessionLock) {
       const lock = this.options.sessionLock;
-      const nonce = lock.getCurrentNonce();
-      if (!nonce || lock.readMetadata()?.nonce !== nonce) {
-        throw new Error('SCOPE_LOCK_DENIED: session lock tidak lagi dimiliki pipeline.');
+      const assertHeld = () => ScopeAmendmentManager.assertLockOwnership(lock);
+      // Kepemilikan divalidasi di entry, sebelum save, dan sesudah save.
+      assertHeld();
+      try {
+        const freshState = await loadHostState(this.state.sessionId, { resume: false });
+        return await apply(freshState, assertHeld);
+      } finally {
+        // Tidak ada lock tambahan yang dipegang cabang ini — hanya reuse lock
+        // pipeline (kontrak nonce), tanpa FileLock baru di atas state.json.
       }
-    } else {
-      const hostDir = process.env.RUKO_HOST_STATE_DIR
-        ? path.resolve(process.env.RUKO_HOST_STATE_DIR)
-        : path.join(os.homedir(), '.ruko', 'sessions');
-      release = await new FileLock(path.join(hostDir, this.state.sessionId, 'state.json')).acquire();
     }
+
+    // Fallback standalone: bangun lock sendiri HANYA bila berkas lock memang
+    // tidak dipegang proses hidup lain. Bila sudah dipegang (termasuk oleh
+    // pipeline di proses yang sama), gagal cepat `SCOPE_LOCK_DENIED` alih-alih
+    // membuat FileLock kedua yang berebut state.json yang sama (split-brain).
+    const hostDir = process.env.RUKO_HOST_STATE_DIR
+      ? path.resolve(process.env.RUKO_HOST_STATE_DIR)
+      : path.join(os.homedir(), '.ruko', 'sessions');
+    const ownLock = new FileLock(path.join(hostDir, this.state.sessionId, 'state.json'));
+    const held = ownLock.readMetadata();
+    if (held && isPidAlive(held.pid)) {
+      throw new Error(
+        'SCOPE_LOCK_DENIED: lock state sesi sudah dipegang proses lain; ' +
+        'gunakan sessionLock milik pipeline (tanpa membangun lock kedua).',
+      );
+    }
+    release = await ownLock.acquire();
     try {
       return await apply(await loadHostState(this.state.sessionId, { resume: false }));
     } finally {
@@ -489,18 +529,24 @@ export class ScopeAmendmentManager {
 
       const normAllowed = normalizeCasePath(canonicalAllowed);
 
-      // Cek 1: Parent target berada di dalam atau sama dengan allowedPath
-      if (normParent === normAllowed || normParent.startsWith(normAllowed + path.sep)) {
-        return true;
-      }
+      // Issue #38-1: parent-only TIDAK cukup. Target fisik sendiri wajib
+      // berada di dalam allowedPath — symlink di dalam subtree yang sudah
+      // disetujui (mis. `src/esc -> /etc`) tidak boleh auto-approve hanya
+      // karena induknya berada di subtree.
+      // Gagal resolve target (dangling/EACCES) → fail-closed per entry.
+      if (canonicalTarget === null) continue;
+      const normTarget = normalizeCasePath(canonicalTarget);
+      const targetInside =
+        normTarget === normAllowed || normTarget.startsWith(normAllowed + path.sep);
+      if (!targetInside) continue;
 
-      // Cek 2: Target sendiri berada di dalam atau sama dengan allowedPath
-      // (menangani kasus target = direktori yang disetujui sendiri)
-      if (canonicalTarget !== null) {
-        const normTarget = normalizeCasePath(canonicalTarget);
-        if (normTarget === normAllowed || normTarget.startsWith(normAllowed + path.sep)) {
-          return true;
-        }
+      // Cek 1: Parent target berada di dalam atau sama dengan allowedPath.
+      const parentInside =
+        normParent === normAllowed || normParent.startsWith(normAllowed + path.sep);
+      // Cek 2: Target = entry subtree yang disetujui sendiri (parent berada
+      // di atas allowedPath) tetap diizinkan.
+      if (parentInside || normTarget === normAllowed) {
+        return true;
       }
     }
 
