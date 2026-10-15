@@ -458,6 +458,33 @@ export function allSegmentsAllowlisted(cmd: string, allowlist: string[]): boolea
   return true;
 }
 
+/**
+ * Global flag git yang memisahkan program dari subcommand dengan satu nilai
+ * argumen. Daftar ini identik dengan SessionApprovalAllowlist.isDirectGitPush
+ * (satu sumber kebenaran untuk bentuk `git push` dengan global flag).
+ */
+const GIT_GLOBAL_FLAGS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace']);
+
+/**
+ * True bila command adalah `git push` yang disisipi global flag git.
+ * Token-based (bukan regex) karena `-C`/`-c`/`--git-dir`/`--work-tree`/
+ * `--namespace` menyisipkan nilai argumen di antara program `git` dan
+ * subcommand `push`, mis. `git -C . push origin main`. Bentuk menempel
+ * (`--git-dir=.git`) hanya meng-consume satu token.
+ */
+function isGitPushWithGlobalFlags(command: string): boolean {
+  const parts = command.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return false;
+  const program = (parts[0].split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
+  if (program !== 'git') return false;
+  let index = 1;
+  while (index < parts.length && parts[index].startsWith('-')) {
+    const option = parts[index++];
+    if (GIT_GLOBAL_FLAGS_WITH_VALUE.has(option)) index += 1;
+  }
+  return parts[index]?.toLowerCase() === 'push';
+}
+
 /** Classifies a shell command. */
 export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
   const resolved = extractAndResolveShellVariables(command);
@@ -489,6 +516,13 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
             worst = { risk: 'dangerous', reason };
             break;
           }
+        }
+        // `git push` yang disisipi global flag git (`-C <path>`, `-c <k=v>`,
+        // `--git-dir=<path>`, ...) tidak lagi cocok dengan pola regex di atas,
+        // padahal efeknya identik dengan `git push` polos. Verdict disamakan
+        // memakai reason yang sama dengan entri DANGEROUS_PATTERNS.
+        if (worst.risk !== 'dangerous' && isGitPushWithGlobalFlags(c)) {
+          worst = { risk: 'dangerous', reason: 'git push (mengubah remote repository)' };
         }
       }
     }
