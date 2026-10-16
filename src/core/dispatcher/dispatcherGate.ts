@@ -134,5 +134,8 @@ function extractTargetPath(tool: string, args: Record<string, any>): string | nu
   if (tool === 'move_file') {
     return args.destination || args.targetPath || args.path || null;
   }
-  return args.path || args.file || args.targetPath || null;
+  // Issue #38-2: harus sama persis dengan alias precedence handler
+  // (runToolCall): revert_file memakai `path ?? file ?? target`, tanpa ini
+  // `{target}` lolos scope check (decoy alias, celah yang sama dengan move_file).
+  return args.path || args.file || args.target || args.targetPath || null;
 }
