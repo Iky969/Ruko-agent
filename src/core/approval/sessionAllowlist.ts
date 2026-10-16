@@ -155,7 +155,7 @@ export class SessionApprovalAllowlist {
     let index = 1;
     while (index < parts.length && parts[index].startsWith('-')) {
       const option = parts[index++];
-      if (['-C', '-c', '--git-dir', '--work-tree', '--namespace'].includes(option)) index += 1;
+      if (['-C', '-c', '--config-env', '--git-dir', '--work-tree', '--namespace'].includes(option)) index += 1;
     }
     return parts[index]?.toLowerCase() === 'push';
   }

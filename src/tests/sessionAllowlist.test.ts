@@ -237,3 +237,37 @@ test('Issue #38-3: prefix launcher & env-assignment tidak mengelabui denylist / 
   assert.equal(allowlist.canRemember('nohup echo git push && true', execOperator), false,
     'operator shell tetap ditolak untuk always');
 });
+
+test('tokenizer git-push: bentuk berglobal-flag bernilai (termasuk --config-env) tidak dapat diingat sebagai always', (t) => {
+  const ws = mkdtempSync(join(tmpdir(), 'ruko-allowlist-gitpush-'));
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  const allowlist = new SessionApprovalAllowlist();
+
+  const denied = [
+    'git -C . push origin main',
+    'git -c user.name=x push origin main',
+    'git --config-env user.name=MY_ENV push origin main',
+    'git --config-env=user.name=MY_ENV push origin main',
+    'git --git-dir=.git push origin main',
+    'git --work-tree=/tmp/wt push origin main',
+    'git --namespace=ns push origin main',
+  ];
+  for (const command of denied) {
+    for (const kind of ['start_process', 'exec'] as const) {
+      const request: ApprovalRequest = { kind, cwd: ws, workspaceRoot: ws, command };
+      const display = kind === 'start_process' ? `start_process ${command}` : command;
+      assert.equal(allowlist.canRemember(display, request), false,
+        `${kind}: "${command}" tidak boleh ditawarkan sebagai always`);
+      assert.equal(allowlist.remember(display, request), false,
+        `${kind}: "${command}" tidak boleh tersimpan`);
+      assert.equal(allowlist.allows(display, request), false);
+    }
+  }
+
+  // Kontrol positif: bentuk non-push dengan flag bernilai yang sama tetap rememberable.
+  for (const command of ['git -C . status', 'git --config-env user.name=MY_ENV status']) {
+    const request: ApprovalRequest = { kind: 'start_process', cwd: ws, workspaceRoot: ws, command };
+    const display = `start_process ${command}`;
+    assert.equal(allowlist.remember(display, request), true, `kontrol positif: ${command}`);
+  }
+});

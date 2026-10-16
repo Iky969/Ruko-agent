@@ -460,10 +460,16 @@ export function allSegmentsAllowlisted(cmd: string, allowlist: string[]): boolea
 
 /**
  * Global flag git yang memisahkan program dari subcommand dengan satu nilai
- * argumen. Daftar ini identik dengan SessionApprovalAllowlist.isDirectGitPush
- * (satu sumber kebenaran untuk bentuk `git push` dengan global flag).
+ * argumen (bentuk terpisah: `--git-dir .git`, `--config-env k=v`). Diverifikasi
+ * terhadap git 2.34.1: -C/--git-dir/--work-tree/--namespace/--exec-path/
+ * --config-env mengonsumsi token berikutnya sebagai nilai. `--config-env`
+ * ditambahkan karena bentuk terpisahnya lolos dari guard sebelum ini.
+ * Dijaga sinkron dengan SessionApprovalAllowlist.isDirectGitPush.
  */
-const GIT_GLOBAL_FLAGS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace']);
+const GIT_GLOBAL_FLAGS_WITH_VALUE = new Set([
+  '-C', '-c', '--config-env', '--git-dir', '--work-tree', '--namespace',
+  '--super-prefix', '--exec-path', '--attr-source',
+]);
 
 /**
  * True bila command adalah `git push` yang disisipi global flag git.
@@ -485,6 +491,140 @@ function isGitPushWithGlobalFlags(command: string): boolean {
   return parts[index]?.toLowerCase() === 'push';
 }
 
+/**
+ * Tokenizer shell minimalis yang SADAR-KUTIP, dipakai HANYA untuk pengecekan
+ * `git push` pada segmen MENTAH (pola lain tetap memakai testCandidates()).
+ *
+ * Mengapa perlu: pemecahan naif `split(/\s+/)` memecah nilai ber-kutip
+ * (`git -c "user.name=John Doe" push`), sehingga posisi subcommand bergeser
+ * satu token dan `git ... push` yang disamarkan lolos sebagai `none`.
+ *
+ * `suspect` menandai token yang tidak dapat dipastikan secara statis: memuat
+ * substitusi `$(`/backtick atau berasal dari kutipan yang tidak tertutup.
+ */
+function tokenizeForGitPush(raw: string): { tokens: string[]; suspect: boolean[] } {
+  const tokens: string[] = [];
+  const suspect: boolean[] = [];
+  let current = '';
+  let currentSuspect = false;
+  let started = false;
+
+  const flush = (): void => {
+    if (!started) return;
+    tokens.push(current);
+    suspect.push(currentSuspect);
+    current = '';
+    currentSuspect = false;
+    started = false;
+  };
+
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (ch === ' ' || ch === '\t' || ch === '\n') {
+      flush();
+      continue;
+    }
+    started = true;
+
+    if (ch === '\\') {
+      const next = raw[i + 1];
+      if (next === ' ' || next === '\t') {
+        // Spasi yang di-escape (`git\ push`) tidak dapat menjadi argv[0] yang
+        // sah, jadi diperlakukan sebagai pemisah token (fail-safe).
+        flush();
+        i += 1;
+        continue;
+      }
+      if (next !== undefined) {
+        current += next;
+        i += 1;
+      }
+      continue;
+    }
+
+    const ansiQuote = ch === '$' && (raw[i + 1] === "'" || raw[i + 1] === '"');
+    if (ch === "'" || ch === '"' || ansiQuote) {
+      const quote = ansiQuote ? raw[i + 1] : ch;
+      if (ansiQuote) i += 1; // lewati introducer $' / $"
+      let j = i + 1;
+      let closed = false;
+      let buf = '';
+      while (j < raw.length) {
+        if (raw[j] === quote) {
+          closed = true;
+          j += 1;
+          break;
+        }
+        buf += raw[j];
+        j += 1;
+      }
+      if (!closed) currentSuspect = true;
+      if (quote === '"' && /[$]\(|`/.test(buf)) currentSuspect = true;
+      current += buf;
+      i = j - 1;
+      continue;
+    }
+
+    if (ch === '`' || (ch === '$' && raw[i + 1] === '(')) currentSuspect = true;
+    current += ch;
+  }
+
+  flush();
+  return { tokens, suspect };
+}
+
+/** Kata sederhana: kandidat subcommand git yang wajar. */
+const SIMPLE_WORD_RE = /^[A-Za-z][A-Za-z0-9-]*$/;
+
+/**
+ * True bila segmen MENTAH menjalankan `git ... push`.
+ *
+ * Aturan:
+ *  - token `git` boleh didahului prefix assignment `KEY=VALUE` (`FOO=1 BAR="a b"`)
+ *    dan wrapper launcher (`nohup`, `env`, ...) — program efektif yang dicari;
+ *  - global flag bernilai (lihat GIT_GLOBAL_FLAGS_WITH_VALUE) melewati satu
+ *    token nilai, tetapi token `push` TIDAK PERNAH ditelan sebagai nilai;
+ *  - token pertama non-flag setelah itu adalah posisi subcommand: `push` →
+ *    dangerous.
+ *
+ * Fail-safe (tokenizer tidak yakin):
+ *  - token posisi-subcommand memuat substitusi/backtick/kutip tak tertutup →
+ *    dangerous;
+ *  - token posisi-subcommand bukan kata sederhana (mis. nilai path dari flag
+ *    yang tidak dikenal) → dangerous, karena posisi subcommand tidak dapat
+ *    dipastikan.
+ */
+function isGitPushInvocationRaw(segment: string): boolean {
+  const { tokens, suspect } = tokenizeForGitPush(segment);
+
+  for (let g = 0; g < tokens.length; g += 1) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[g])) continue; // prefix KEY=VALUE
+    const program = (tokens[g].split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
+    if (program !== 'git') continue;
+
+    let i = g + 1;
+    while (i < tokens.length) {
+      const token = tokens[i];
+      if (token.startsWith('-')) {
+        i += 1;
+        if (
+          GIT_GLOBAL_FLAGS_WITH_VALUE.has(token) &&
+          i < tokens.length &&
+          tokens[i].toLowerCase() !== 'push'
+        ) {
+          i += 1;
+        }
+        continue;
+      }
+      if (token.toLowerCase() === 'push') return true;
+      return suspect[i] === true || !SIMPLE_WORD_RE.test(token);
+    }
+    return false;
+  }
+
+  return false;
+}
+
 /** Classifies a shell command. */
 export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
   const resolved = extractAndResolveShellVariables(command);
@@ -502,6 +642,12 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
     ...(resolved !== command ? chainedSegments(command) : []),
   ];
   for (const seg of segments) {
+    // Tokenizer sadar-kutip pada segmen MENTAH — HANYA untuk pengecekan
+    // `git push`; kandidat turunan (quote-stripped/URL-decoded/dot-normalised)
+    // tetap dinilai oleh semua pola di bawah tanpa perubahan.
+    if (worst.risk !== 'dangerous' && isGitPushInvocationRaw(seg)) {
+      worst = { risk: 'dangerous', reason: 'git push (mengubah remote repository)' };
+    }
     const candidates = testCandidates(seg);
     for (const c of candidates) {
       // BLOCKED patterns are always checked first — cannot be bypassed.
