@@ -458,6 +458,302 @@ export function allSegmentsAllowlisted(cmd: string, allowlist: string[]): boolea
   return true;
 }
 
+/**
+ * Global flag git yang memisahkan program dari subcommand dengan satu nilai
+ * argumen (bentuk terpisah: `--git-dir .git`, `--config-env k=v`). Diverifikasi
+ * terhadap git 2.34.1: -C/--git-dir/--work-tree/--namespace/--exec-path/
+ * --config-env mengonsumsi token berikutnya sebagai nilai. `--config-env`
+ * ditambahkan karena bentuk terpisahnya lolos dari guard sebelum ini.
+ * Dijaga sinkron dengan SessionApprovalAllowlist.isDirectGitPush.
+ */
+const GIT_GLOBAL_FLAGS_WITH_VALUE = new Set([
+  '-C', '-c', '--config-env', '--git-dir', '--work-tree', '--namespace',
+  '--super-prefix', '--exec-path', '--attr-source',
+]);
+
+/**
+ * True bila command adalah `git push` yang disisipi global flag git.
+ * Token-based (bukan regex) karena `-C`/`-c`/`--git-dir`/`--work-tree`/
+ * `--namespace` menyisipkan nilai argumen di antara program `git` dan
+ * subcommand `push`, mis. `git -C . push origin main`. Bentuk menempel
+ * (`--git-dir=.git`) hanya meng-consume satu token.
+ */
+function isGitPushWithGlobalFlags(command: string): boolean {
+  const parts = command.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return false;
+  const program = (parts[0].split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
+  if (program !== 'git') return false;
+  let index = 1;
+  while (index < parts.length && parts[index].startsWith('-')) {
+    const option = parts[index++];
+    if (GIT_GLOBAL_FLAGS_WITH_VALUE.has(option)) index += 1;
+  }
+  return parts[index]?.toLowerCase() === 'push';
+}
+
+/**
+ * Tokenizer shell minimalis yang SADAR-KUTIP, dipakai HANYA untuk pengecekan
+ * `git push` pada segmen MENTAH (pola lain tetap memakai testCandidates()).
+ *
+ * Mengapa perlu: pemecahan naif `split(/\s+/)` memecah nilai ber-kutip
+ * (`git -c "user.name=John Doe" push`), sehingga posisi subcommand bergeser
+ * satu token dan `git ... push` yang disamarkan lolos sebagai `none`.
+ *
+ * `suspect` menandai token yang tidak dapat dipastikan secara statis: memuat
+ * substitusi `$(`/backtick atau berasal dari kutipan yang tidak tertutup.
+ */
+function tokenizeForGitPush(raw: string): { tokens: string[]; suspect: boolean[] } {
+  const tokens: string[] = [];
+  const suspect: boolean[] = [];
+  let current = '';
+  let currentSuspect = false;
+  let started = false;
+
+  const flush = (): void => {
+    if (!started) return;
+    tokens.push(current);
+    suspect.push(currentSuspect);
+    current = '';
+    currentSuspect = false;
+    started = false;
+  };
+
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (ch === ' ' || ch === '\t' || ch === '\n') {
+      flush();
+      continue;
+    }
+    started = true;
+
+    if (ch === '\\') {
+      const next = raw[i + 1];
+      if (next === ' ' || next === '\t') {
+        // Spasi yang di-escape (`git\ push`) tidak dapat menjadi argv[0] yang
+        // sah, jadi diperlakukan sebagai pemisah token (fail-safe).
+        flush();
+        i += 1;
+        continue;
+      }
+      if (next !== undefined) {
+        current += next;
+        i += 1;
+      }
+      continue;
+    }
+
+    const ansiQuote = ch === '$' && (raw[i + 1] === "'" || raw[i + 1] === '"');
+    if (ch === "'" || ch === '"' || ansiQuote) {
+      const quote = ansiQuote ? raw[i + 1] : ch;
+      if (ansiQuote) i += 1; // lewati introducer $' / $"
+      let j = i + 1;
+      let closed = false;
+      let buf = '';
+      while (j < raw.length) {
+        if (raw[j] === quote) {
+          closed = true;
+          j += 1;
+          break;
+        }
+        buf += raw[j];
+        j += 1;
+      }
+      if (!closed) currentSuspect = true;
+      if (quote === '"' && /[$]\(|`/.test(buf)) currentSuspect = true;
+      current += buf;
+      i = j - 1;
+      continue;
+    }
+
+    if (ch === '`' || (ch === '$' && raw[i + 1] === '(')) currentSuspect = true;
+    current += ch;
+  }
+
+  flush();
+  return { tokens, suspect };
+}
+
+/** Kata sederhana: kandidat subcommand git yang wajar. */
+const SIMPLE_WORD_RE = /^[A-Za-z][A-Za-z0-9-]*$/;
+
+/**
+ * True bila segmen MENTAH menjalankan `git ... push`.
+ *
+ * Aturan:
+ *  - token `git` boleh didahului prefix assignment `KEY=VALUE` (`FOO=1 BAR="a b"`)
+ *    dan wrapper launcher (`nohup`, `env`, ...) — program efektif yang dicari;
+ *  - global flag bernilai (lihat GIT_GLOBAL_FLAGS_WITH_VALUE) melewati satu
+ *    token nilai, tetapi token `push` TIDAK PERNAH ditelan sebagai nilai;
+ *  - token pertama non-flag setelah itu adalah posisi subcommand: `push` →
+ *    dangerous.
+ *
+ * Fail-safe (tokenizer tidak yakin):
+ *  - token posisi-subcommand memuat substitusi/backtick/kutip tak tertutup →
+ *    dangerous;
+ *  - token posisi-subcommand bukan kata sederhana (mis. nilai path dari flag
+ *    yang tidak dikenal) → dangerous, karena posisi subcommand tidak dapat
+ *    dipastikan.
+ */
+function isGitPushInvocationRaw(segment: string): boolean {
+  const { tokens, suspect } = tokenizeForGitPush(segment);
+
+  for (let g = 0; g < tokens.length; g += 1) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[g])) continue; // prefix KEY=VALUE
+    const program = (tokens[g].split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
+    if (program !== 'git') continue;
+
+    let i = g + 1;
+    while (i < tokens.length) {
+      const token = tokens[i];
+      if (token.startsWith('-')) {
+        i += 1;
+        if (
+          GIT_GLOBAL_FLAGS_WITH_VALUE.has(token) &&
+          i < tokens.length &&
+          tokens[i].toLowerCase() !== 'push'
+        ) {
+          i += 1;
+        }
+        continue;
+      }
+      if (token.toLowerCase() === 'push') return true;
+      return suspect[i] === true || !SIMPLE_WORD_RE.test(token);
+    }
+    return false;
+  }
+
+  return false;
+}
+
+/**
+ * Alasan verdict untuk assignment env `GIT_*` inline. Variabel ini dibaca git
+ * SEBELUM perintah berjalan, jadi perintah yang terlihat aman (`git status`)
+ * pun bisa mengeksekusi program dari nilai variabelnya.
+ */
+export const GIT_ENV_ASSIGNMENT_REASON =
+  'assignment env GIT_* (konfigurasi/eksekusi git dari luar perintah)';
+
+/**
+ * Wrapper peluncur yang boleh mendahului assignment tanpa mengubah arti.
+ * Daftar ini hanya dipakai untuk melewati prefix, bukan untuk mengizinkan
+ * programnya.
+ */
+const GIT_ENV_PREFIX_WRAPPERS = new Set([
+  'nohup', 'env', 'timeout', 'nice', 'ionice', 'setsid', 'stdbuf', 'time',
+  'command', 'exec', 'chroot', 'unshare', 'nsenter',
+]);
+
+/** Opsi wrapper (bentuk pendek/panjang) yang memakan token argumen berikutnya. */
+const GIT_ENV_WRAPPER_VALUE_OPTS: Record<string, { short: string; long: string[] }> = {
+  env: { short: 'uSC', long: ['unset', 'split-string', 'chdir'] },
+  timeout: { short: 'sk', long: ['signal', 'kill-after'] },
+  nice: { short: 'n', long: ['adjustment'] },
+  ionice: { short: 'cn', long: ['class', 'priority'] },
+  stdbuf: { short: 'ioe', long: ['input', 'output', 'error'] },
+  time: { short: 'fo', long: ['format', 'output'] },
+  chroot: { short: '', long: ['userspec'] },
+  nsenter: { short: 't', long: ['target', 'root', 'wd', 'pid'] },
+  unshare: { short: '', long: ['map-users', 'map-groups'] },
+};
+
+/**
+ * True bila segmen memuat assignment env `GIT_*` pada posisi prefix perintah:
+ * token pertama, setelah assignment lain (`A=1 GIT_CONFIG_COUNT=1 …`), atau
+ * setelah wrapper peluncur (`env GIT_SSH_COMMAND=…`).
+ *
+ * Deteksi TIDAK boleh berhenti di token pertama: nilai `GIT_CONFIG_*`
+ * menginjeksi config git (mis. `core.fsmonitor`, alias) dan `GIT_SSH*` /
+ * `GIT_EXTERNAL_DIFF` mengganti program yang dieksekusi git.
+ */
+export function hasGitEnvAssignment(segment: string): boolean {
+  const { tokens } = tokenizeForGitPush(segment);
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+      if (/^GIT_[A-Za-z0-9_]*=/.test(token)) return true;
+      index += 1;
+      continue;
+    }
+    const program = (token.split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
+    if (!GIT_ENV_PREFIX_WRAPPERS.has(program)) return false;
+    index += 1;
+    while (index < tokens.length && tokens[index].startsWith('-') && tokens[index] !== '-') {
+      const opt = tokens[index];
+      index += 1;
+      if (opt.includes('=')) continue; // nilai menempel: `--flag=value`
+      const spec = GIT_ENV_WRAPPER_VALUE_OPTS[program];
+      if (!spec) continue;
+      const takesValue = opt.startsWith('--')
+        ? spec.long.includes(opt.slice(2))
+        : opt.length === 2 && spec.short.includes(opt.slice(1));
+      if (takesValue && index < tokens.length) index += 1;
+    }
+  }
+  return false;
+}
+
+/**
+ * Alasan verdict untuk flag konfigurasi git `-c` / `--config-env`.
+ * Nilainya menginjeksi config ke perintah git apa pun (mis. `core.fsmonitor`
+ * menjalankan program), jadi perintah yang terlihat read-only pun berbahaya.
+ */
+export const GIT_CONFIG_FLAG_REASON =
+  'flag konfigurasi git (-c/--config-env) menyuntikkan config ke perintah';
+
+/**
+ * Key git config yang tidak dapat mengeksekusi program atau mengalihkan I/O.
+ * Hanya `user.*` dan `color.*` (case-insensitive) yang boleh tetap `none`.
+ */
+function isAllowlistedGitConfigKey(key: string): boolean {
+  const normalized = key.trim().toLowerCase();
+  return normalized.startsWith('user.') || normalized.startsWith('color.');
+}
+
+/**
+ * True bila segmen menjalankan git dengan `-c` / `--config-env` yang TIDAK
+ * dapat diverifikasi aman.
+ *
+ * Aturan (tanpa bergantung pada versi git — bentuk tempel `-c<key>=<value>`
+ * diterima git versi lain, jadi tidak boleh diandalkan lolos sebagai error):
+ *  - SEMUA `--config-env` dan bentuk tempel `-c<key>=<value>` → berbahaya;
+ *  - `-c <key>=<value>` → berbahaya bila key bukan `user.*`/`color.*`;
+ *  - key allowlist TIDAK langsung mengakhiri penilaian: pemanggil tetap
+ *    memeriksa subcommand (`git -c user.name=x push` harus tetap `dangerous`).
+ */
+export function hasGitConfigInjection(segment: string): boolean {
+  const { tokens } = tokenizeForGitPush(segment);
+  for (let g = 0; g < tokens.length; g += 1) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[g])) continue; // prefix KEY=VALUE
+    const program = (tokens[g].split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
+    if (program !== 'git') continue;
+
+    let i = g + 1;
+    while (i < tokens.length) {
+      const token = tokens[i];
+      if (token === '--config-env' || token.startsWith('--config-env=')) return true;
+      if (token === '-c') {
+        const value = tokens[i + 1];
+        if (value === undefined) return true; // nilai hilang: tidak dapat diverifikasi
+        if (!isAllowlistedGitConfigKey(value.split('=')[0])) return true;
+        i += 2;
+        continue;
+      }
+      if (/^-c./.test(token)) return true; // bentuk tempel -c<key>=<value>
+      if (token.startsWith('-')) {
+        i += 1;
+        if (GIT_GLOBAL_FLAGS_WITH_VALUE.has(token) && i < tokens.length && tokens[i].toLowerCase() !== 'push') {
+          i += 1;
+        }
+        continue;
+      }
+      break; // subcommand — pemanggil yang memutuskan verdict-nya
+    }
+    return false;
+  }
+  return false;
+}
+
 /** Classifies a shell command. */
 export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
   const resolved = extractAndResolveShellVariables(command);
@@ -475,6 +771,24 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
     ...(resolved !== command ? chainedSegments(command) : []),
   ];
   for (const seg of segments) {
+    // Tokenizer sadar-kutip pada segmen MENTAH — HANYA untuk pengecekan
+    // `git push`; kandidat turunan (quote-stripped/URL-decoded/dot-normalised)
+    // tetap dinilai oleh semua pola di bawah tanpa perubahan.
+    if (worst.risk !== 'dangerous' && isGitPushInvocationRaw(seg)) {
+      worst = { risk: 'dangerous', reason: 'git push (mengubah remote repository)' };
+    }
+    // Assignment env `GIT_*` pada prefix perintah tidak boleh lolos sebagai
+    // `none` hanya karena program setelahnya terlihat read-only.
+    if (worst.risk !== 'dangerous' && hasGitEnvAssignment(seg)) {
+      worst = { risk: 'dangerous', reason: GIT_ENV_ASSIGNMENT_REASON };
+    }
+    // Flag konfigurasi git `-c`/`--config-env` menyuntikkan config (termasuk
+    // key yang menjalankan program seperti core.fsmonitor) ke subcommand apa
+    // pun; key allowlist `user.*`/`color.*` tetap membiarkan subcommand dinilai
+    // oleh aturan git-push di atas.
+    if (worst.risk !== 'dangerous' && hasGitConfigInjection(seg)) {
+      worst = { risk: 'dangerous', reason: GIT_CONFIG_FLAG_REASON };
+    }
     const candidates = testCandidates(seg);
     for (const c of candidates) {
       // BLOCKED patterns are always checked first — cannot be bypassed.
@@ -489,6 +803,13 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
             worst = { risk: 'dangerous', reason };
             break;
           }
+        }
+        // `git push` yang disisipi global flag git (`-C <path>`, `-c <k=v>`,
+        // `--git-dir=<path>`, ...) tidak lagi cocok dengan pola regex di atas,
+        // padahal efeknya identik dengan `git push` polos. Verdict disamakan
+        // memakai reason yang sama dengan entri DANGEROUS_PATTERNS.
+        if (worst.risk !== 'dangerous' && isGitPushWithGlobalFlags(c)) {
+          worst = { risk: 'dangerous', reason: 'git push (mengubah remote repository)' };
         }
       }
     }
