@@ -693,6 +693,67 @@ export function hasGitEnvAssignment(segment: string): boolean {
   return false;
 }
 
+/**
+ * Alasan verdict untuk flag konfigurasi git `-c` / `--config-env`.
+ * Nilainya menginjeksi config ke perintah git apa pun (mis. `core.fsmonitor`
+ * menjalankan program), jadi perintah yang terlihat read-only pun berbahaya.
+ */
+export const GIT_CONFIG_FLAG_REASON =
+  'flag konfigurasi git (-c/--config-env) menyuntikkan config ke perintah';
+
+/**
+ * Key git config yang tidak dapat mengeksekusi program atau mengalihkan I/O.
+ * Hanya `user.*` dan `color.*` (case-insensitive) yang boleh tetap `none`.
+ */
+function isAllowlistedGitConfigKey(key: string): boolean {
+  const normalized = key.trim().toLowerCase();
+  return normalized.startsWith('user.') || normalized.startsWith('color.');
+}
+
+/**
+ * True bila segmen menjalankan git dengan `-c` / `--config-env` yang TIDAK
+ * dapat diverifikasi aman.
+ *
+ * Aturan (tanpa bergantung pada versi git — bentuk tempel `-c<key>=<value>`
+ * diterima git versi lain, jadi tidak boleh diandalkan lolos sebagai error):
+ *  - SEMUA `--config-env` dan bentuk tempel `-c<key>=<value>` → berbahaya;
+ *  - `-c <key>=<value>` → berbahaya bila key bukan `user.*`/`color.*`;
+ *  - key allowlist TIDAK langsung mengakhiri penilaian: pemanggil tetap
+ *    memeriksa subcommand (`git -c user.name=x push` harus tetap `dangerous`).
+ */
+export function hasGitConfigInjection(segment: string): boolean {
+  const { tokens } = tokenizeForGitPush(segment);
+  for (let g = 0; g < tokens.length; g += 1) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[g])) continue; // prefix KEY=VALUE
+    const program = (tokens[g].split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
+    if (program !== 'git') continue;
+
+    let i = g + 1;
+    while (i < tokens.length) {
+      const token = tokens[i];
+      if (token === '--config-env' || token.startsWith('--config-env=')) return true;
+      if (token === '-c') {
+        const value = tokens[i + 1];
+        if (value === undefined) return true; // nilai hilang: tidak dapat diverifikasi
+        if (!isAllowlistedGitConfigKey(value.split('=')[0])) return true;
+        i += 2;
+        continue;
+      }
+      if (/^-c./.test(token)) return true; // bentuk tempel -c<key>=<value>
+      if (token.startsWith('-')) {
+        i += 1;
+        if (GIT_GLOBAL_FLAGS_WITH_VALUE.has(token) && i < tokens.length && tokens[i].toLowerCase() !== 'push') {
+          i += 1;
+        }
+        continue;
+      }
+      break; // subcommand — pemanggil yang memutuskan verdict-nya
+    }
+    return false;
+  }
+  return false;
+}
+
 /** Classifies a shell command. */
 export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
   const resolved = extractAndResolveShellVariables(command);
@@ -720,6 +781,13 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
     // `none` hanya karena program setelahnya terlihat read-only.
     if (worst.risk !== 'dangerous' && hasGitEnvAssignment(seg)) {
       worst = { risk: 'dangerous', reason: GIT_ENV_ASSIGNMENT_REASON };
+    }
+    // Flag konfigurasi git `-c`/`--config-env` menyuntikkan config (termasuk
+    // key yang menjalankan program seperti core.fsmonitor) ke subcommand apa
+    // pun; key allowlist `user.*`/`color.*` tetap membiarkan subcommand dinilai
+    // oleh aturan git-push di atas.
+    if (worst.risk !== 'dangerous' && hasGitConfigInjection(seg)) {
+      worst = { risk: 'dangerous', reason: GIT_CONFIG_FLAG_REASON };
     }
     const candidates = testCandidates(seg);
     for (const c of candidates) {

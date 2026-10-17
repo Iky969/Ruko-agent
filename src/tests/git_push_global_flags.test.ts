@@ -81,7 +81,6 @@ describe('detectRisk: tokenizer sadar-kutip untuk git push (kelas A1/A2/B1/C + k
 
   const stillNone = [
     ['git -c "user.name=John Doe" status', 'A1-kontrol: bukan push'],
-    ['git --config-env user.name=MY_ENV status', 'B1-kontrol: bukan push'],
     ['git "log" --oneline push', 'token push bukan di posisi subcommand'],
     ['git --no-pager log push', 'flag tanpa nilai lalu subcommand log'],
     ['git commit -m "$(cat msg)"', 'substitusi pada argumen subcommand bukan-push'],
@@ -100,6 +99,17 @@ describe('detectRisk: tokenizer sadar-kutip untuk git push (kelas A1/A2/B1/C + k
   // `GIT_SSH_COMMAND="ssh -i key" git -C . status` DIPROMOSI dari kontrol none
   // (verdict lama memang `none`, kini harus `dangerous`) — penguatan, bukan
   // pelemahan assertion.
+  test('COMMIT 2: -c/--config-env bukan-push dengan key non-allowlist/bentuk tempel tetap dangerous', () => {
+    const promoted = [
+      'git --config-env user.name=MY_ENV status',
+      'git --config-env=core.fsmonitor=EV status',
+      'git -ccore.fsmonitor=/tmp/M status',
+    ] as const;
+    for (const command of promoted) {
+      assert.equal(detectRisk(command, cfg()).risk, 'dangerous', 'harus dangerous: ' + command);
+    }
+  });
+
   test('COMMIT 1: assignment env GIT_* inline bukan-push tetap dangerous', () => {
     const promoted = [
       'GIT_SSH_COMMAND="ssh -i key" git -C . status',

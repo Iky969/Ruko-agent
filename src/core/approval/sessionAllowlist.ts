@@ -1,6 +1,6 @@
 import { lstatSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
-import { containsShellOperators, detectRisk, hasGitEnvAssignment, isHighRiskDangerousCommand } from '../approval.js';
+import { containsShellOperators, detectRisk, hasGitConfigInjection, hasGitEnvAssignment, isHighRiskDangerousCommand } from '../approval.js';
 import { DEFAULT_CONFIG } from '../../types.js';
 
 /** Host-supplied execution context, never taken from model approval flags. */
@@ -176,6 +176,10 @@ export class SessionApprovalAllowlist {
     // berjalan — perintah yang tampak aman pun dapat mengeksekusi program dari
     // nilai variabelnya, jadi tidak pernah layak diingat sebagai "always".
     if (hasGitEnvAssignment(trimmed)) return null;
+    // COMMIT 2: `-c`/`--config-env` menyuntikkan config ke perintah git apa
+    // pun (bentuk tempel `-c<key>=<value>` diterima git versi lain), jadi
+    // perintah seperti ini tidak pernah layak diingat sebagai "always".
+    if (hasGitConfigInjection(trimmed)) return null;
     // Issue #38-3: lepas wrapper `nohup`/`env`/`VAR=val` agar guard di bawah
     // menilai program efektif, bukan token pembungkusnya.
     const effective = effectiveCommand(trimmed);

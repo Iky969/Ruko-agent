@@ -248,6 +248,10 @@ test('tokenizer git-push: bentuk berglobal-flag bernilai (termasuk --config-env)
     'git -c user.name=x push origin main',
     'git --config-env user.name=MY_ENV push origin main',
     'git --config-env=user.name=MY_ENV push origin main',
+    // COMMIT 2: semua `--config-env` (termasuk key yang tampak aman) dan bentuk
+    // tempel `-c<key>=<value>` menyuntikkan config yang tidak dapat diverifikasi.
+    'git --config-env user.name=MY_ENV status',
+    'git -ccore.fsmonitor=/tmp/M status',
     'git --git-dir=.git push origin main',
     'git --work-tree=/tmp/wt push origin main',
     'git --namespace=ns push origin main',
@@ -265,7 +269,8 @@ test('tokenizer git-push: bentuk berglobal-flag bernilai (termasuk --config-env)
   }
 
   // Kontrol positif: bentuk non-push dengan flag bernilai yang sama tetap rememberable.
-  for (const command of ['git -C . status', 'git --config-env user.name=MY_ENV status']) {
+  // (`--config-env` DIPROMOSI ke daftar denied di atas oleh COMMIT 2.)
+  for (const command of ['git -C . status', 'git -c user.name=x status']) {
     const request: ApprovalRequest = { kind: 'start_process', cwd: ws, workspaceRoot: ws, command };
     const display = `start_process ${command}`;
     assert.equal(allowlist.remember(display, request), true, `kontrol positif: ${command}`);
