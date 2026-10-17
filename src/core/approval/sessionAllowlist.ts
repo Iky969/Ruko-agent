@@ -66,6 +66,30 @@ const LAUNCHER_VALUE_OPTS: Record<string, { short: string; long: string[] }> = {
   chroot: { short: '', long: ['userspec'] },
   nsenter: { short: 't', long: ['target', 'root', 'wd', 'pid'] },
   unshare: { short: '', long: ['map-users', 'map-groups'] },
+  exec: { short: 'a', long: ['argv0'] },
+};
+
+/**
+ * Opsi boolean wrapper yang dikenal (tanpa argumen). Tabel ini SATU-SATUNYA
+ * daftar flag non-nilai yang diterima — tidak ada parser per flag. Flag yang
+ * tidak ada di sini (termasuk yang berargumen) ditolak fail-closed oleh
+ * `effectiveCommand()`.
+ */
+const LAUNCHER_BOOL_OPTS: Record<string, { short: string; long: string[] }> = {
+  nohup: { short: '', long: [] },
+  env: { short: 'i0v', long: ['ignore-environment', 'null', 'debug'] },
+  timeout: { short: 'v', long: ['preserve-status', 'foreground', 'verbose'] },
+  nice: { short: '', long: [] },
+  ionice: { short: 't', long: ['ignore'] },
+  stdbuf: { short: '', long: [] },
+  setsid: { short: 'cfw', long: ['ctty', 'fork', 'wait'] },
+  time: { short: 'pv', long: ['portability', 'verbose', 'append'] },
+  command: { short: 'pvV', long: [] },
+  exec: { short: 'cl', long: ['clear-environment', 'login'] },
+  builtin: { short: '', long: [] },
+  chroot: { short: '', long: ['skip-chdir'] },
+  nsenter: { short: '', long: ['all', 'no-fork', 'keep-cwd', 'preserve-credentials'] },
+  unshare: { short: '', long: ['fork', 'kill-child', 'mount', 'uts', 'ipc', 'net', 'pid', 'user', 'cgroup', 'time'] },
 };
 
 /** Wrapper dengan argumen path/wajib sebelum program nyata. */
@@ -76,13 +100,20 @@ const MAX_LAUNCHER_STEPS = 8;
 
 /**
  * Kembalikan perintah efektif setelah prefix launcher/env-assignment dilepas,
- * atau null bila tidak tersisa program sama sekali (fail-closed).
- * Argumen opsi hanya dilepas bila terdefinisi untuk wrapper tersebut; nilai
- * yang menempel (`-oL`, `--flag=v`) tidak meng-consume token berikutnya.
+ * atau null bila program efektif tidak dapat dipastikan (fail-closed).
+ *
+ * Fail-closed COMMIT 3:
+ *  - batas MAX_LAUNCHER_STEPS habis sementara token berikutnya masih wrapper
+ *    atau assignment → null. Tanpa ini, `A=1 … I=9 git push …` membuat 8
+ *    langkah habis dan `I=9` dikira program efektif, sehingga guard git-push
+ *    tidak pernah melihat `git push`;
+ *  - flag wrapper yang TIDAK dikenal (termasuk yang berargumen) → null, alih-
+ *    alih dilewati diam-diam. Flag yang dikenal dibaca dari tabel data di atas.
  */
 function effectiveCommand(trimmed: string): string | null {
   let tokens = trimmed.split(/\s+/).filter(Boolean);
-  for (let step = 0; step < MAX_LAUNCHER_STEPS; step++) {
+  let step = 0;
+  for (; step < MAX_LAUNCHER_STEPS; step++) {
     if (tokens.length === 0) return null;
     // Env-assignment sebelum program: `FOO=bar cmd`.
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) {
@@ -96,20 +127,41 @@ function effectiveCommand(trimmed: string): string | null {
     if (LAUNCHER_WITH_PATH_ARG.has(name) && index < tokens.length && !tokens[index].startsWith('-')) {
       index += 1; // chroot <newroot> <program>
     }
-    while (index < tokens.length && tokens[index].startsWith('-')) {
+    while (index < tokens.length && tokens[index].startsWith('-') && tokens[index] !== '-') {
       const opt = tokens[index++];
       if (opt.includes('=')) continue; // nilai menempel: `--flag=value`
-      const spec = LAUNCHER_VALUE_OPTS[name];
-      if (!spec) continue; // wrapper tanpa opsi bernilai dikenal
-      const takesValue = opt.startsWith('--')
-        ? spec.long.includes(opt.slice(2))
-        : opt.length === 2 && spec.short.includes(opt.slice(1));
-      if (takesValue && index < tokens.length) index += 1;
+      const valueSpec = LAUNCHER_VALUE_OPTS[name];
+      const takesValue = valueSpec !== undefined && (
+        opt.startsWith('--')
+          ? valueSpec.long.includes(opt.slice(2))
+          : opt.length === 2 && valueSpec.short.includes(opt.slice(1))
+      );
+      if (takesValue) {
+        if (index < tokens.length) index += 1;
+        continue;
+      }
+      // Nilai menempel bentuk pendek (`-oL`, `-k5s`) dan adjustment numerik (`-5`).
+      if (opt.length > 2 && !opt.startsWith('--') && valueSpec !== undefined && valueSpec.short.includes(opt[1])) continue;
+      if (/^-\d+$/.test(opt)) continue;
+      const boolSpec = LAUNCHER_BOOL_OPTS[name];
+      const isBoolean = boolSpec !== undefined && (
+        opt.startsWith('--')
+          ? boolSpec.long.includes(opt.slice(2))
+          : opt.length === 2 && boolSpec.short.includes(opt.slice(1))
+      );
+      if (!isBoolean) return null; // flag tidak dikenal → fail-closed
     }
-    // Argumen numerik wrapper (`timeout 5 …`, `nice -n 5 …`, `ionice -c 3 …`).
-    while (index < tokens.length && /^(?:[0-9]+(?:\.[0-9]+)?)$/.test(tokens[index])) index += 1;
+    // Argumen numerik/durasi wrapper (`timeout 5 …`, `timeout -k 5s 10s …`).
+    while (index < tokens.length && /^(?:[0-9]+(?:\.[0-9]+)?)(?:ms|s|m|h|d)?$/i.test(tokens[index])) index += 1;
     tokens = tokens.slice(index);
     if (tokens.length === 0) return null;
+  }
+  // Batas langkah habis: bila token berikutnya masih wrapper/assignment, program
+  // efektif tidak dapat dipastikan → fail-closed.
+  if (step >= MAX_LAUNCHER_STEPS && tokens.length > 0) {
+    const head = tokens[0];
+    const name = (head.split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(head) || LAUNCHER_PREFIXES.has(name)) return null;
   }
   return tokens.length > 0 ? tokens.join(' ') : null;
 }
