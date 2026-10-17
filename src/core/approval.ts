@@ -625,6 +625,74 @@ function isGitPushInvocationRaw(segment: string): boolean {
   return false;
 }
 
+/**
+ * Alasan verdict untuk assignment env `GIT_*` inline. Variabel ini dibaca git
+ * SEBELUM perintah berjalan, jadi perintah yang terlihat aman (`git status`)
+ * pun bisa mengeksekusi program dari nilai variabelnya.
+ */
+export const GIT_ENV_ASSIGNMENT_REASON =
+  'assignment env GIT_* (konfigurasi/eksekusi git dari luar perintah)';
+
+/**
+ * Wrapper peluncur yang boleh mendahului assignment tanpa mengubah arti.
+ * Daftar ini hanya dipakai untuk melewati prefix, bukan untuk mengizinkan
+ * programnya.
+ */
+const GIT_ENV_PREFIX_WRAPPERS = new Set([
+  'nohup', 'env', 'timeout', 'nice', 'ionice', 'setsid', 'stdbuf', 'time',
+  'command', 'exec', 'chroot', 'unshare', 'nsenter',
+]);
+
+/** Opsi wrapper (bentuk pendek/panjang) yang memakan token argumen berikutnya. */
+const GIT_ENV_WRAPPER_VALUE_OPTS: Record<string, { short: string; long: string[] }> = {
+  env: { short: 'uSC', long: ['unset', 'split-string', 'chdir'] },
+  timeout: { short: 'sk', long: ['signal', 'kill-after'] },
+  nice: { short: 'n', long: ['adjustment'] },
+  ionice: { short: 'cn', long: ['class', 'priority'] },
+  stdbuf: { short: 'ioe', long: ['input', 'output', 'error'] },
+  time: { short: 'fo', long: ['format', 'output'] },
+  chroot: { short: '', long: ['userspec'] },
+  nsenter: { short: 't', long: ['target', 'root', 'wd', 'pid'] },
+  unshare: { short: '', long: ['map-users', 'map-groups'] },
+};
+
+/**
+ * True bila segmen memuat assignment env `GIT_*` pada posisi prefix perintah:
+ * token pertama, setelah assignment lain (`A=1 GIT_CONFIG_COUNT=1 …`), atau
+ * setelah wrapper peluncur (`env GIT_SSH_COMMAND=…`).
+ *
+ * Deteksi TIDAK boleh berhenti di token pertama: nilai `GIT_CONFIG_*`
+ * menginjeksi config git (mis. `core.fsmonitor`, alias) dan `GIT_SSH*` /
+ * `GIT_EXTERNAL_DIFF` mengganti program yang dieksekusi git.
+ */
+export function hasGitEnvAssignment(segment: string): boolean {
+  const { tokens } = tokenizeForGitPush(segment);
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+      if (/^GIT_[A-Za-z0-9_]*=/.test(token)) return true;
+      index += 1;
+      continue;
+    }
+    const program = (token.split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
+    if (!GIT_ENV_PREFIX_WRAPPERS.has(program)) return false;
+    index += 1;
+    while (index < tokens.length && tokens[index].startsWith('-') && tokens[index] !== '-') {
+      const opt = tokens[index];
+      index += 1;
+      if (opt.includes('=')) continue; // nilai menempel: `--flag=value`
+      const spec = GIT_ENV_WRAPPER_VALUE_OPTS[program];
+      if (!spec) continue;
+      const takesValue = opt.startsWith('--')
+        ? spec.long.includes(opt.slice(2))
+        : opt.length === 2 && spec.short.includes(opt.slice(1));
+      if (takesValue && index < tokens.length) index += 1;
+    }
+  }
+  return false;
+}
+
 /** Classifies a shell command. */
 export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
   const resolved = extractAndResolveShellVariables(command);
@@ -647,6 +715,11 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
     // tetap dinilai oleh semua pola di bawah tanpa perubahan.
     if (worst.risk !== 'dangerous' && isGitPushInvocationRaw(seg)) {
       worst = { risk: 'dangerous', reason: 'git push (mengubah remote repository)' };
+    }
+    // Assignment env `GIT_*` pada prefix perintah tidak boleh lolos sebagai
+    // `none` hanya karena program setelahnya terlihat read-only.
+    if (worst.risk !== 'dangerous' && hasGitEnvAssignment(seg)) {
+      worst = { risk: 'dangerous', reason: GIT_ENV_ASSIGNMENT_REASON };
     }
     const candidates = testCandidates(seg);
     for (const c of candidates) {

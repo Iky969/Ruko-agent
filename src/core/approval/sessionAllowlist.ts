@@ -1,6 +1,6 @@
 import { lstatSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
-import { containsShellOperators, detectRisk, isHighRiskDangerousCommand } from '../approval.js';
+import { containsShellOperators, detectRisk, hasGitEnvAssignment, isHighRiskDangerousCommand } from '../approval.js';
 import { DEFAULT_CONFIG } from '../../types.js';
 
 /** Host-supplied execution context, never taken from model approval flags. */
@@ -171,6 +171,11 @@ export class SessionApprovalAllowlist {
     // Reject shell expansion, quoting, control characters and dynamic interpreters.
     // Complex commands remain available through one-shot approval, not "always".
     if (!trimmed || !/^[a-zA-Z0-9_./:@=,+~ -]+$/.test(trimmed) || containsShellOperators(command)) return null;
+    // COMMIT 1: assignment env `GIT_*` inline (mis. GIT_CONFIG_COUNT/KEY_n/
+    // VALUE_n, GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF) dibaca git sebelum perintah
+    // berjalan — perintah yang tampak aman pun dapat mengeksekusi program dari
+    // nilai variabelnya, jadi tidak pernah layak diingat sebagai "always".
+    if (hasGitEnvAssignment(trimmed)) return null;
     // Issue #38-3: lepas wrapper `nohup`/`env`/`VAR=val` agar guard di bawah
     // menilai program efektif, bukan token pembungkusnya.
     const effective = effectiveCommand(trimmed);

@@ -82,7 +82,6 @@ describe('detectRisk: tokenizer sadar-kutip untuk git push (kelas A1/A2/B1/C + k
   const stillNone = [
     ['git -c "user.name=John Doe" status', 'A1-kontrol: bukan push'],
     ['git --config-env user.name=MY_ENV status', 'B1-kontrol: bukan push'],
-    ['GIT_SSH_COMMAND="ssh -i key" git -C . status', 'C-kontrol: bukan push'],
     ['git "log" --oneline push', 'token push bukan di posisi subcommand'],
     ['git --no-pager log push', 'flag tanpa nilai lalu subcommand log'],
     ['git commit -m "$(cat msg)"', 'substitusi pada argumen subcommand bukan-push'],
@@ -93,4 +92,24 @@ describe('detectRisk: tokenizer sadar-kutip untuk git push (kelas A1/A2/B1/C + k
       assert.equal(detectRisk(command, cfg()).risk, 'none', 'harus none: ' + command);
     });
   }
+
+  // COMMIT 1 (Issue #38 lanjutan): assignment env `GIT_*` inline kini DANGEROUS
+  // meskipun subcommand-nya bukan push — nilainya dibaca git SEBELUM perintah
+  // berjalan (GIT_CONFIG_COUNT/KEY_n/VALUE_n = config injection,
+  // GIT_SSH_COMMAND/GIT_EXTERNAL_DIFF = penggantian program). Kasus
+  // `GIT_SSH_COMMAND="ssh -i key" git -C . status` DIPROMOSI dari kontrol none
+  // (verdict lama memang `none`, kini harus `dangerous`) — penguatan, bukan
+  // pelemahan assertion.
+  test('COMMIT 1: assignment env GIT_* inline bukan-push tetap dangerous', () => {
+    const promoted = [
+      'GIT_SSH_COMMAND="ssh -i key" git -C . status',
+      'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0="touch /tmp/M" git status',
+      'A=1 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0="touch /tmp/M" git status',
+      'env GIT_SSH_COMMAND="touch /tmp/M" git fetch ssh://127.0.0.1/repo',
+      'GIT_EXTERNAL_DIFF="touch /tmp/M" git diff',
+    ] as const;
+    for (const command of promoted) {
+      assert.equal(detectRisk(command, cfg()).risk, 'dangerous', 'harus dangerous: ' + command);
+    }
+  });
 });
