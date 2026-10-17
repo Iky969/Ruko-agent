@@ -66,6 +66,24 @@ describe('COMMIT 1 — assignment env GIT_* inline adalah DANGEROUS', () => {
   });
 });
 
+describe('COMMIT 1 — GIT_* inline di TENGAH rantai segmen tetap DANGEROUS', () => {
+  const dangerous = [
+    'echo x && GIT_SSH_COMMAND="touch /tmp/ruko-b/M" git fetch origin',
+    'echo x ; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0="touch /tmp/ruko-b/M" git status',
+    'echo x | GIT_EXTERNAL_DIFF=foo git diff',
+  ] as const;
+
+  for (const command of dangerous) {
+    test('DANGEROUS: ' + command, () => {
+      assert.equal(detectRisk(command, cfg()).risk, 'dangerous', 'harus dangerous: ' + command);
+    });
+  }
+
+  test('kontrol: rantai tanpa GIT_* tetap none', () => {
+    assert.equal(detectRisk('echo x && git status', cfg()).risk, 'none');
+  });
+});
+
 describe('COMMIT 1 — assignment env GIT_* tidak boleh diingat sebagai "always"', () => {
   const denied = [
     'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0="touch /tmp/M" git status',
