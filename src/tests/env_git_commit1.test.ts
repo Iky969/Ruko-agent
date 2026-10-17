@@ -23,6 +23,25 @@ function cfg(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return { ...DEFAULT_CONFIG, approvalEnabled: true, ...overrides };
 }
 
+/**
+ * Probe env portabel: jalankan node yang sama secara langsung (`-e`) dan tulis
+ * `process.env` sebagai JSON ke stdout. Tidak memakai `$VAR`/`printf` shell,
+ * jadi hasilnya sama di POSIX dan di Windows — cmd.exe TIDAK mengekspansi
+ * `$VAR`, sehingga probe shell lama membaca nilai mentah tanpa ekspansi.
+ */
+function envProbeCommand(): string {
+  return `"${process.execPath}" -e "process.stdout.write(JSON.stringify(process.env))"`;
+}
+
+/** Parse output probe; gagal dengan output mentah bila stdout bukan JSON. */
+function parseEnvProbe(stdout: string): NodeJS.ProcessEnv {
+  try {
+    return JSON.parse(stdout.trim()) as NodeJS.ProcessEnv;
+  } catch {
+    assert.fail('output probe env bukan JSON: ' + stdout);
+  }
+}
+
 describe('COMMIT 1 — assignment env GIT_* inline adalah DANGEROUS', () => {
   const dangerous = [
     'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0="touch /tmp/M" git status',
@@ -106,17 +125,11 @@ describe('COMMIT 1 — executor membuang env GIT_* berbahaya (prefix-aware)', ()
   };
 
   test('env eksplisit: semua nilai sentinel hilang, env biasa tetap', async () => {
-    const r = await execute(
-      'printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" ' +
-        '"$GIT_CONFIG_COUNT" "$GIT_CONFIG_KEY_0" "$GIT_CONFIG_VALUE_0" "$GIT_CONFIG_PARAMETERS" ' +
-        '"$GIT_SSH_COMMAND" "$GIT_SSH_VARIANT" "$GIT_ASKPASS" "$GIT_EXTERNAL_DIFF" "$GIT_PAGER" ' +
-        '"$GIT_EDITOR" "$GIT_SEQUENCE_EDITOR" "$GIT_EXEC_PATH" "$GIT_TEMPLATE_DIR" "$GIT_DIR" ' +
-        '"$GIT_WORK_TREE" "$GIT_INDEX_FILE" "$GIT_NAMESPACE" "$RUKO_KEEP_ME"',
-      { env: injected, summarize: false },
-    );
+    const r = await execute(envProbeCommand(), { env: injected, summarize: false });
     assert.equal(r.code, 0);
     assert.ok(!r.stdout.includes('SENTINEL'), 'nilai GIT_* berbahaya masih sampai ke child: ' + r.stdout);
-    assert.ok(r.stdout.endsWith('|KEEP'), 'env biasa harus tetap diwariskan: ' + r.stdout);
+    const childEnv = parseEnvProbe(r.stdout);
+    assert.equal(childEnv.RUKO_KEEP_ME, 'KEEP', 'env biasa harus tetap diwariskan: ' + r.stdout);
   });
 
   test('env warisan process.env juga dibuang', async (t) => {
@@ -126,7 +139,7 @@ describe('COMMIT 1 — executor membuang env GIT_* berbahaya (prefix-aware)', ()
       if (prev === undefined) delete process.env.GIT_SSH_COMMAND;
       else process.env.GIT_SSH_COMMAND = prev;
     });
-    const r = await execute('printf "%s" "$GIT_SSH_COMMAND"', { summarize: false });
+    const r = await execute(envProbeCommand(), { summarize: false });
     assert.equal(r.code, 0);
     assert.ok(!r.stdout.includes('SENTINEL_INHERITED'), 'env warisan bocor: ' + r.stdout);
   });
