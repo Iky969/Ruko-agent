@@ -825,6 +825,135 @@ export function hasEnvSplitString(segment: string): boolean {
   return false;
 }
 
+/**
+ * Kelas "string-runner": program yang menjalankan perintah dari sebuah string
+ * atau dari stdin (shell `-c`, `script`/`flock`/`su -c`, pipe ke shell,
+ * `xargs`). Isi string TIDAK pernah di-parse di sini — bentuk pemanggilannya
+ * yang fail-closed, karena program nyata tidak dapat diverifikasi.
+ */
+const STRING_RUNNER_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh']);
+const STRING_RUNNER_FIXED = new Set(['script', 'flock', 'su']);
+const STRING_RUNNER_STDIN = new Set(['xargs']);
+
+/** Reason verdict untuk tiap bentuk string-runner. */
+export const SHELL_C_STRING_REASON = 'shell -c: string perintah tidak dapat diverifikasi';
+export const STRING_RUNNER_REASON = 'runner perintah string (script/flock/su)';
+export const XARGS_STDIN_REASON = 'xargs: perintah dari argumen/stdin tidak dapat diverifikasi';
+export const PIPE_TO_SHELL_REASON = 'pipe ke shell: perintah dari stdin tidak dapat diverifikasi';
+export const PIPE_TO_XARGS_REASON = 'pipe ke xargs: perintah dari stdin tidak dapat diverifikasi';
+
+interface StringRunnerVerdict {
+  dangerous: boolean;
+  reason: string | null;
+}
+
+const NO_STRING_RUNNER: StringRunnerVerdict = { dangerous: false, reason: null };
+
+/** Basename program, tanpa path dan tanpa ekstensi Windows. */
+function basenameOf(token: string): string {
+  return (token.split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
+}
+
+/**
+ * Indeks token program efektif setelah melewati assignment prefix dan launcher
+ * peluncur (memakai tabel launcher/opsi yang sudah ada di modul ini).
+ */
+function skipLauncherPrefixes(tokens: string[]): number {
+  let index = 0;
+  for (let step = 0; step < ENV_SPLIT_MAX_LAUNCHER_STEPS; step += 1) {
+    while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index])) index += 1;
+    if (index >= tokens.length) return index;
+    const name = basenameOf(tokens[index]);
+    if (!GIT_ENV_PREFIX_WRAPPERS.has(name)) return index;
+    index += 1;
+    while (index < tokens.length && tokens[index].startsWith('-') && tokens[index] !== '-') {
+      const opt = tokens[index++];
+      if (opt.includes('=')) continue; // nilai menempel: `--flag=value`
+      const spec = GIT_ENV_WRAPPER_VALUE_OPTS[name];
+      if (!spec) continue;
+      const takesValue = opt.startsWith('--')
+        ? spec.long.includes(opt.slice(2))
+        : opt.length === 2 && spec.short.includes(opt.slice(1));
+      if (takesValue && index < tokens.length) index += 1;
+    }
+    // Argumen numerik/durasi launcher (`timeout 5 …`, `nice -5 …`).
+    while (index < tokens.length && /^(?:[0-9]+(?:\.[0-9]+)?)(?:ms|s|m|h|d)?$/i.test(tokens[index])) index += 1;
+    // `chroot NEWROOT PROGRAM`: root baru bukan program efektif.
+    if (name === 'chroot' && index < tokens.length) index += 1;
+  }
+  return tokens.length;
+}
+
+/**
+ * True bila flag short-cluster shell memuat `c` (`-c`, `-lc`, `-ec`, ...)
+ * sebelum argumen non-flag pertama. Hanya bentuk flag yang diperiksa; isi
+ * string setelahnya tidak dibaca.
+ */
+function hasShellShortC(tokens: string[], start: number): boolean {
+  for (let i = start; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (!token.startsWith('-') || token === '-') return false; // argumen non-flag pertama
+    if (token === '-o' || token === '+o') {
+      i += 1; // `-o option` mengambil nilai
+      continue;
+    }
+    if (token.startsWith('--') || token.startsWith('+')) continue;
+    if (token.slice(1).includes('c')) return true;
+  }
+  return false;
+}
+
+/** Klasifikasi satu bagian rantai perintah (sebelum operator apa pun). */
+function classifyStringRunnerTokens(tokens: string[], afterPipe: boolean): StringRunnerVerdict {
+  const index = skipLauncherPrefixes(tokens);
+  if (index >= tokens.length) return NO_STRING_RUNNER;
+  const program = basenameOf(tokens[index]);
+  if (STRING_RUNNER_SHELLS.has(program)) {
+    if (hasShellShortC(tokens, index + 1)) return { dangerous: true, reason: SHELL_C_STRING_REASON };
+    if (afterPipe) return { dangerous: true, reason: PIPE_TO_SHELL_REASON };
+    return NO_STRING_RUNNER;
+  }
+  if (STRING_RUNNER_FIXED.has(program)) return { dangerous: true, reason: STRING_RUNNER_REASON };
+  if (STRING_RUNNER_STDIN.has(program)) {
+    return { dangerous: true, reason: afterPipe ? PIPE_TO_XARGS_REASON : XARGS_STDIN_REASON };
+  }
+  return NO_STRING_RUNNER;
+}
+
+/**
+ * Kelas string-runner untuk seluruh rantai perintah.
+ *
+ * - shell (bash/sh/zsh/dash/ksh) dengan flag short-cluster memuat `c` →
+ *   dangerous (string perintah tidak dapat diverifikasi);
+ * - `script`/`flock`/`su` dan `xargs` → dangerous tanpa memeriksa argumen;
+ * - bagian setelah pipe tunggal (`|`) yang program efektifnya shell atau
+ *   `xargs` → dangerous meski tanpa `-c`, karena stdin-lah yang menjalankan
+ *   perintah.
+ *
+ * Launcher dan assignment prefix dilewati dengan tabel yang sudah ada, jadi
+ * `timeout 5 bash -c …`, `/bin/bash -c …`, dan `env sh` ikut terklasifikasi.
+ */
+export function detectStringRunnerRisk(command: string): StringRunnerVerdict {
+  const parts: Array<{ segment: string; afterPipe: boolean }> = [];
+  const operatorRe = /\s*(&&|\|\||\||;|\n)\s*/g;
+  let cursor = 0;
+  let afterPipe = false;
+  for (let m = operatorRe.exec(command); m !== null; m = operatorRe.exec(command)) {
+    parts.push({ segment: command.slice(cursor, m.index), afterPipe });
+    afterPipe = m[1] === '|';
+    cursor = m.index + m[0].length;
+  }
+  parts.push({ segment: command.slice(cursor), afterPipe });
+
+  for (const part of parts) {
+    if (!part.segment.trim()) continue;
+    const { tokens } = tokenizeForGitPush(part.segment);
+    const verdict = classifyStringRunnerTokens(tokens, part.afterPipe);
+    if (verdict.dangerous) return verdict;
+  }
+  return NO_STRING_RUNNER;
+}
+
 /** Classifies a shell command. */
 export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
   const resolved = extractAndResolveShellVariables(command);
@@ -836,6 +965,18 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
   }
 
   let worst: RiskVerdict = { risk: 'none', reason: null };
+
+  // KELAS string-runner: shell -c, script/flock/su, xargs, dan pipe ke
+  // shell/xargs. Diperiksa lebih dulu agar bentuk yang menyembunyikan program
+  // nyata di dalam string/stdin tidak pernah dinilai `none`. BLOCKED_PATTERNS
+  // tetap menang: blok di bawah mengembalikan `blocked` tanpa melihat worst.
+  for (const raw of resolved !== command ? [resolved, command] : [resolved]) {
+    if (worst.risk === 'dangerous') break;
+    const runner = detectStringRunnerRisk(raw);
+    if (runner.dangerous) {
+      worst = { risk: 'dangerous', reason: runner.reason };
+    }
+  }
 
   const segments = [
     ...chainedSegments(resolved),
