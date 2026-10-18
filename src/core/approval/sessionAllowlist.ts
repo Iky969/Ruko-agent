@@ -1,6 +1,6 @@
 import { lstatSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
-import { containsShellOperators, detectGitCommandRisk, detectRisk, hasGitConfigInjection, hasGitEnvAssignment, isHighRiskDangerousCommand } from '../approval.js';
+import { containsShellOperators, detectGitCommandRisk, detectRisk, hasEnvSplitString, hasGitConfigInjection, hasGitEnvAssignment, isHighRiskDangerousCommand } from '../approval.js';
 import { DEFAULT_CONFIG } from '../../types.js';
 
 /** Host-supplied execution context, never taken from model approval flags. */
@@ -232,6 +232,10 @@ export class SessionApprovalAllowlist {
     // pun (bentuk tempel `-c<key>=<value>` diterima git versi lain), jadi
     // perintah seperti ini tidak pernah layak diingat sebagai "always".
     if (hasGitConfigInjection(trimmed)) return null;
+    // `env -S` / `--split-string` menyembunyikan program nyata di dalam satu
+    // string: bentuk ini tidak pernah layak diingat sebagai "always", untuk
+    // exec maupun start_process.
+    if (hasEnvSplitString(trimmed)) return null;
     // KELAS 1/2: klasifikasi dari subcommand git sebenarnya (subcommand
     // destruktif, `config` menulis di luar allowlist, `export GIT_*`).
     // Berlaku untuk exec DAN start_process: perintah dangerous tidak boleh diingat.

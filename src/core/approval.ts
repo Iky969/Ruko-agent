@@ -754,6 +754,77 @@ export function hasGitConfigInjection(segment: string): boolean {
   return false;
 }
 
+/**
+ * Alasan verdict untuk wrapper `env` dengan `-S` / `--split-string`.
+ * Satu argumen string dipecah env menjadi argv, jadi program nyata (dan
+ * argumennya) tidak pernah terlihat oleh klasifikasi perintah. Fail-closed:
+ * bentuk opsi ini tidak dapat diverifikasi secara statis.
+ */
+export const ENV_SPLIT_STRING_REASON =
+  'env -S / --split-string: string perintah tidak dapat diverifikasi';
+
+/** Batas wrapper bertingkat yang dilewati sebelum program nyata. */
+const ENV_SPLIT_MAX_LAUNCHER_STEPS = 8;
+
+/**
+ * True bila token adalah opsi split-string milik `env`.
+ *
+ * Hanya BENTUK argumen yang diperiksa — isi string tidak pernah di-parse:
+ *  - `--split-string`, `--split-string=...`;
+ *  - bentuk pendek, termasuk gabungan (`-S`, `-iS`, `-Si`, `-iS<nilai>`).
+ * Cluster pendek dibaca getopt-style: opsi bernilai lain (`-u`, `-C`) menyerap
+ * sisa token sebagai nilainya, jadi huruf setelahnya bukan opsi lagi.
+ */
+function isEnvSplitStringOption(opt: string): boolean {
+  if (opt.startsWith('--')) {
+    return opt === '--split-string' || opt.startsWith('--split-string=');
+  }
+  if (!opt.startsWith('-')) return false;
+  const cluster = opt.slice(1);
+  for (const ch of cluster) {
+    if (ch === 'S') return true;
+    if (GIT_ENV_WRAPPER_VALUE_OPTS.env.short.includes(ch)) return false;
+  }
+  return false;
+}
+
+/**
+ * True bila segmen menjalankan `env` dengan `-S` / `--split-string` pada
+ * posisi wrapper (token pertama, setelah assignment, atau setelah launcher
+ * lain seperti `timeout 5`), atau bila wrapper itu membungkus dua perintah
+ * yang dipecah dari satu string.
+ *
+ * Helper ini TIDAK membaca string perintah yang dipecah: hanya bentuk opsi
+ * yang diperiksa, sehingga tidak ada parser semantik isi string di sini.
+ */
+export function hasEnvSplitString(segment: string): boolean {
+  const { tokens } = tokenizeForGitPush(segment);
+  let index = 0;
+  for (let step = 0; step < ENV_SPLIT_MAX_LAUNCHER_STEPS; step += 1) {
+    while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index])) index += 1;
+    if (index >= tokens.length) return false;
+    const name = (tokens[index].split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
+    if (!GIT_ENV_PREFIX_WRAPPERS.has(name)) return false;
+    index += 1;
+    while (index < tokens.length && tokens[index].startsWith('-') && tokens[index] !== '-') {
+      const opt = tokens[index++];
+      if (name === 'env' && isEnvSplitStringOption(opt)) return true;
+      if (opt.includes('=')) continue; // nilai menempel: `--flag=value`
+      const spec = GIT_ENV_WRAPPER_VALUE_OPTS[name];
+      if (!spec) continue;
+      const takesValue = opt.startsWith('--')
+        ? spec.long.includes(opt.slice(2))
+        : opt.length === 2 && spec.short.includes(opt.slice(1));
+      if (takesValue && index < tokens.length) index += 1;
+    }
+    // Argumen numerik/durasi beberapa launcher (`timeout 5 …`, `nice -5 …`).
+    while (index < tokens.length && /^(?:[0-9]+(?:\.[0-9]+)?)(?:ms|s|m|h|d)?$/i.test(tokens[index])) index += 1;
+    // `chroot NEWROOT PROGRAM`: root baru bukan program efektif.
+    if (name === 'chroot' && index < tokens.length) index += 1;
+  }
+  return false;
+}
+
 /** Classifies a shell command. */
 export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
   const resolved = extractAndResolveShellVariables(command);
@@ -788,6 +859,12 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
     // oleh aturan git-push di atas.
     if (worst.risk !== 'dangerous' && hasGitConfigInjection(seg)) {
       worst = { risk: 'dangerous', reason: GIT_CONFIG_FLAG_REASON };
+    }
+    // `env -S` / `--split-string` memecah satu string menjadi argv, sehingga
+    // program nyata tidak dapat diverifikasi dari bentuk perintah. Fail-closed
+    // tanpa membaca isi string.
+    if (worst.risk !== 'dangerous' && hasEnvSplitString(seg)) {
+      worst = { risk: 'dangerous', reason: ENV_SPLIT_STRING_REASON };
     }
     // KELAS 1 + KELAS 2: klasifikasi dari SUBCOMMAND git sebenarnya (wrapper,
     // assignment prefix, global flag, `config` menulis, builtin `export`).
