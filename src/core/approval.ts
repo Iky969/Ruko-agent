@@ -789,9 +789,9 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
     if (worst.risk !== 'dangerous' && hasGitConfigInjection(seg)) {
       worst = { risk: 'dangerous', reason: GIT_CONFIG_FLAG_REASON };
     }
-    // KELAS 1: klasifikasi dari SUBCOMMAND git sebenarnya (wrapper, assignment
-    // prefix, global flag, subcommand destruktif). Dijalankan sebelum pola
-    // regex; isi pola tidak diubah.
+    // KELAS 1 + KELAS 2: klasifikasi dari SUBCOMMAND git sebenarnya (wrapper,
+    // assignment prefix, global flag, `config` menulis, builtin `export`).
+    // Dijalankan sebelum pola regex; isi pola tidak diubah.
     if (worst.risk !== 'dangerous') {
       const gitClass = detectGitCommandRisk(seg);
       if (gitClass.risk === 'dangerous') {
@@ -1129,16 +1129,16 @@ function denialResult(command: string, reason: string, level: RiskLevel): ExecRe
   };
 }
 // ─────────────────────────────────────────────────────────────────────────────
-// KELAS 1 — klasifikasi git dari SUBCOMMAND sebenarnya.
+// KELAS 1 + KELAS 2 — klasifikasi git dari SUBCOMMAND sebenarnya.
 //
 // Lapisan ini dipanggil SEBELUM pola regex di detectRisk (dan juga dari
 // SessionApprovalAllowlist.canRemember) supaya wrapper launcher, assignment
-// prefix, basename program, dan global flag git dinilai dari arti sebenarnya.
-// Isi BLOCKED_PATTERNS, DANGEROUS_PATTERNS, dan HIGH_RISK_DANGEROUS_PATTERNS
-// tidak diubah sama sekali.
+// prefix, global flag git, subcommand `config`, dan builtin `export` dinilai
+// dari arti sebenarnya. Isi BLOCKED_PATTERNS, DANGEROUS_PATTERNS, dan
+// HIGH_RISK_DANGEROUS_PATTERNS tidak diubah sama sekali.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type GitCommandClass = 'none' | 'subcommand';
+export type GitCommandClass = 'none' | 'subcommand' | 'config-write' | 'export';
 
 export interface GitCommandVerdict {
   risk: 'none' | 'dangerous';
@@ -1154,8 +1154,10 @@ export const GIT_CLASS_UNKNOWN_FLAG_REASON =
   'flag global git tidak dikenal (subcommand tidak dapat dipastikan)';
 export const GIT_CLASS_UNKNOWN_SUBCOMMAND_REASON =
   'subcommand git tidak dapat dipastikan (token dinamis)';
+export const GIT_CLASS_EXPORT_REASON =
+  'export variabel GIT_* (konfigurasi/eksekusi git dari luar perintah)';
 
-/** Wrapper launcher yang hanya membungkus program nyata. */
+/** Wrapper launcher yang hanya membungkus program nyata (KELAS 1/2). */
 const GIT_CLASS_WRAPPERS = new Set([...GIT_ENV_PREFIX_WRAPPERS, 'builtin']);
 
 /** Batas wrapper bertingkat; meniru MAX_LAUNCHER_STEPS di sessionAllowlist. */
@@ -1173,6 +1175,18 @@ const GIT_BOOL_GLOBAL_FLAGS = new Set([
   '--icase-pathspecs', '--no-optional-locks', '--no-advice',
   '--version', '--help', '-h', '--html-path', '--man-path', '--info-path',
 ]);
+
+/** Flag `git config` yang berarti BACA (tidak menulis config). */
+const GIT_CONFIG_READ_FLAGS = new Set([
+  '--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l',
+]);
+
+/** Flag `git config` yang menghapus key/section (TULIS, bukan baca). */
+const GIT_CONFIG_UNSET_FLAGS = new Set(['--unset', '--unset-all']);
+const GIT_CONFIG_SECTION_FLAGS = new Set(['--remove-section']);
+
+/** Flag `git config` yang memakai satu nilai argumen. */
+const GIT_CONFIG_VALUE_FLAGS = new Set(['-f', '--file', '--type', '--blob', '--default']);
 
 function gitProgramName(token: string): string {
   return (token.split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
@@ -1289,6 +1303,13 @@ function dangerousVerdict(reason: string, kind: GitCommandClass): GitCommandVerd
   return { risk: 'dangerous', reason, kind };
 }
 
+/** Key config yang boleh ditulis/diubah: `user.*` dan `color.*` (case-insensitive). */
+function isAllowedConfigTarget(key: string): boolean {
+  if (isAllowlistedGitConfigKey(key)) return true;
+  // Section utuh untuk --remove-section/--rename-section: `user` ≡ `user.*`.
+  return /^(?:user|color)$/i.test(key.trim());
+}
+
 /**
  * True bila token flag `clean` membawa kekuatan `-f` dalam bentuk apa pun:
  * `-f`, `-fd`, `-fdx`, `-fxd`, `-xfd`, atau `--force`.
@@ -1299,11 +1320,81 @@ function isCleanForceFlag(token: string): boolean {
   return token.slice(1).includes('f');
 }
 
+/** KELAS 2a: `git config` yang menulis key di luar allowlist. */
+function detectGitConfigWrite(args: string[]): GitCommandVerdict {
+  const positional: string[] = [];
+  let read = false;
+  let unset = false;
+  let removeSection = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token.startsWith('-') && token !== '-') {
+      if (GIT_CONFIG_READ_FLAGS.has(token)) {
+        read = true;
+        continue;
+      }
+      if (GIT_CONFIG_UNSET_FLAGS.has(token)) {
+        unset = true;
+        continue;
+      }
+      if (GIT_CONFIG_SECTION_FLAGS.has(token)) {
+        removeSection = true;
+        continue;
+      }
+      if (GIT_CONFIG_VALUE_FLAGS.has(token)) {
+        index += 1; // --file <f>, --type <t>, -f <f>, --default <v>
+        continue;
+      }
+      const longName = token.startsWith('--') ? token.split('=')[0] : null;
+      if (longName !== null && GIT_CONFIG_VALUE_FLAGS.has(longName)) continue;
+      continue; // flag boolean lain tidak memakai key sebagai nilai
+    }
+    positional.push(token);
+  }
+
+  if (read) return noneVerdict();
+  const key = positional[0];
+  if (key === undefined) return noneVerdict(); // malformed / tidak menulis apa pun
+
+  if (unset || removeSection) {
+    return isAllowedConfigTarget(key)
+      ? noneVerdict()
+      : dangerousVerdict(`git config mengubah key di luar allowlist (${key})`, 'config-write');
+  }
+
+  // Tanpa value = baca. Dengan value = tulis.
+  if (positional.length < 2) return noneVerdict();
+  return isAllowedConfigTarget(key)
+    ? noneVerdict()
+    : dangerousVerdict(`git config mengubah key di luar allowlist (${key})`, 'config-write');
+}
+
+/** KELAS 2b: builtin `export` dengan KEY `GIT_*`. */
+function detectGitExportInjection(segment: string): GitCommandVerdict {
+  const { tokens } = tokenizeForGitPush(segment);
+  const index = skipGitClassPrefixes(tokens);
+  if (index >= tokens.length) return noneVerdict();
+  if (gitProgramName(tokens[index]) !== 'export') return noneVerdict();
+
+  for (let i = index + 1; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token.startsWith('-')) continue; // -p / -n / --print dan flag lain
+    if (/^GIT_[A-Za-z0-9_]*=/.test(token)) {
+      return dangerousVerdict(GIT_CLASS_EXPORT_REASON, 'export');
+    }
+  }
+  return noneVerdict();
+}
+
 /**
- * Titik masuk KELAS 1 untuk satu segmen perintah.
+ * Titik masuk tunggal KELAS 1 + KELAS 2 untuk satu segmen perintah.
  * Dipakai oleh detectRisk (klasifikasi) dan canRemember (exec & start_process).
  */
 export function detectGitCommandRisk(segment: string): GitCommandVerdict {
+  const exportVerdict = detectGitExportInjection(segment);
+  if (exportVerdict.risk === 'dangerous') return exportVerdict;
+
   const parsed = parseGitInvocation(segment);
   if (parsed === null) return noneVerdict();
   if (parsed.subcommand === null) return noneVerdict(); // mis. `git --version`
@@ -1328,6 +1419,8 @@ export function detectGitCommandRisk(segment: string): GitCommandVerdict {
       return parsed.args.some(isCleanForceFlag)
         ? dangerousVerdict(GIT_CLASS_CLEAN_FORCE_REASON, 'subcommand')
         : noneVerdict();
+    case 'config':
+      return detectGitConfigWrite(parsed.args);
     default:
       return noneVerdict();
   }
