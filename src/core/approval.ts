@@ -789,6 +789,15 @@ export function detectRisk(command: string, config: AgentConfig): RiskVerdict {
     if (worst.risk !== 'dangerous' && hasGitConfigInjection(seg)) {
       worst = { risk: 'dangerous', reason: GIT_CONFIG_FLAG_REASON };
     }
+    // KELAS 1: klasifikasi dari SUBCOMMAND git sebenarnya (wrapper, assignment
+    // prefix, global flag, subcommand destruktif). Dijalankan sebelum pola
+    // regex; isi pola tidak diubah.
+    if (worst.risk !== 'dangerous') {
+      const gitClass = detectGitCommandRisk(seg);
+      if (gitClass.risk === 'dangerous') {
+        worst = { risk: 'dangerous', reason: gitClass.reason };
+      }
+    }
     const candidates = testCandidates(seg);
     for (const c of candidates) {
       // BLOCKED patterns are always checked first — cannot be bypassed.
@@ -1118,4 +1127,208 @@ function denialResult(command: string, reason: string, level: RiskLevel): ExecRe
     durationMs: 0,
     truncated: false,
   };
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// KELAS 1 — klasifikasi git dari SUBCOMMAND sebenarnya.
+//
+// Lapisan ini dipanggil SEBELUM pola regex di detectRisk (dan juga dari
+// SessionApprovalAllowlist.canRemember) supaya wrapper launcher, assignment
+// prefix, basename program, dan global flag git dinilai dari arti sebenarnya.
+// Isi BLOCKED_PATTERNS, DANGEROUS_PATTERNS, dan HIGH_RISK_DANGEROUS_PATTERNS
+// tidak diubah sama sekali.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type GitCommandClass = 'none' | 'subcommand';
+
+export interface GitCommandVerdict {
+  risk: 'none' | 'dangerous';
+  reason: string | null;
+  kind: GitCommandClass;
+}
+
+export const GIT_CLASS_PUSH_REASON = 'git push (mengubah remote repository)';
+export const GIT_CLASS_SEND_PACK_REASON = 'git send-pack (mengubah remote repository)';
+export const GIT_CLASS_RESET_HARD_REASON = 'git reset --hard (menghapus kerja lokal)';
+export const GIT_CLASS_CLEAN_FORCE_REASON = 'git clean -f (menghapus file untracked)';
+export const GIT_CLASS_UNKNOWN_FLAG_REASON =
+  'flag global git tidak dikenal (subcommand tidak dapat dipastikan)';
+export const GIT_CLASS_UNKNOWN_SUBCOMMAND_REASON =
+  'subcommand git tidak dapat dipastikan (token dinamis)';
+
+/** Wrapper launcher yang hanya membungkus program nyata. */
+const GIT_CLASS_WRAPPERS = new Set([...GIT_ENV_PREFIX_WRAPPERS, 'builtin']);
+
+/** Batas wrapper bertingkat; meniru MAX_LAUNCHER_STEPS di sessionAllowlist. */
+const GIT_CLASS_MAX_LAUNCHER_STEPS = 8;
+
+/**
+ * Flag global git yang TIDAK memakai nilai. Daftar ini sengaja konservatif:
+ * flag yang tidak ada di sini (maupun di GIT_GLOBAL_FLAGS_WITH_VALUE) memicu
+ * fail-closed karena kita tidak tahu apakah token berikutnya adalah nilainya
+ * atau justru subcommand.
+ */
+const GIT_BOOL_GLOBAL_FLAGS = new Set([
+  '-p', '--paginate', '-P', '--no-pager', '--no-replace-objects', '--bare',
+  '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs',
+  '--icase-pathspecs', '--no-optional-locks', '--no-advice',
+  '--version', '--help', '-h', '--html-path', '--man-path', '--info-path',
+]);
+
+function gitProgramName(token: string): string {
+  return (token.split('/').pop() ?? '').replace(/\.exe$/i, '').toLowerCase();
+}
+
+/**
+ * Lewati assignment `KEY=VALUE` dan wrapper launcher (`nohup`, `timeout`,
+ * `nice`, `env`, `command`, `builtin`, `exec`, …) beserta opsi bernilainya.
+ * Mengembalikan indeks token program efektif.
+ */
+function skipGitClassPrefixes(tokens: string[]): number {
+  let index = 0;
+  for (let step = 0; step < GIT_CLASS_MAX_LAUNCHER_STEPS; step += 1) {
+    if (index >= tokens.length) return index;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index])) {
+      index += 1;
+      continue;
+    }
+    const name = gitProgramName(tokens[index]);
+    if (!GIT_CLASS_WRAPPERS.has(name)) return index;
+    index += 1;
+    const spec = GIT_ENV_WRAPPER_VALUE_OPTS[name];
+    while (index < tokens.length && tokens[index].startsWith('-') && tokens[index] !== '-') {
+      const opt = tokens[index];
+      index += 1;
+      if (opt.includes('=')) continue; // nilai menempel: --flag=value
+      const takesValue = spec !== undefined && (
+        opt.startsWith('--')
+          ? spec.long.includes(opt.slice(2))
+          : opt.length === 2 && spec.short.includes(opt.slice(1))
+      );
+      if (takesValue && index < tokens.length) index += 1;
+    }
+    // `timeout 5s`, `timeout -k 5s 10s`: argumen numerik/durasi wrapper.
+    while (index < tokens.length && /^[0-9]+(?:\.[0-9]+)?(?:ms|s|m|h|d)?$/i.test(tokens[index])) {
+      index += 1;
+    }
+  }
+  return index;
+}
+
+interface ParsedGitInvocation {
+  tokens: string[];
+  suspect: boolean[];
+  gitIndex: number;
+  subcommand: string | null;
+  subcommandIndex: number;
+  args: string[];
+  unknownGlobalFlag: boolean;
+}
+
+/**
+ * Parse satu segmen menjadi invocation git: program efektif (basename), global
+ * flag (bernilai/tanpa nilai/menempel), lalu subcommand non-flag pertama.
+ * Mengembalikan null bila program efektif bukan `git`.
+ */
+function parseGitInvocation(segment: string): ParsedGitInvocation | null {
+  const { tokens, suspect } = tokenizeForGitPush(segment);
+  const gitIndex = skipGitClassPrefixes(tokens);
+  if (gitIndex >= tokens.length) return null;
+  if (gitProgramName(tokens[gitIndex]) !== 'git') return null;
+
+  let index = gitIndex + 1;
+  let unknownGlobalFlag = false;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token === '--') {
+      index += 1;
+      break;
+    }
+    if (token.startsWith('-') && token !== '-') {
+      if (GIT_BOOL_GLOBAL_FLAGS.has(token)) {
+        index += 1;
+        continue;
+      }
+      if (GIT_GLOBAL_FLAGS_WITH_VALUE.has(token)) {
+        const next = tokens[index + 1]?.toLowerCase();
+        // Jangan menelan `push`/`send-pack` sebagai nilai flag.
+        index += next !== undefined && next !== 'push' && next !== 'send-pack' ? 2 : 1;
+        continue;
+      }
+      const longName = token.startsWith('--') ? token.split('=')[0] : null;
+      if (longName !== null && GIT_GLOBAL_FLAGS_WITH_VALUE.has(longName)) {
+        index += 1; // bentuk menempel: --git-dir=.git / --config-env=K=V
+        continue;
+      }
+      if (/^-[Cc].+/.test(token)) {
+        index += 1; // bentuk menempel: -C<path> / -c<key>=<value>
+        continue;
+      }
+      unknownGlobalFlag = true;
+      index += 1;
+      continue;
+    }
+    return {
+      tokens,
+      suspect,
+      gitIndex,
+      subcommand: token.toLowerCase(),
+      subcommandIndex: index,
+      args: tokens.slice(index + 1),
+      unknownGlobalFlag,
+    };
+  }
+
+  return { tokens, suspect, gitIndex, subcommand: null, subcommandIndex: -1, args: [], unknownGlobalFlag };
+}
+
+function noneVerdict(): GitCommandVerdict {
+  return { risk: 'none', reason: null, kind: 'none' };
+}
+
+function dangerousVerdict(reason: string, kind: GitCommandClass): GitCommandVerdict {
+  return { risk: 'dangerous', reason, kind };
+}
+
+/**
+ * True bila token flag `clean` membawa kekuatan `-f` dalam bentuk apa pun:
+ * `-f`, `-fd`, `-fdx`, `-fxd`, `-xfd`, atau `--force`.
+ */
+function isCleanForceFlag(token: string): boolean {
+  if (token === '--force') return true;
+  if (!token.startsWith('-') || token.startsWith('--')) return false;
+  return token.slice(1).includes('f');
+}
+
+/**
+ * Titik masuk KELAS 1 untuk satu segmen perintah.
+ * Dipakai oleh detectRisk (klasifikasi) dan canRemember (exec & start_process).
+ */
+export function detectGitCommandRisk(segment: string): GitCommandVerdict {
+  const parsed = parseGitInvocation(segment);
+  if (parsed === null) return noneVerdict();
+  if (parsed.subcommand === null) return noneVerdict(); // mis. `git --version`
+  if (parsed.unknownGlobalFlag) {
+    return dangerousVerdict(GIT_CLASS_UNKNOWN_FLAG_REASON, 'subcommand');
+  }
+  if (parsed.suspect[parsed.subcommandIndex] === true ||
+    !SIMPLE_WORD_RE.test(parsed.tokens[parsed.subcommandIndex])) {
+    return dangerousVerdict(GIT_CLASS_UNKNOWN_SUBCOMMAND_REASON, 'subcommand');
+  }
+
+  switch (parsed.subcommand) {
+    case 'push':
+      return dangerousVerdict(GIT_CLASS_PUSH_REASON, 'subcommand');
+    case 'send-pack':
+      return dangerousVerdict(GIT_CLASS_SEND_PACK_REASON, 'subcommand');
+    case 'reset':
+      return parsed.args.includes('--hard')
+        ? dangerousVerdict(GIT_CLASS_RESET_HARD_REASON, 'subcommand')
+        : noneVerdict();
+    case 'clean':
+      return parsed.args.some(isCleanForceFlag)
+        ? dangerousVerdict(GIT_CLASS_CLEAN_FORCE_REASON, 'subcommand')
+        : noneVerdict();
+    default:
+      return noneVerdict();
+  }
 }

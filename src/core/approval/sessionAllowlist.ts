@@ -1,6 +1,6 @@
 import { lstatSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
-import { containsShellOperators, detectRisk, hasGitConfigInjection, hasGitEnvAssignment, isHighRiskDangerousCommand } from '../approval.js';
+import { containsShellOperators, detectGitCommandRisk, detectRisk, hasGitConfigInjection, hasGitEnvAssignment, isHighRiskDangerousCommand } from '../approval.js';
 import { DEFAULT_CONFIG } from '../../types.js';
 
 /** Host-supplied execution context, never taken from model approval flags. */
@@ -232,6 +232,10 @@ export class SessionApprovalAllowlist {
     // pun (bentuk tempel `-c<key>=<value>` diterima git versi lain), jadi
     // perintah seperti ini tidak pernah layak diingat sebagai "always".
     if (hasGitConfigInjection(trimmed)) return null;
+    // KELAS 1/2: klasifikasi dari subcommand git sebenarnya (subcommand
+    // destruktif, `config` menulis di luar allowlist, `export GIT_*`).
+    // Berlaku untuk exec DAN start_process: perintah dangerous tidak boleh diingat.
+    if (detectGitCommandRisk(trimmed).risk === 'dangerous') return null;
     // Issue #38-3: lepas wrapper `nohup`/`env`/`VAR=val` agar guard di bawah
     // menilai program efektif, bukan token pembungkusnya.
     const effective = effectiveCommand(trimmed);
