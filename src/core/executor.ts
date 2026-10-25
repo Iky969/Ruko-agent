@@ -69,9 +69,42 @@ export const DANGEROUS_ENV_VARS = new Set([
   'RUBYOPT', // opsi CLI implisit, mis. `-revil` → require arbitrer
   'RUBYLIB', // prepend $LOAD_PATH → shadowing library Ruby
 
+  // Issue #38 lanjutan — variabel konfigurasi/eksekusi git. Git membaca
+  // GIT_CONFIG_* (config injection: core.fsmonitor, hook, alias) dan GIT_SSH*
+  // (perintah pengganti ssh) SEBELUM programnya berjalan, jadi nilai dari env
+  // yang diwariskan = eksekusi kode arbitrer pada perintah git apa pun.
+  // Pola berakhiran `*` dicocokkan sebagai prefix oleh isDangerousEnvVar().
+  'GIT_CONFIG_*',
+  'GIT_SSH*',
+  'GIT_ASKPASS',
+  'GIT_EXTERNAL_DIFF',
+  'GIT_PAGER',
+  'GIT_EDITOR',
+  'GIT_SEQUENCE_EDITOR',
+  'GIT_EXEC_PATH',
+  'GIT_TEMPLATE_DIR',
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_NAMESPACE',
+
   // Sumber denylist .env workspace (IFS, SHELL, NODE_DEBUG, HTTP(S)_PROXY, dst.)
   ...DANGEROUS_WORKSPACE_ENV_VARS,
 ]);
+
+/**
+ * Cocokkan nama env terhadap denylist, termasuk pola berakhiran `*` yang
+ * dicocokkan sebagai PREFIX — `GIT_CONFIG_*` harus menangkap
+ * `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, `GIT_CONFIG_VALUE_0`, dan
+ * `GIT_CONFIG_PARAMETERS`, bukan sekadar string literal bertanda bintang.
+ */
+export function isDangerousEnvVar(name: string): boolean {
+  if (DANGEROUS_ENV_VARS.has(name)) return true;
+  for (const pattern of DANGEROUS_ENV_VARS) {
+    if (pattern.endsWith('*') && name.startsWith(pattern.slice(0, -1))) return true;
+  }
+  return false;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fase D (v1.9.0) — Shell selection: SATU sumber kebenaran.
@@ -172,7 +205,7 @@ export function execute(command: string, options: ExecOptions = {}): Promise<Exe
     const cleanEnv: NodeJS.ProcessEnv = {};
     for (const [k, v] of Object.entries(rawEnv)) {
       if (k.startsWith('BASH_FUNC_')) continue;
-      if (DANGEROUS_ENV_VARS.has(k) || k.startsWith('DYLD_')) continue;
+      if (isDangerousEnvVar(k) || k.startsWith('DYLD_')) continue;
       cleanEnv[k] = v;
     }
 

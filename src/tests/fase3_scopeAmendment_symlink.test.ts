@@ -361,4 +361,62 @@ describe('TC-SCM-03: Symlink Hardening pada ScopeAmendmentManager', () => {
     );
     assert.equal(resAllowed, true, 'Dengan monorepoRoots terdaftar, symlink monorepo legit harus diizinkan');
   });
+
+  test('Skenario 8 (Issue #38-1): symlink DI dalam subtree disetujui tidak boleh auto-approve ke luar', async () => {
+    createHostDir();
+    const ws = createWorkspace();
+
+    const realSrc = join(ws, 'src');
+    mkdirSync(realSrc, { recursive: true });
+
+    const outside = mkdtempSync(join(tmpdir(), 'ruko-scm03-issue38-'));
+    tempDirs.push(outside);
+    writeFileSync(join(outside, 'secret.txt'), 'sensitive data');
+
+    // ws/src/esc → direktori luar workspace (nama symlink ada DI subtree).
+    const link = join(realSrc, 'esc');
+    if (!tryCreateSymlink(outside, link)) return; // platform tanpa hak symlink → lewati
+
+    const state = createMockHostState('sess-issue38-symlink', ['src']);
+    await saveHostState(state);
+    const manager = new ScopeAmendmentManager(state, ws, { isTTY: false });
+
+    // a) Target = symlink itu sendiri. Induknya (ws/src) berada tepat di
+    //    subtree yang disetujui — parent-only check dulu auto-approve ini.
+    const asLink = await manager.evaluateMutationTarget(
+      'src/esc',
+      'menimpa symlink agar menunjuk ke luar',
+      false,
+    );
+    assert.equal(asLink, false,
+      'symlink di dalam subtree yang menunjuk ke luar wajib ditolak (bukan auto-approve)');
+
+    // b) Target = berkas MELALUI symlink (induk src/esc → fisik di luar).
+    const throughLink = await manager.evaluateMutationTarget(
+      'src/esc/secret.txt',
+      'mutasi berkas melalui symlink',
+      false,
+    );
+    assert.equal(throughLink, false, 'path melalui symlink keluar wajib ditolak');
+
+    // c) Dangling symlink bernama subtree juga tidak boleh auto-approve.
+    const dangling = join(realSrc, 'dangling');
+    if (tryCreateSymlink(join(ws, 'target-hilang'), dangling)) {
+      const resDangling = await manager.evaluateMutationTarget(
+        'src/dangling',
+        'mutasi pada dangling symlink',
+        false,
+      );
+      assert.equal(resDangling, false, 'dangling symlink di subtree wajib fail-closed');
+    }
+
+    // Kontrol positif: berkas nyata di dalam subtree tetap auto-approve.
+    writeFileSync(join(realSrc, 'app.ts'), 'export {};');
+    const control = await manager.evaluateMutationTarget(
+      'src/app.ts',
+      'edit file dalam scope',
+      false,
+    );
+    assert.equal(control, true, 'kontrol: file nyata dalam subtree tetap auto-approve');
+  });
 });

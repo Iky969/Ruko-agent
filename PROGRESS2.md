@@ -51,8 +51,8 @@
 ---
 
 ## 3. Active Task / Next Focus
-- **Current Step:** Commit rebase, Windows short-path fix, dan klarifikasi review sudah didorong ke PR #37. Seluruh status checks PR pada head terakhir lulus, detail §22.
-- **Action Item:** PR #37 tetap open; jangan merge tanpa instruksi eksplisit. Repo utama `/workspaces/Ruko-agent` tidak diubah. Workflow Advanced Security AI terpisah gagal karena kuota bulanan, bukan hasil finding.
+- **Current Step:** PR #37 sudah di-merge ke `main` (`b6703af`; run CI merge `38173923457`). Residual review ditindaklanjuti di branch lokal `fix/audit-findings-issue-38`: empat temuan Issue #38 + sinkronisasi help text selesai dengan 9 tes baru dan commit lokal, detail §23.
+- **Action Item:** CI `main` masih **merah** pada tiga job Ubuntu (Node 18/20/22) dengan `not ok 48 dist/tests/feedback_approval_session.test.js` / `Unable to deserialize cloned data`; file dan suite yang sama lulus lokal (11/11), akar masalah environment runner belum dituntaskan dan run belum diulang. Branch #38 belum di-push; jangan push/merge tanpa instruksi eksplisit. Workflow Advanced Security AI terpisah gagal karena kuota bulanan, bukan hasil finding.
 
 ---
 
@@ -422,5 +422,21 @@
 ### Batas pekerjaan
 - Repo utama `/workspaces/Ruko-agent` tetap `main` @ `1a9c91e`; status serta hash diff staged/unstaged disimpan sebelum rebase untuk dibandingkan setelah verifikasi/commit docs. Semua checkout/rebase/edit/build/staging/commit dilakukan hanya di worktree PR; staging memakai nama file eksplisit.
 - Commit docs terakhir hanya `CHANGELOGv2.md` dan `PROGRESS2.md`; `CLAUDE.md`, `ANALISIS_*`, feedback/catatan lain tidak dimasukkan. Tidak push/merge/tag/release atau perubahan source/dependency/version. Static/self-review implementasi saja, bukan review independen; pengujian hanya pada Linux Node v24.21.0.
+
+---
+
+## 23. Issue #38 — Residual Hardening Pasca-Audit PR #37 [status: SELESAI-lokal, belum push]
+
+- **Objective:** menutup empat residual review PR #37 di branch `fix/audit-findings-issue-38` — (1) grant `always` lolos dari symlink escape, (2) alias `revert_file.target` lolos dispatcher scope gate, (3) prefix launcher/env menyembunyikan perintah dari denylist/git-push guard, (4) `sessionLock` tidak memegang load→apply→save pada mutasi state scope — plus sinkronisasi help text `run <cmd>`.
+- **Keputusan teknis:**
+  1. **#38-1 (dua sisi containment).** `sessionAllowlist.ts`: containment grant `always` pindah dari `path.resolve` leksikal ke resolusi fisik via `canonicalizePath` (`realpathSync` ancestor terdekat + sisa segmen yang belum ada; `lstat` mendeteksi dangling symlink; fail-closed EACCES/ELOOP/dangling). Root, cwd, dan token path dibandingkan dalam bentuk fisik. `scopeAmendment.ts`: `isPhysicallyContained` tidak lagi meng-approve lewat parent-only — target fisik sendiri wajib di dalam entry `allowedPaths` (parent-only menjadi syarat bersama; target gagal resolve → fail-closed). Pengecualian `monorepoRoots` dipertahankan.
+  2. **#38-2 (alias).** `dispatcherGate.ts` `extractTargetPath` disamakan dengan alias precedence `runToolCall`: `path || file || target || targetPath`, sehingga `{target}` pada `revert_file` ikut scope-check.
+  3. **#38-3 (launcher).** `sessionAllowlist.ts`: `effectiveCommand` melepas prefix `nohup`/`env`/`timeout`/`nice`/`ionice`/`setsid`/`stdbuf`/`time`/`command`/`exec`/`builtin`/`chroot`/`unshare`/`nsenter` + assignment `VAR=value` (maks 8 lapis, opsi bernilai per-wrapper, nilai menempel tidak meng-consume token). Denylist interpreter, `detectRisk`, `isHighRiskDangerousCommand`, dan guard `git push` menilai program efektif; tanpa program → fail-closed (tidak rememberable). Wrapper pada perintah aman tetap rememberable (kontrol tes).
+  4. **#38-4 (lock).** Cabang `sessionLock` di `updateScope` hanya memvalidasi nonce di depan lalu `apply()` menulis tanpa memegang apa pun. Kontrak diperketat lewat signature `HostStateMutator` baru `(fresh, beforeSave?)`: pipeline (`securityPipeline.ts`) memanggil `assertHeld` di entry dan meneruskan hook yang dipanggil `updateScope` tepat sebelum dan sesudah `saveHostState`. Fallback tanpa `sessionLock` gagal cepat `SCOPE_LOCK_DENIED` bila lock dipegang proses hidup (`isPidAlive`), bukan membangun `FileLock` kedua di atas state.json yang sama, dan tetap mengunci state sendiri saat standalone.
+  5. **Help text.** `commands.ts`: “Eksekusi perintah shell — hanya manual mode, tetap lewat gerbang Plan/scope & approval”.
+- **File:** `src/core/approval/sessionAllowlist.ts`, `src/core/dispatcher/dispatcherGate.ts`, `src/core/approval/scopeAmendment.ts`, `src/core/securityPipeline.ts`, `src/agent/commands.ts`; tes: `src/tests/sessionAllowlist.test.ts`, `src/tests/fase2_dispatcherGate.test.ts`, `src/tests/fase3_scopeAmendment_symlink.test.ts`, `src/tests/scope_session_lock.test.ts` (baru).
+- **Rekonsiliasi tes (RED→GREEN):** pada worktree `b6703af` + tes baru: **7 assertion gagal / 53** (sessionAllowlist 2, fase2_dispatcherGate 2, fase3_scopeAmendment_symlink 1, scope_session_lock 2). Di branch: **53/53 pass**, rincian 18/18, 22/22, 9/9, 4/4.
+- **Verifikasi branch:** `npm run typecheck` exit 0; `npm test` **1386 total / 1384 pass / 0 fail / 2 skip / 70 suites** (exit 0; delta +9 dari baseline `main` 1377); `npm run test:e2e` exit 0 **1/1**; `npm run test:urls` exit 0 **6 pass / 1 skip**; `git diff --check` bersih. Commit lokal di branch, tanpa push.
+- **Batasan:** temuan CI `main` merah pada tiga job Ubuntu (`feedback_approval_session` / `Unable to deserialize cloned data`) dari §22 belum di-root-cause dan belum diulang; branch #38 belum di-push sehingga CI branch belum diuji; dua dari empat subtes `scope_session_lock` lulus di kode lama sebagai kontrol, sehingga bukti regresi nonce ada pada dua subtes sisanya.
 
 
