@@ -84,12 +84,18 @@ export async function bootstrapSecurityPipeline(
     let stateMutationChain: Promise<unknown> = Promise.resolve();
     const stateMutator: HostStateMutator = (targetSessionId, mutate) => {
       const task = stateMutationChain.then(async () => {
-        const nonce = fileLock.getCurrentNonce();
-        if (!nonce || fileLock.readMetadata()?.nonce !== nonce) {
-          throw new Error('SCOPE_LOCK_DENIED: session lock tidak lagi dimiliki pipeline.');
-        }
+        // Issue #38-4: kontrak nonce yang jelas — kepemilikan divalidasi saat
+        // masuk, lalu hook yang sama dipanggil mutator tepat sebelum & sesudah
+        // saveHostState, sehingga load→apply→save berada di bawah lock sesi.
+        const assertHeld = () => {
+          const nonce = fileLock.getCurrentNonce();
+          if (!nonce || fileLock.readMetadata()?.nonce !== nonce) {
+            throw new Error('SCOPE_LOCK_DENIED: session lock tidak lagi dimiliki pipeline.');
+          }
+        };
+        assertHeld();
         const freshState = await loadHostState(targetSessionId, { resume: false });
-        return mutate(freshState);
+        return mutate(freshState, assertHeld);
       });
       stateMutationChain = task.then(
         () => undefined,
