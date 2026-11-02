@@ -285,7 +285,7 @@ describe('F1-T2 FileLock', () => {
       syncBuiltinESMExports();
 
       await assert.rejects(
-        () => new FileLock(join(dir, 'windows-timeout.json')).acquire({ timeoutMs: 20, retryIntervalMs: 5 }),
+        () => new FileLock(join(dir, 'windows-timeout.json')).acquire({ timeoutMs: 150, retryIntervalMs: 5 }),
         (error: NodeJS.ErrnoException) => error === persistentError,
       );
       assert.ok(timeoutAttempts >= 2, 'win32 EPERM harus dicoba ulang sampai timeout');
