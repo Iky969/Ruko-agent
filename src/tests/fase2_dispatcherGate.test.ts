@@ -149,4 +149,70 @@ describe('F2-T1 Dispatcher Gate Lock', () => {
     const res = JSON.parse(resRaw);
     assert.ok(res.error?.includes('plan mode aktif'), 'YOLO config tidak boleh membypass plan mode di runToolCall');
   });
+
+  test('Issue #38-2: alias revert_file "target" ikut dicek scope seperti path kanonik', async () => {
+    const state: HostState = {
+      ...makeState('act'),
+      approvalScope: {
+        planHash: 'hash-issue38',
+        allowedPaths: ['src'],
+        approvedAt: new Date().toISOString(),
+        correlationId: 'corr-issue38',
+      },
+    };
+    const manager = new ScopeAmendmentManager(state, process.cwd(), { isTTY: false });
+
+    // Seluruh alias yang dibaca handler revert_file (path ?? file ?? target)
+    // plus targetPath harus dievaluasi gate terhadap scope yang sama.
+    const outside = '../outside-scope.txt';
+    for (const args of [
+      { path: outside },
+      { file: outside },
+      { target: outside },
+      { targetPath: outside },
+    ]) {
+      const alias = Object.keys(args)[0];
+      const decision = await evaluateDispatcherGate({
+        tool: 'revert_file',
+        hostState: state,
+        scopeManager: manager,
+        args,
+        isInteractive: false,
+      });
+      assert.equal(decision.allowed, false,
+        `alias "${alias}" harus ditolak gate: ${decision.reason}`);
+      assert.match(decision.reason ?? '', /SCOPE_|SECURITY_DENIED/);
+    }
+
+    // Dalam subtree: tetap lolos gate (approval pertama tetap urusan handler).
+    const inside = await evaluateDispatcherGate({
+      tool: 'revert_file',
+      hostState: state,
+      scopeManager: manager,
+      args: { target: 'src/main.ts' },
+      isInteractive: false,
+    });
+    assert.equal(inside.allowed, true, `target dalam scope harus lolos gate: ${inside.reason}`);
+  });
+
+  test('Issue #38-2 (e2e): runToolCall menolak revert_file lewat alias target di luar scope', async () => {
+    const state: HostState = {
+      ...makeState('act'),
+      approvalScope: {
+        planHash: 'hash-issue38',
+        allowedPaths: ['src'],
+        approvedAt: new Date().toISOString(),
+        correlationId: 'corr-issue38',
+      },
+    };
+    const manager = new ScopeAmendmentManager(state, process.cwd(), { isTTY: false });
+    const res = JSON.parse(await runToolCall(
+      { tool: 'revert_file', target: '../outside-scope.txt' } as any,
+      { hostState: state, scopeAmendmentManager: manager, workspaceRoot: process.cwd() },
+    ));
+    assert.ok(res.error, 'mutasi di luar scope wajib ditolak');
+    assert.match(res.error, /SCOPE_|SECURITY_DENIED/,
+      `harus ditolak di gate hulu, bukan jatuh ke prompt handler: ${res.error}`);
+    assert.doesNotMatch(res.error, /Persetujuan ditolak/);
+  });
 });

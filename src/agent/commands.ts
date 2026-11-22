@@ -1616,7 +1616,7 @@ export function buildHelpText(): string {
 
   lines.push(
     mkSectionHeader('Masukan & Eksekusi'),
-    `  \x1b[48;5;18m\x1b[1;97m run <cmd> \x1b[0m     \x1b[37m${truncateNote('Eksekusi perintah shell langsung (manual mode)', noteAvail)}\x1b[0m`,
+    `  \x1b[48;5;18m\x1b[1;97m run <cmd> \x1b[0m     \x1b[37m${truncateNote('Eksekusi perintah shell — hanya manual mode, tetap lewat gerbang Plan/scope & approval', noteAvail)}\x1b[0m`,
     `  \x1b[48;5;18m\x1b[1;97m <pesan> \x1b[0m       \x1b[37m${truncateNote('Disimpan ke konteks; dikirim ke AI backend jika aktif', noteAvail)}\x1b[0m`,
     '',
     mkSectionHeader('Catatan & Keamanan'),
