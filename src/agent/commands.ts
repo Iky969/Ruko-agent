@@ -733,7 +733,8 @@ const COMMANDS: CommandDef[] = [
             );
           }
         } catch (e) {
-          console.log(`Gagal mengambil dari GitHub: ${(e as Error).message}`);
+          const safeErrorMessage = String((e as Error).message ?? e).replace(/[\r\n]+/g, ' ');
+          console.log(`Gagal mengambil dari GitHub: ${safeErrorMessage}`);
           return;
         }
       } else if (inlineText !== null) {
