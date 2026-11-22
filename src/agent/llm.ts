@@ -155,19 +155,26 @@ export function toGeminiThinkingBudget(level: ReasoningLevel | string): number {
  * Fallback prompt-injection: dipakai HANYA jika provider
  * TIDAK punya parameter reasoning native atau menolaknya (400).
  * Template per level: Low / Medium / High.
+ *
+ * Karena provider tidak menegakkan kedalaman reasoning lewat parameter,
+ * addendum ini memerintahkan model untuk bernalar di dalam blok
+ * <thought>...</thought> (ala Hermes "ultra": effort-nya berasal dari
+ * instruksi prompt, bukan dari budget provider). Aturannya konsisten
+ * dengan CORE_IDENTITY: thought dulu, tutup </thought>, baru tool call
+ * atau jawaban akhir — dan format tool DILARANG di dalam thought.
  */
 export function reasoningPromptAddendum(level: ReasoningLevel | string): string {
   switch (level) {
     case 'low':
-      return 'REASONING DEPTH — LOW: think briefly before acting; state a concise plan and proceed directly.';
+      return 'REASONING DEPTH — LOW: reason briefly inside a single <thought>...</thought> block, then close </thought> before acting; state a concise plan and proceed directly. Never put tool calls or tool JSON inside the <thought> block.';
     case 'high':
     case 'xhigh':
     case 'max':
     case 'extreme':
-      return 'REASONING DEPTH — HIGH: analyze the problem thoroughly before acting; consider alternatives, edge cases, and verify assumptions carefully.';
+      return 'REASONING DEPTH — HIGH (deep thought): reason at length inside <thought>...</thought> before acting — explore alternatives, edge cases, and verify your assumptions carefully. Do NOT close </thought> until the analysis is complete; take the time to think thoroughly rather than rushing to an answer. Only after </thought> may you call a tool or give the final answer. Never put tool calls or tool JSON inside the <thought> block.';
     case 'medium':
     default:
-      return 'REASONING DEPTH — MEDIUM: reason step by step before acting; state a clear plan and verify assumptions, keeping reasoning focused.';
+      return 'REASONING DEPTH — MEDIUM: reason step by step inside <thought>...</thought> before acting; state a clear plan and verify assumptions, keeping reasoning focused. Close </thought> before calling a tool or giving the final answer. Never put tool calls or tool JSON inside the <thought> block.';
   }
 }
 

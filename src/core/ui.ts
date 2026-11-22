@@ -1984,24 +1984,30 @@ export class ThoughtStreamParser {
   }
 }
 
-/** Strips all <thought>...</thought> and <think>...</think> reasoning blocks. */
+/**
+ * Strips all <thought>...</thought> and <think>...</think> reasoning blocks.
+ * Blok yang tidak tertutup (tanpa </thought>/</think> sampai akhir teks)
+ * juga dihapus sampai akhir — kalau tidak, isi thought yang belum ditutup
+ * akan bocor menjadi jawaban akhir yang dikirim ke user.
+ */
 export function stripThoughtBlocks(text: string): string {
   if (!text) return '';
   return text
     .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/\*Thought:[\s\S]*?\*/gi, '')
+    .replace(/<(?:thought|think)>[\s\S]*$/i, '')
     .trim();
 }
 
-/** Extracts text within <thought> or <think> tags. */
+/**
+ * Extracts text within <thought> or <think> tags, including a trailing
+ * block whose closing tag never arrived (captured up to end of text).
+ */
 export function extractThoughts(text: string): string[] {
   if (!text) return [];
   const results: string[] = [];
-  for (const m of text.matchAll(/<thought>([\s\S]*?)<\/thought>/gi)) {
-    results.push(m[1].trim());
-  }
-  for (const m of text.matchAll(/<think>([\s\S]*?)<\/think>/gi)) {
+  for (const m of text.matchAll(/<(?:thought|think)>([\s\S]*?)(?:<\/(?:thought|think)>|$)/gi)) {
     results.push(m[1].trim());
   }
   return results;

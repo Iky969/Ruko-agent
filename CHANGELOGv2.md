@@ -3,6 +3,10 @@
 Seluruh pembaruan penting pada lini rilis 2.x akan dicatat dalam berkas ini.
 Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tunduk pada [Semantic Versioning](https://semver.org/).
 
+> Struktur dokumen: berkas ini adalah **satu-satunya changelog rilis**.
+> Status singkat ada di [PROGRESS.md](PROGRESS.md); log sesi lama yang
+> panjang diarsipkan di [docs/archive/](docs/archive/).
+
 ---
 
 ## [2.2.0] - Unreleased
@@ -73,6 +77,12 @@ Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tun
 - `src/agent/commands.ts` — help text `run <cmd>` disinkronkan: eksekusi hanya tersedia di manual mode dan tetap melewati gerbang Plan/scope & approval.
 - Tes: +9 (sessionAllowlist **18/18**, fase2_dispatcherGate **22/22**, fase3_scopeAmendment_symlink **9/9**, scope_session_lock baru **4/4** → 53/53). RED→GREEN: pada worktree `b6703af` + tes baru, **7 assertion gagal (pass 46/53)**; di branch seluruh 53 lulus.
 - Verifikasi branch: `npm run typecheck` exit 0; `npm test` **1386 total / 1384 pass / 0 fail / 2 skip / 70 suites**; `npm run test:e2e` exit 0 (**1/1**); `npm run test:urls` exit 0 (**6 pass / 1 skip**); `git diff --check` bersih.
+
+### Upgrade pasca-merge #42 — 2026-11-22
+- PR #42 di-merge ke main (`985adf6`), menutup keempat item Issue #38 beserta tes regresinya (sessionAllowlist, dispatcherGate, scopeAmendment symlink, scope_session_lock).
+- Bump `@types/node` 26.6.4 → 26.6.6 diadopsi dari PR #43 (devDependency types-only; diff lockfile identik dengan PR tersebut). PR #43 sendiri **tidak** di-merge: CI-nya merah karena 2 kegagalan yang sudah ada di main (bukan akibat bump) — lihat draft PR upgrade untuk bukti lokalnya.
+- Header `CHANGELOG.md` diperbaiki (sebelumnya salah tertulis `# PROGRESS.md`); berkas ini adalah log sesi/handoff, sedangkan changelog rilis tetap berkas ini (`CHANGELOGv2.md`).
+- Verifikasi branch upgrade (Linux, Node v24.22.1): `npm run typecheck` lolos; `npm test` **1526 total / 1522 pass / 2 fail / 2 skip / 90 suites**. Kedua kegagalan (`env_git_commit1` "env eksplisit" dan `security_hardening_v17` `pinnedHttpFetch`) adalah artefak environment sandbox lokal dan gagal **identik di main** (`985adf6`) — bukan regresi dari bump maupun perubahan docs. Badge README diperbarui ke 1522 passed.
 
 Rilis ini belum diterbitkan. `install.sh` sengaja tetap mem-pin `v2.1.0` hingga tag immutable `v2.2.0` tersedia.
 

@@ -5,7 +5,7 @@ import { renderFileDiff, splitLines } from '../core/diff.js';
 import { countDiffLines, formatFileMutationLogLine } from '../core/diffui.js';
 import { revertFile, takeSnapshot } from '../core/undo.js';
 import type { ActivityTray } from '../core/activity.js';
-import { cyan, dim, green, magenta, red, yellow } from '../core/ui.js';
+import { cyan, dim, green, magenta, red, stripThoughtBlocks, yellow } from '../core/ui.js';
 import { clearFileReadCache, codeSearchTool, globTool, listDirTool, readFileTool } from './filetools.js';
 import { appendMemory } from '../core/memory.js';
 import { deleteSkill, listSkills, readSkill, saveSkill } from '../core/skills.js';
@@ -161,6 +161,12 @@ function extractInvokeParameters(body: string): Record<string, unknown> {
 export function parseToolCalls(text: string): ParseToolCallsResult {
   const calls: ToolCall[] = [];
   const malformedBlocks: string[] = [];
+
+  // Tool call di dalam blok <thought>/</thought> (tertutup maupun tidak)
+  // BUKAN perintah untuk dieksekusi — itu penalaran model, sesuai disiplin
+  // "DILARANG menulis format JSON tool di dalam blok thinking". Strip dulu
+  // supaya tool yang hanya "dipikirkan" tidak pernah dijalankan.
+  text = stripThoughtBlocks(text);
 
   // 1. Standard markdown ```tool ... ``` fences
   for (const match of text.matchAll(TOOL_BLOCK_RE)) {
