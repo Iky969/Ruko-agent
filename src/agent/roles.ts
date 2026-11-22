@@ -241,6 +241,8 @@ export function readProjectAgentDoc(cwd: string = process.cwd()): string | null 
 export interface PromptLayers {
   role: RoleDef;
   planMode: boolean;
+  /** Research mode (mode cari bug): baca + test, tanpa mutasi. */
+  researchMode?: boolean;
   mode: UiMode;
   agentDoc: string | null;
   memory?: string | null;
@@ -336,6 +338,16 @@ export function planModeAddendum(): string {
   );
 }
 
+export function researchModeAddendum(): string {
+  return (
+    'ACTIVE MODE — RESEARCH (bug-hunting): read and reproduce only, do NOT change any file. ' +
+    'You may call read-only tools (read_file, glob, list_dir, code_search, read_process_logs, web_fetch, ...) and run TEST commands via exec ' +
+    '(npm test, npm run test:*, npx vitest run, jest, node --test, go test, cargo test, pytest, ...). ' +
+    'Do NOT call write_file/edit_file/patch_file/delete_file/move_file/revert_file/start_process/remember/save_skill/delete_skill, and do NOT run non-test shell commands ' +
+    '(the CLI blocks them anyway). If you need a file changed, describe the exact fix in your final answer instead of applying it.'
+  );
+}
+
 /** Mode-specific tips (§7 beginner) as a short prompt addendum. */
 export function modeAddendum(mode: UiMode): string | null {
   if (mode === 'beginner') {
@@ -355,7 +367,11 @@ export function buildSystemPrompt(layers: PromptLayers): string {
   if (layers.environment && layers.environment.trim()) parts.push(layers.environment.trim());
   if (layers.skills && layers.skills.trim()) parts.push(layers.skills);
   if (layers.agentDoc) parts.push(layers.agentDoc);
-  const addenda = [layers.planMode ? planModeAddendum() : null, modeAddendum(layers.mode)];
+  const addenda = [
+    layers.planMode ? planModeAddendum() : null,
+    layers.researchMode ? researchModeAddendum() : null,
+    modeAddendum(layers.mode),
+  ];
   for (const a of addenda) if (a) parts.push(a);
   const mainPrompt = parts.join('\n\n');
 

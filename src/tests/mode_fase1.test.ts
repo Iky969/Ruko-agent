@@ -335,7 +335,7 @@ test('Fase 1: Mutating tools for Build mode match official specification', () =>
   assert.ok(BUILD_MUTATING_TOOLS.has('exec'));
 });
 
-test('Fase 1: Loop detector in Default mode halts on repeated read_file > 2', async () => {
+test('Fase 1: Loop detector in Default mode warns (no hard stop) on repeated read_file > 2', async () => {
   const identicalCall = '```tool\n{"tool": "read_file", "path": "stuck.txt"}\n```';
   const provider = new MockSequenceProvider([
     identicalCall,
@@ -350,10 +350,11 @@ test('Fase 1: Loop detector in Default mode halts on repeated read_file > 2', as
   agent.sessionState.mode = 'default';
 
   const result = await agent.handleInstruction('periksa file');
-  assert.ok(result.includes('[deteksi loop]'), 'Default mode interrupts loop at default threshold');
+  assert.ok(!result.includes('[deteksi loop]'), 'Default mode must not hard-stop on repetition');
+  assert.ok(result.includes('reached max tool iterations'), 'Turn runs to the per-instruction cap');
 });
 
-test('Fase 1: Loop detector in Code mode halts on repeated read_file > 2 without exception', async () => {
+test('Fase 1: Loop detector in Code mode warns (no hard stop) on repeated read_file > 2', async () => {
   const identicalCall = '```tool\n{"tool": "read_file", "path": "stuck.txt"}\n```';
   const provider = new MockSequenceProvider([
     identicalCall,
@@ -368,7 +369,8 @@ test('Fase 1: Loop detector in Code mode halts on repeated read_file > 2 without
   agent.sessionState.mode = 'code';
 
   const result = await agent.handleInstruction('periksa file di mode code');
-  assert.ok(result.includes('[deteksi loop]'), 'Code mode interrupts loop at default threshold');
+  assert.ok(!result.includes('[deteksi loop]'), 'Code mode must not hard-stop on repetition');
+  assert.ok(result.includes('reached max tool iterations'), 'Turn runs to the per-instruction cap');
 });
 
 test('Fase 1: Loop detector in Research mode relaxes threshold for read-only whitelist tools', async () => {
@@ -396,7 +398,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setWorkspaceRoot } from '../agent/tools.js';
 
-test('Fase 1: Loop detector in Research mode still halts on mutating tools at default threshold', async () => {
+test('Fase 1: Loop detector in Research mode gives mutating tools the relaxed threshold (10) and never hard-stops', async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ruko-test-fase1-'));
   setWorkspaceRoot(tmp);
   try {
@@ -413,15 +415,20 @@ test('Fase 1: Loop detector in Research mode still halts on mutating tools at de
     const agent = new Agent(ctx, provider, config, async () => true, tmp);
     agent.sessionState.mode = 'research';
 
+    // Mutating/exec tools are relaxed (10), not strict (2).
+    const params = agent.getLoopDetectorParams('write_file');
+    assert.equal(params.loopThreshold, 10, 'Mutating tools use the relaxed threshold');
+
     const result = await agent.handleInstruction('tulis file');
-    assert.ok(result.includes('[deteksi loop]'), 'Research mode does NOT relax mutating tools');
+    assert.ok(!result.includes('[deteksi loop]'), 'Repetition must not hard-stop the turn');
+    assert.ok(result.includes('reached max tool iterations'), 'Turn runs to the per-instruction cap');
   } finally {
     setWorkspaceRoot(null);
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('Fase 1: Build mode starts in explore phase (relaxed) and transitions permanently to mutate phase (strict) upon mutating tool', async () => {
+test('Fase 1: Build mode starts in explore phase and transitions permanently to mutate phase upon mutating tool (thresholds no longer depend on phase)', async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ruko-test-fase1-build-'));
   setWorkspaceRoot(tmp);
   try {
@@ -432,10 +439,13 @@ test('Fase 1: Build mode starts in explore phase (relaxed) and transitions perma
     agent.sessionState.mode = 'build';
     agent.sessionState.buildPhase = 'explore';
 
-    // In explore phase: read_file gets relaxed parameters
+    // Read tools are strict (2) in every phase now: their content stays in
+    // context, so re-reading the same content needs no loose quota.
     const exploreParams = agent.getLoopDetectorParams('read_file');
-    assert.equal(exploreParams.readOnlyRelaxed, true, 'Explore phase provides relaxed read-only threshold');
-    assert.equal(exploreParams.loopThreshold, 10);
+    assert.equal(exploreParams.readOnlyRelaxed, false, 'Read tools are strict in explore phase too');
+    assert.equal(exploreParams.loopThreshold, 2);
+    // Exec/mutating tools are relaxed (10) in every phase.
+    assert.equal(agent.getLoopDetectorParams('write_file').loopThreshold, 10);
 
     // Executing a read-only tool keeps explore phase
     const readTurnProvider = new MockSequenceProvider([

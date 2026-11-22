@@ -18,7 +18,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -125,6 +126,17 @@ const testRunnerArgs = supportsTestTimeout
   ? ['--test', '--test-timeout=60000', ...nodeFlags, ...testFiles]
   : ['--test', ...nodeFlags, ...testFiles];
 
+// Diagnostik research-mode (lihat src/tests/research_mode.test.ts): test
+// integrasi itu menulis hasil tiap bagiannya ke file ini di tmpdir, karena
+// workflow command dari dalam test child tidak pernah menjadi annotation
+// (pipeline TAP mengawali output child dengan `# `). Hapus sisa run lama
+// supaya tidak terbaca basi, lalu teruskan isinya sebagai annotation bila
+// run ini gagal (di bawah, di blok IN_GITHUB_ACTIONS).
+const RESEARCH_DEBUG_FILE = join(tmpdir(), 'ruko-research-debug.json');
+try {
+  unlinkSync(RESEARCH_DEBUG_FILE);
+} catch {}
+
 const child = spawn(process.execPath, testRunnerArgs, {
   cwd: PROJECT_ROOT,
   stdio: ['inherit', 'pipe', 'pipe'],
@@ -185,7 +197,18 @@ if (exitCode !== 0) {
     if (summary.length > 0) {
       console.log(`::notice title=Ringkasan test (${platform})::${escape(summary.join(' | '))}`);
     }
+    if (existsSync(RESEARCH_DEBUG_FILE)) {
+      try {
+        const debug = readFileSync(RESEARCH_DEBUG_FILE, 'utf8');
+        console.log(`::notice title=Research debug (${platform})::${escape(debug.slice(0, 4000))}`);
+      } catch {}
+    }
   }
+  // Hapus file diagnostik setelah run gagal — di GHA sudah diteruskan sebagai
+  // annotation di atas; lokal pun tidak perlu basi sampai run berikutnya.
+  try {
+    unlinkSync(RESEARCH_DEBUG_FILE);
+  } catch {}
 }
 
 process.exit(exitCode);

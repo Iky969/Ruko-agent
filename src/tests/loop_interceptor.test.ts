@@ -57,7 +57,7 @@ test('Item 2: Consecutive identical tool calls prevent re-executing I/O and retu
   );
 });
 
-test('Item 2: Calling identical tool > 2 times consecutively forcibly interrupts agent loop and directs conclusion', async () => {
+test('Item 2: Calling identical tool > 2 times consecutively warns and skips, does NOT forcibly interrupt the loop', async () => {
   const identicalCall = '```tool\n{"tool": "read_file", "path": "stuck.txt"}\n```';
   // Provider repeatedly outputs identical tool call
   const provider = new MockInterceptorProvider([
@@ -73,14 +73,7 @@ test('Item 2: Calling identical tool > 2 times consecutively forcibly interrupts
 
   const result = await agent.handleInstruction('periksa stuck file');
 
-  assert.ok(result.includes('[deteksi loop]'), 'Result must indicate loop detection');
-  assert.ok(
-    result.includes('2× berturut-turut') || result.includes('eksekusi dihentikan'),
-    'Must interrupt loop after exceeding 2 consecutive calls',
-  );
-  assert.ok(
-    result.includes('simpulkan') || result.includes('respons akhir'),
-    'Must direct model/agent to conclude or provide final response',
-  );
-  assert.ok(provider.receivedMessages.length <= 4, 'Must not loop infinitely');
+  assert.ok(!result.includes('[deteksi loop]'), 'Repetition must not hard-stop the turn');
+  assert.ok(result.includes('reached max tool iterations'), 'Turn runs to the per-instruction cap');
+  assert.ok(provider.receivedMessages.length > 4, 'Must not terminate early on repetition');
 });

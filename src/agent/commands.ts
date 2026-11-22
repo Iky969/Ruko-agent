@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import type { Confirmer } from '../core/approval.js';
 import { join, relative as relativeFromCwd, resolve as resolvePath } from 'node:path';
 import { Context } from '../core/context.js';
@@ -9,11 +9,24 @@ import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
 import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot, runToolCall } from './tools.js';
-import { AgentConfig, AgentMode, createDefaultSessionState, DEFAULT_CONFIG, ProviderProfile, ReasoningLevel, SessionState, UiMode } from '../types.js';
+import { AgentConfig, AgentMode, createDefaultSessionState, DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS, DEFAULT_CONFIG, DEFAULT_MAX_SESSION_TOOL_CALLS, MAX_AUTO_COMPRESS_THRESHOLD_CHARS, MAX_SESSION_TOOL_CALLS, ProviderProfile, ReasoningLevel, SessionState, UiMode } from '../types.js';
 import { ConnectionResult, createProvider, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
 
 import { scanSkills } from '../core/skills.js';
+import {
+  buildLearnAskPrompt,
+  categorizeWithLlm,
+  createLearnSession,
+  installLearnSkills,
+  learnGithubSource,
+  MAX_LEARN_SOURCE_CHARS,
+  parseGithubUrl,
+  parseLearnSelection,
+  renderLearnAskText,
+  saveLearnSession,
+  splitLearnContent,
+} from '../core/learn.js';
 import type { SelectorOptions } from '../core/tui.js';
 import type { Agent } from './agent.js';
 
@@ -100,11 +113,12 @@ export function renderContextDashboard(env: CommandEnv): void {
     `Max output tokens aktif: ${maxOut.toLocaleString()} tokens (per-turn)`,
     `Karakter aktif saat ini: ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}%`,
     `Pesan dalam konteks: ${env.ctx.size} pesan (messages: ${env.ctx.size})`,
+    `Auto-compress: ${(env.config.autoCompress ?? true) ? 'ON' : 'OFF'} (ambang ${(env.config.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS).toLocaleString()} chars — OFF = riwayat utuh, kompres manual via /compact)`,
     `Threshold log summarizer: ${env.config.maxLogChars} chars`,
     `Timeout eksekusi: ${env.config.execTimeoutMs}ms`,
     `Status konfigurasi: ${isPersistent ? 'Tersimpan di .ruko/config.json (survive lintas sesi)' : 'Menggunakan nilai default sesi (belum disimpan)'}`,
     `───────────────────────────────────────────────────────`,
-    `Hint: Atur budget dengan /context set <jumlah|50k> atau /settings context <128k|500k|unlimited>`,
+    `Hint: Atur budget dengan /context set <jumlah|50k> atau /settings context <128k|500k|unlimited>; auto-compress via /settings auto-compress <on|off> dan /settings auto-compress-threshold <500k>`,
   ];
 
   const maxInner = Math.max(10, terminalWidth() - 4);
@@ -300,11 +314,13 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'clear',
     category: 'Operasi & Eksekusi',
-    help: 'Hapus konteks percakapan saat ini.',
+    help: 'Hapus konteks percakapan saat ini (sekaligus reset budget tool sesi).',
     run: (_args, env) => {
       const removed = env.ctx.size;
       env.ctx.clear();
-      console.log(`Konteks dibersihkan (${removed} pesan dihapus).`);
+      // Percakapan baru = budget tool sesi baru.
+      env.agent?.resetSessionToolBudget?.();
+      console.log(`Konteks dibersihkan (${removed} pesan dihapus; budget tool sesi di-reset).`);
     },
   },
   {
@@ -499,7 +515,7 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'mode',
     category: 'Sistem & Bantuan',
-    help: 'Mode agen (Default, Research, Code, Build) untuk mengatur batasan kerja.',
+    help: 'Mode agen: Default (bebas), Research (cari bug: baca + test, tanpa mutasi), Code, Build.',
     hint: '[default|research|code|build]',
     run: async (args, env) => {
       const rawArg = args.trim().toLowerCase();
@@ -521,7 +537,7 @@ const COMMANDS: CommandDef[] = [
         }
         const labelMap: Record<AgentMode, string> = {
           default: 'Default (perilaku bawaan)',
-          research: 'Research (relaksasi loop untuk tool read-only)',
+          research: 'Research (cari bug: baca + test, tanpa mutasi; exec hanya perintah test)',
           code: 'Code (threshold loop standar)',
           build: 'Build [fase: explore]',
         };
@@ -546,7 +562,7 @@ const COMMANDS: CommandDef[] = [
           defaultId: currentState.mode,
           items: [
             { id: 'default', label: 'Default', description: 'Perilaku bawaan sistem saat ini.' },
-            { id: 'research', label: 'Research', description: 'Relaksasi batas loop khusus whitelist tool read-only.' },
+            { id: 'research', label: 'Research', description: 'Cari bug: boleh baca + jalankan test (npm test, node --test, ...), tanpa mengubah file.' },
             { id: 'code', label: 'Code', description: 'Batas loop standar, tanpa pengecualian.' },
             { id: 'build', label: 'Build', description: 'Fase explore (longgar) lalu beralih ke mutate (ketat).' },
           ],
@@ -559,7 +575,7 @@ const COMMANDS: CommandDef[] = [
 
       // Non-interactive fallback
       const current = getSessionState().mode;
-      console.log(`Mode aktif saat ini: ${current}. Pilihan: default, research, code, build.`);
+      console.log(`Mode aktif saat ini: ${current}. Pilihan: default, research (cari bug: baca + test, tanpa mutasi), code, build.`);
     },
   },
   {
@@ -643,6 +659,185 @@ const COMMANDS: CommandDef[] = [
     },
   },
   {
+    name: 'learn',
+    category: 'Sistem & Bantuan',
+    help: 'Pelajari skill/doc besar (file, teks, atau URL GitHub), pecah jadi kategori, pasang yang dipilih sebagai skill kecil.',
+    hint: '<path|url-github|--text ...> [--all|--only a,b] [--no-llm]',
+    run: async (args, env) => {
+      const ws = getWorkspaceRoot();
+
+      // --- Parse argumen: <path> | --text <teks> | --all | --only <a,b> | --no-llm
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      let sourcePath: string | null = null;
+      let inlineText: string | null = null;
+      let installAll = false;
+      let onlyValue: string | null = null;
+      let noLlm = false;
+      for (let i = 0; i < parts.length; i += 1) {
+        const p = parts[i];
+        if (p === '--all') installAll = true;
+        else if (p === '--no-llm') noLlm = true;
+        else if (p === '--only') {
+          onlyValue = parts[i + 1] ?? '';
+          i += 1;
+        } else if (p.startsWith('--only=')) {
+          onlyValue = p.slice('--only='.length);
+        } else if (p === '--text') {
+          inlineText = parts.slice(i + 1).join(' ').replace(/^["']|["']$/g, '');
+          break;
+        } else if (p.startsWith('--')) {
+          console.log(`Flag tidak dikenal: "${p}". Penggunaan: /learn <path> | /learn --text <teks> [--all|--only a,b] [--no-llm]`);
+          return;
+        } else if (!sourcePath) {
+          sourcePath = p;
+        }
+      }
+
+      if (!sourcePath && inlineText === null) {
+        console.log(
+          'Penggunaan: /learn <path-file|url-github> [--all|--only a,b] [--no-llm]\n' +
+            '         /learn --text <teks> [--all|--only a,b]\n' +
+            'Contoh: /learn docs/panduan-besar.md   → pelajari, lalu pilih kategori yang dipasang.\n' +
+            '        /learn https://github.com/owner/repo/blob/main/SKILL.md --all\n' +
+            '        /learn https://github.com/owner/repo   → clone dangkal, pelajari README + file .md.',
+        );
+        return;
+      }
+
+      // --- Baca sumber
+      let content = '';
+      let sourceLabel = '';
+      let sourceKind: 'file' | 'text' | 'github' = 'file';
+      if (sourcePath && /^https?:\/\//i.test(sourcePath)) {
+        // URL: hanya GitHub (github.com / raw.githubusercontent.com). Host lain
+        // ditolak sebelum ada request — lihat parseGithubUrl di core/learn.ts.
+        const target = parseGithubUrl(sourcePath);
+        if (!target) {
+          console.log(
+            'URL belum didukung /learn — hanya URL GitHub yang bisa dipelajari (github.com/<owner>/<repo>[/tree/<branch>/<path>] atau .../blob/<branch>/<path>, dan raw.githubusercontent.com). ' +
+              'Untuk host lain, simpan dulu isinya sebagai file di workspace, lalu /learn <path>.',
+          );
+          return;
+        }
+        console.log(dim(`Mengambil dari GitHub: ${sourcePath}…`));
+        try {
+          const gh = await learnGithubSource(sourcePath);
+          content = gh.content;
+          sourceLabel = gh.label;
+          sourceKind = 'github';
+          if (gh.files) {
+            console.log(
+              dim(
+                `Dipakai ${gh.files.length} dokumen dari repo${gh.truncated ? ' (dipotong ke batas file/ukuran learn)' : ''}: ${gh.files.join(', ')}`,
+              ),
+            );
+          }
+        } catch (e) {
+          const safeErrorMessage = String((e as Error).message ?? e).replace(/[\r\n]+/g, ' ');
+          console.log(`Gagal mengambil dari GitHub: ${safeErrorMessage}`);
+          return;
+        }
+      } else if (inlineText !== null) {
+        content = inlineText;
+        sourceLabel = 'teks langsung';
+        sourceKind = 'text';
+      } else {
+        const abs = resolvePath(ws, sourcePath as string);
+        try {
+          assertInsideWorkspace(abs, ws);
+        } catch (e) {
+          console.log(`Error: ${(e as Error).message}`);
+          return;
+        }
+        if (!existsSync(abs)) {
+          console.log(`File tidak ditemukan: ${sourcePath}`);
+          return;
+        }
+        content = readFileSync(abs, 'utf8');
+        sourceLabel = relativeFromCwd(ws, abs) || (sourcePath as string);
+      }
+      if (!content.trim()) {
+        console.log('Sumber kosong — tidak ada yang bisa dipelajari.');
+        return;
+      }
+      if (content.length > MAX_LEARN_SOURCE_CHARS) {
+        console.log(
+          `Sumber terlalu besar (${content.length.toLocaleString()} karakter, maks ${MAX_LEARN_SOURCE_CHARS.toLocaleString()}). ` +
+            'Pecah dulu filenya, atau pelajari per bagian.',
+        );
+        return;
+      }
+
+      // --- Pecah jadi kategori (struktural dulu, LLM hanya bila tak terstruktur)
+      let categories = splitLearnContent(content);
+      if (categories.length <= 1 && !noLlm && content.trim().length > 4000 && env.llm.isConfigured) {
+        console.log(dim('Dokumen tidak terstruktur — meminta LLM mengkategorikan…'));
+        try {
+          const llmCategories = await categorizeWithLlm(env.llm, content);
+          if (llmCategories.length >= 2) {
+            categories = llmCategories;
+          }
+        } catch (e) {
+          console.log(dim(`Kategorisasi LLM gagal (${(e as Error).message}) — memakai pemecahan struktural.`));
+        }
+      }
+      if (categories.length === 0) {
+        console.log('Tidak ada kategori yang bisa dipelajari dari sumber ini.');
+        return;
+      }
+
+      const session = createLearnSession({ kind: sourceKind, label: sourceLabel }, categories);
+      let sessionPath = '';
+      try {
+        sessionPath = saveLearnSession(session, ws);
+      } catch (e) {
+        console.log(dim(`Sesi learn tidak bisa disimpan (${(e as Error).message}) — lanjut tanpa arsip sesi.`));
+      }
+
+      // --- Tanyakan pilihan ke user (prompt JSON: semua / nomor / nama)
+      let selected;
+      try {
+        if (installAll) {
+          selected = categories;
+        } else if (onlyValue !== null) {
+          selected = parseLearnSelection(onlyValue, session);
+        } else {
+          console.log(renderLearnAskText(session));
+          if (!env.ask) {
+            console.log(dim('Non-interaktif: ulangi dengan --all atau --only <nama/nomor>, contoh: /learn docs/x.md --only 1,3'));
+            return;
+          }
+          // Pertanyaan diajukan mengikuti spesifikasi JSON buildLearnAskPrompt
+          // (opsi + format jawaban); jawaban di-parse dengan parseLearnSelection.
+          const askSpec = JSON.parse(buildLearnAskPrompt(session)) as { question: string };
+          const answer = await env.ask(`${askSpec.question} (semua / nomor / nama): `);
+          selected = parseLearnSelection(answer, session);
+        }
+      } catch (e) {
+        console.log(`Error: ${(e as Error).message}`);
+        return;
+      }
+
+      // --- Pasang sebagai skill kecil
+      const { installed } = installLearnSkills(session, selected, ws);
+      try {
+        saveLearnSession(session, ws);
+      } catch {
+        // Arsip sesi gagal diperbarui — pemasangan sudah berhasil, abaikan.
+      }
+      console.log(
+        renderBox(
+          `Learn: ${installed.length} skill terpasang`,
+          installed.map(
+            (s) => `${green('●')} ${bold(s.name.padEnd(20))} ${s.filePath}${s.overwrote ? dim(' (menimpa skill lama)') : ''}`,
+          ),
+        ),
+      );
+      if (sessionPath) console.log(dim(`Sesi learn tersimpan: ${sessionPath}`));
+      console.log(dim('Skill kecil ikut tersuntik ke system prompt (batas 8000 karakter) — cek dengan /skills.'));
+    },
+  },
+  {
     name: 'profile',
     category: 'Sesi & Model',
     help: 'Provider multi-profil: ganti cepat alias (hemat, kuat, lokal).',
@@ -687,7 +882,9 @@ const COMMANDS: CommandDef[] = [
       const result = JSON.parse(await runToolCall({ tool: 'exec', command: args }, {
         config: env.config, confirm: env.confirm, llmProvider: env.llm,
         workspaceRoot: getWorkspaceRoot(), hostState: env.agent?.getHostState(),
-        planMode: env.agent?.planMode, scopeAmendmentManager: env.agent?.getScopeAmendmentManager(),
+        planMode: env.agent?.planMode,
+        researchMode: env.agent?.sessionState.mode === 'research',
+        scopeAmendmentManager: env.agent?.getScopeAmendmentManager(),
       }));
       if (result.error) {
         console.log(result.error);
@@ -748,8 +945,8 @@ const COMMANDS: CommandDef[] = [
     name: 'settings',
     aliases: ['setting', 'set'],
     category: 'Konfigurasi & Budget',
-    help: 'Dashboard konfigurasi: lihat & ubah budget context, max token, model, role, approval, dan mode.',
-    hint: '[context|max-tokens|iterations|role|mode|approval|save] [nilai]',
+    help: 'Dashboard konfigurasi: lihat & ubah budget context, max token, model, role, approval, auto-compress, budget tool sesi, dan mode.',
+    hint: '[context|max-tokens|iterations|session-tools|role|mode|approval|auto-compress|auto-compress-threshold|save] [nilai]',
     run: async (args, env) => {
       const parts = args.trim().split(/\s+/);
       const sub = parts[0]?.toLowerCase();
@@ -773,6 +970,8 @@ const COMMANDS: CommandDef[] = [
           `TOKEN & CONTEXT BUDGET:`,
           `  • Context Window:   ${budgetChars.toLocaleString()} chars (~${budgetTokens.toLocaleString()} tokens)`,
           `  • Status Konteks:   ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}% terpakai`,
+          `  • Auto-Compress:    ${(env.config.autoCompress ?? true) ? 'ON' : 'OFF'} (ambang ${(env.config.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS).toLocaleString()} chars; OFF = riwayat dibiarkan utuh, kompres hanya via /compact)`,
+          `  • Tool Sesi:        ${env.agent?.getSessionToolCallCount?.() ?? 0}/${env.config.maxSessionToolCalls ?? DEFAULT_MAX_SESSION_TOOL_CALLS} dipakai (batas total tool per sesi; habis = jeda + laporan, sesi tetap tersimpan)`,
           `  • Max Output:       ${maxOut.toLocaleString()} tokens per-turn (max_tokens)`,
           `  • Max Iterations:   ${maxIter} iterasi tool per-turn`,
           ``,
@@ -784,6 +983,9 @@ const COMMANDS: CommandDef[] = [
           `───────────────────────────────────────────────────────`,
           `Ubah pengaturan dengan perintah:`,
           `  • /settings context <128k|500k|unlimited>   Atur limit context window`,
+          `  • /settings auto-compress <on|off>         Nyalakan/matikan kompresi otomatis riwayat`,
+          `  • /settings auto-compress-threshold <500k> Ambang karakter pemicu auto-compress`,
+          `  • /settings session-tools <jumlah|180>     Batas total pemanggilan tool per sesi`,
           `  • /settings max-tokens <jumlah|4096>       Atur limit token output per-turn`,
           `  • /settings iterations <jumlah|30>         Atur limit iterasi tool per-turn`,
           `  • /settings role <default|reviewer|teacher> Atur peran aktif`,
@@ -917,6 +1119,78 @@ const COMMANDS: CommandDef[] = [
         } else {
           console.log('Gunakan: /settings approval <on|off|yolo>');
         }
+        return;
+      }
+
+      if (sub === 'auto-compress' || sub === 'autocompress') {
+        if (!val) {
+          const on = env.config.autoCompress ?? true;
+          const threshold = env.config.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS;
+          console.log(`Auto-compress saat ini: ${on ? 'ON' : 'OFF'} (ambang ${threshold.toLocaleString()} karakter).`);
+          console.log('Gunakan: /settings auto-compress <on|off>');
+          return;
+        }
+        const v = val.toLowerCase();
+        if (v === 'on' || v === '1' || v === 'true') {
+          env.updateConfig({ autoCompress: true });
+          console.log(green('✔ Auto-compress diaktifkan — riwayat lama akan dilipat otomatis saat mencapai ambang.'));
+        } else if (v === 'off' || v === '0' || v === 'false') {
+          env.updateConfig({ autoCompress: false });
+          console.log(yellow('⚠ Auto-compress dimatikan — riwayat dibiarkan utuh sampai kamu merapikan manual dengan /compact.'));
+        } else {
+          console.log('Gunakan: /settings auto-compress <on|off>');
+        }
+        return;
+      }
+
+      if (sub === 'auto-compress-threshold' || sub === 'autocompressthreshold' || sub === 'compress-threshold') {
+        if (!val) {
+          const threshold = env.config.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS;
+          console.log(`Ambang auto-compress saat ini: ${threshold.toLocaleString()} karakter (~${Math.round(threshold / 4).toLocaleString()} token).`);
+          console.log('Gunakan: /settings auto-compress-threshold <nilai> (contoh: /settings auto-compress-threshold 500k)');
+          return;
+        }
+        const n = parseConfigNumber(val);
+        if (Number.isNaN(n) || n <= 0 || !Number.isInteger(n)) {
+          console.log('Error: nilai ambang harus berupa bilangan bulat positif dalam karakter (contoh: 500k, 1000000).');
+          return;
+        }
+        if (n > MAX_AUTO_COMPRESS_THRESHOLD_CHARS) {
+          console.log(`Error: ambang tidak boleh melebihi ${MAX_AUTO_COMPRESS_THRESHOLD_CHARS.toLocaleString()} karakter.`);
+          return;
+        }
+        if (n > env.config.maxContextChars) {
+          console.log(
+            yellow(
+              `Peringatan: ambang (${n.toLocaleString()} karakter) lebih besar dari maxContextChars (${env.config.maxContextChars.toLocaleString()}). ` +
+                'Riwayat tersimpan boleh tumbuh sampai ambang itu, tapi tiap giliran model tetap hanya melihat maxContextChars terakhir — naikkan juga maxContextChars bila ingin ambang ini berpengaruh penuh.',
+            ),
+          );
+        }
+        env.updateConfig({ autoCompressThresholdChars: n });
+        console.log(green(`✔ Ambang auto-compress diperbarui menjadi ${n.toLocaleString()} karakter (~${Math.round(n / 4).toLocaleString()} token).`));
+        return;
+      }
+
+      if (sub === 'session-tools' || sub === 'sessiontools' || sub === 'session-tool-budget') {
+        if (!val) {
+          const used = env.agent?.getSessionToolCallCount?.() ?? 0;
+          const max = env.config.maxSessionToolCalls ?? DEFAULT_MAX_SESSION_TOOL_CALLS;
+          console.log(`Budget tool sesi saat ini: ${used}/${max} dipakai.`);
+          console.log('Gunakan: /settings session-tools <jumlah> (contoh: /settings session-tools 180). Habis = jeda + laporan, sesi tetap tersimpan.');
+          return;
+        }
+        const count = Number(val.replace(/_/g, ''));
+        if (!Number.isFinite(count) || count <= 0 || !Number.isInteger(count)) {
+          console.log('Error: nilai session-tools harus berupa bilangan bulat positif (contoh: /settings session-tools 180).');
+          return;
+        }
+        if (count > MAX_SESSION_TOOL_CALLS) {
+          console.log(`Error: session-tools tidak boleh melebihi ${MAX_SESSION_TOOL_CALLS.toLocaleString()}.`);
+          return;
+        }
+        env.updateConfig({ maxSessionToolCalls: count });
+        console.log(green(`✔ Batas total tool per sesi diperbarui menjadi ${count} pemanggilan.`));
         return;
       }
 
@@ -1111,6 +1385,8 @@ const COMMANDS: CommandDef[] = [
             `baseUrl: ${maskBaseUrl(c)}`,
             `maxLogChars: ${c.maxLogChars}`,
             `maxContextChars: ${c.maxContextChars}`,
+            `autoCompress: ${c.autoCompress ?? true}  |  autoCompressThresholdChars: ${c.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS}`,
+            `maxSessionToolCalls: ${c.maxSessionToolCalls ?? DEFAULT_MAX_SESSION_TOOL_CALLS}`,
             `maxOutputTokens: ${c.maxOutputTokens ?? 4096}`,
             `execTimeoutMs: ${c.execTimeoutMs}`,
             `approvalEnabled: ${c.approvalEnabled}`,
@@ -1310,6 +1586,19 @@ function parseConfigNumber(val: string): number {
 async function applyConfigPatch(env: CommandEnv, key: string, value: string): Promise<void> {
   const patch: Partial<AgentConfig> = {};
   switch (key) {
+    case 'maxSessionToolCalls': {
+      const n = parseConfigNumber(value);
+      if (Number.isNaN(n) || n <= 0 || !Number.isInteger(n)) {
+        console.log(`Nilai tidak valid untuk ${key}: ${value} (contoh: /config set maxSessionToolCalls 180)`);
+        return;
+      }
+      if (n > MAX_SESSION_TOOL_CALLS) {
+        console.log(`Nilai tidak valid untuk ${key}: ${value} melebihi batas maksimum ${MAX_SESSION_TOOL_CALLS.toLocaleString()}.`);
+        return;
+      }
+      patch.maxSessionToolCalls = n;
+      break;
+    }
     case 'maxLogChars':
     case 'maxContextChars':
     case 'maxOutputTokens':
@@ -1343,6 +1632,36 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
       }
       patch.funAnimations = /^(true|1)$/i.test(value);
       break;
+    case 'autoCompress':
+      if (!/^(true|false|1|0|on|off)$/i.test(value)) {
+        console.log('Nilai harus true/false (atau on/off)');
+        return;
+      }
+      patch.autoCompress = /^(true|1|on)$/i.test(value);
+      break;
+    case 'autoCompressThresholdChars': {
+      const n = parseConfigNumber(value);
+      if (Number.isNaN(n) || n <= 0 || !Number.isInteger(n)) {
+        console.log(`Nilai tidak valid untuk ${key}: ${value} (contoh: /config set autoCompressThresholdChars 500k)`);
+        return;
+      }
+      if (n > MAX_AUTO_COMPRESS_THRESHOLD_CHARS) {
+        console.log(
+          `Nilai tidak valid untuk ${key}: ${value} melebihi batas maksimum ${MAX_AUTO_COMPRESS_THRESHOLD_CHARS.toLocaleString()} karakter.`,
+        );
+        return;
+      }
+      if (n > env.config.maxContextChars) {
+        console.log(
+          yellow(
+            `Peringatan: ambang auto-compress (${n.toLocaleString()} karakter) lebih besar dari maxContextChars (${env.config.maxContextChars.toLocaleString()}). ` +
+              'Riwayat tersimpan boleh tumbuh sampai ambang itu, tapi tiap giliran model tetap hanya melihat maxContextChars terakhir — naikkan juga maxContextChars bila ingin ambang ini berpengaruh penuh.',
+          ),
+        );
+      }
+      patch.autoCompressThresholdChars = n;
+      break;
+    }
     case 'apiKey':
       patch.apiKey = value;
       env.llm.setCredentials?.(value, env.config.baseUrl ?? '');
@@ -1419,7 +1738,7 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
       if (patch.model !== env.llm.model) env.llm.setModel(patch.model);
       break;
     default:
-      console.log(`Key tidak dikenal: ${key} (provider, model, apiKey, baseUrl, maxLogChars, maxContextChars, maxOutputTokens, execTimeoutMs, approvalEnabled, funAnimations)`);
+      console.log(`Key tidak dikenal: ${key} (provider, model, apiKey, baseUrl, maxLogChars, maxContextChars, maxOutputTokens, execTimeoutMs, approvalEnabled, funAnimations, autoCompress, autoCompressThresholdChars, maxSessionToolCalls)`);
       return;
   }
   env.updateConfig(patch);
