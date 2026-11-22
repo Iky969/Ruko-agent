@@ -275,7 +275,9 @@ test('user message is not duplicated in prompt history when context already has 
   assert.equal(userMsgs[0].content, 'baca kode');
 });
 
-test('loop breaker (item 7): terminates early on repeated identical tool calls without running to max iterations', async () => {
+test('loop breaker (item 7): repeated identical tool calls are warned and skipped, NOT hard-stopped', async () => {
+  // Per-tool repetition is only a warning now: the turn keeps going until
+  // the per-instruction max-iterations cap (or the session tool budget).
   const repeatedTool = '```tool\n{"tool": "exec", "command": "echo loop"}\n```';
   const provider = new RecordingProvider([
     repeatedTool,
@@ -288,8 +290,9 @@ test('loop breaker (item 7): terminates early on repeated identical tool calls w
   const ctx = new Context(config);
   const agent = new Agent(ctx, provider, config);
   const { result } = await captureStdout(() => agent.handleInstruction('stuck loop'));
-  assert.ok(result.includes('[deteksi loop]'));
-  assert.ok(provider.receivedMessages.length <= 5, `Expected <= 5 iterations, got ${provider.receivedMessages.length}`);
+  assert.ok(!result.includes('[deteksi loop]'), 'per-tool repetition must not hard-stop the turn');
+  assert.ok(result.includes('reached max tool iterations'), 'turn runs to the per-instruction cap');
+  assert.ok(provider.receivedMessages.length > 5, `Must NOT terminate early, got ${provider.receivedMessages.length} iterations`);
 });
 
 

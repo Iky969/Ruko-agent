@@ -260,7 +260,7 @@ test('Solusi 2: Batch deduplication skips duplicated tool calls within the same 
   rmSync(tmp, { recursive: true, force: true });
 });
 
-test('Solusi 2: N-gram cycle detection halts multi-step repeating cycle [A, B] -> [A, B] -> [A, B]', async () => {
+test('Solusi 2: N-gram cycle detection warns and skips (no hard stop) on repeating cycle [A, B] -> [A, B] -> [A, B]', async () => {
   // Repeating cycle of 2 tools: tool A (read A), tool B (read B) across turns
   const cycleTurn1 = '```tool\n{"tool": "read_file", "path": "cycleA.txt"}\n```';
   const cycleTurn2 = '```tool\n{"tool": "read_file", "path": "cycleB.txt"}\n```';
@@ -286,17 +286,15 @@ test('Solusi 2: N-gram cycle detection halts multi-step repeating cycle [A, B] -
 
   const result = await agent.handleInstruction('periksa loop siklus');
 
-  // Verify that loop detector stopped the cycle
-  assert.ok(result.includes('[deteksi loop]'), 'Must trigger loop detection');
-  assert.ok(
-    result.includes('siklus pemanggilan') || result.includes('sudah dipanggil'),
-    'Must indicate cycle or repeat detection',
+  // Cycle detection now only warns and skips that one call — the turn keeps
+  // going until the per-instruction cap; only the session tool budget is a
+  // hard stop.
+  assert.ok(!result.includes('[deteksi loop]'), 'cycle must not hard-stop the turn');
+  assert.ok(result.includes('reached max tool iterations'), 'turn runs to the per-instruction cap');
+  const warned = provider.receivedMessages.some((msgs) =>
+    msgs.some((m) => m.role === 'tool' && m.content.includes('Pola pemanggilan tool berulang')),
   );
-  assert.ok(result.includes('eksekusi dihentikan'), 'Must halt execution');
-  assert.ok(
-    result.includes('simpulkan') || result.includes('respons akhir'),
-    'Must guide model to finalize response',
-  );
+  assert.ok(warned, 'cycle warning must reach the model as a tool message');
 
   rmSync(tmp, { recursive: true, force: true });
 });

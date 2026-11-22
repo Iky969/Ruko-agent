@@ -25,6 +25,8 @@ export interface SubagentOptions {
   workspaceRoot?: string;
   /** Plan mode inheritance. */
   planMode?: boolean;
+  /** Research mode inheritance (mode cari bug: baca + test, tanpa mutasi). */
+  researchMode?: boolean;
   /** Delegation nesting depth. */
   depth?: number;
   /** Cumulative timeout limit in ms (default: 60_000ms). */
@@ -97,6 +99,11 @@ export async function runSubagent(
   );
   if (options.planMode) {
     subAgent.planMode = true;
+  }
+  if (options.researchMode) {
+    // Subagent mewarisi research mode parent supaya delegate tidak menjadi
+    // celah mutasi: tool mutasi subagent ikut diblok gate yang sama.
+    subAgent.sessionState.mode = 'research';
   }
   // Scope inheritance: subagent inherits HostState & ScopeAmendmentManager from parent
   if (deps.hostState) {
