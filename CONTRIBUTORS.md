@@ -59,4 +59,4 @@
 ## Catatan
 
 - Semua kontribusi AI telah diverifikasi manual via `npm test` & `npm run typecheck`
-- File ini diringkas dari log harian untuk keterbacaan (detail penuh: lihat [CHANGELOG.md](CHANGELOG.md))
+- File ini diringkas dari log harian untuk keterbacaan (detail penuh: lihat [docs/archive/CHANGELOG-session-log.md](docs/archive/CHANGELOG-session-log.md))

@@ -3,6 +3,10 @@
 Seluruh pembaruan penting pada lini rilis 2.x akan dicatat dalam berkas ini.
 Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tunduk pada [Semantic Versioning](https://semver.org/).
 
+> Struktur dokumen: berkas ini adalah **satu-satunya changelog rilis**.
+> Status singkat ada di [PROGRESS.md](PROGRESS.md); log sesi lama yang
+> panjang diarsipkan di [docs/archive/](docs/archive/).
+
 ---
 
 ## [2.2.0] - Unreleased

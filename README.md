@@ -421,6 +421,6 @@ MIT License — lihat [LICENSE](LICENSE)
 - **Panduan kontribusi:** [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)
 - **Security Policy**: [.github/SECURITY.md](.github/SECURITY.md) — Secret Scanning enabled, Push Protection enabled, Dependabot enabled, CodeQL enabled
 - **Contributors**: [CONTRIBUTORS.md](CONTRIBUTORS.md)
-- **Changelog**: [CHANGELOG.md](CHANGELOG.md) & [CHANGELOGv2.md](CHANGELOGv2.md) (ringkasan kerja detail di [PROGRESS.md](PROGRESS.md) & [PROGRESS2.md](PROGRESS2.md))
+- **Changelog rilis**: [CHANGELOGv2.md](CHANGELOGv2.md) (status singkat: [PROGRESS.md](PROGRESS.md); log sesi lama diarsipkan di [docs/archive/](docs/archive/))
 
 Issue publik **diperbolehkan** (bug, fitur, diskusi). Untuk kerentanan keamanan yang butuh perbaikan lebih cepat dan aman, hubungi privat lewat **GitHub Security Advisory** atau profil maintainer — detail di [SECURITY.md](.github/SECURITY.md).
