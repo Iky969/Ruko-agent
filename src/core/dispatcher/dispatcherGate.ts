@@ -110,7 +110,8 @@ export function isResearchModeBlockedTool(tool: string): boolean {
  * Menilai apakah sebuah perintah exec boleh jalan di research mode.
  *
  * Aturan:
- *  1. Kupas prefix `cd <dir> &&` (sekali) dan assignment env `VAR=val`.
+ *  1. Kupas prefix `cd <dir> &&` (sekali, termasuk `cd /d <dir>` cmd.exe)
+ *     dan assignment env `VAR=val`.
  *  2. Tolak operator struktur shell (chaining, redirect, pipe, substitusi).
  *  3. Tolak kata perintah mutasi sebagai token utuh (rm, git, curl, ...).
  *  4. Perintah inti harus cocok dengan allowlist perintah test.
@@ -132,8 +133,11 @@ export function isResearchModeAllowedExec(
   }
 
   // 1. Kupas prefix `cd <dir> &&` (sekali) dan assignment env.
+  // `cd /d <dir>` (cmd.exe, pindah drive — di Windows repo bisa di D:
+  // sementara %TEMP% di C:) diterima juga; tanpa /d, `cd C:\...` tidak
+  // pindah drive dan perintah test malah jalan di direktori yang salah.
   let rest = raw;
-  const cdPrefix = rest.match(/^cd\s+[^\s;&|><`$]+?\s+&&\s+/);
+  const cdPrefix = rest.match(/^cd\s+(?:\/[dD]\s+)?[^\s;&|><`$]+?\s+&&\s+/);
   if (cdPrefix) {
     rest = rest.slice(cdPrefix[0].length);
   }

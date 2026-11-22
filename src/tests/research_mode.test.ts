@@ -149,6 +149,8 @@ const ALLOWED_EXEC = [
   'ctest',
   'bats tests/',
   'cd /tmp/x && npm test',
+  'cd /d C:\\Users\\x\\proj && npm test',
+  'cd /D C:\\proj && npm test',
   'NODE_ENV=test npm test',
   './node_modules/.bin/jest',
   'pnpm dlx vitest run',
