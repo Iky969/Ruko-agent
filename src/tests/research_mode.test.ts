@@ -303,7 +303,14 @@ test('integrasi agent: npm test jalan di research mode, rm diblok', async () => 
     // NOTE: exec selalu jalan di process.cwd() (perilaku lama Ruko) — jadi
     // perintah test diarahkan dengan prefix `cd <dir> &&` yang memang
     // didukung allowlist research mode.
-    const testCall = `{"tool": "exec", "command": "cd ${tmp} && npm test"}`;
+    // PERBAIKAN (CI Windows): tool call HARUS dibuat via JSON.stringify.
+    // Template literal mentah menyisipkan path Windows apa adanya
+    // (`cd C:\Users\... && npm test`) — backslash jadi escape JSON tak valid
+    // (\U, \R, ...) sehingga JSON.parse di parseToolCalls melempar dan tool
+    // call ditolak sebagai malformed HANYA di Windows (di Linux/macOS path
+    // memakai `/` jadi JSON-nya valid). Ini penyebab Windows 18.x/20.x
+    // masih merah di PR #46 setelah fix test.cjs.
+    const testCall = JSON.stringify({ tool: 'exec', command: `cd ${tmp} && npm test` });
     const testCallBlock = `\`\`\`tool\n${testCall}\n\`\`\``;
     const provider = new FakeProvider([testCallBlock, 'Test sudah dijalankan.']);
     const ctx = new Context(baseConfig);
