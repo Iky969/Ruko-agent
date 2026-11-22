@@ -1,5 +1,10 @@
 # RUKO v2.0.0 IMPLEMENTATION TRACKER
 
+> Tracker ini **beku** (arsip implementasi v2.0) — dirujuk oleh komentar kode
+> (`tieredGate.ts`, `packageJsonGuard.ts`) sebagai acuan invarian. Status
+> terkini ada di [PROGRESS.md](PROGRESS.md); changelog rilis di
+> [CHANGELOGv2.md](CHANGELOGv2.md).
+
 ## 1. Project Context & Non-Negotiable Invariants
 - **Identity:** Local-first, zero-dependency coding agent (Node.js 22/24 native).
 - **Threat Model:** Single-user developer workstation vs Malicious Repositories & Indirect Prompt Injection.
