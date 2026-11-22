@@ -177,7 +177,7 @@ export function sanitizeConfigFile(raw: unknown): Partial<RukoConfigFile> {
     clean.maxLogChars = Math.min(Math.trunc(obj.maxLogChars), 1_000_000);
   }
   if (typeof obj.maxContextChars === 'number' && obj.maxContextChars > 0 && Number.isFinite(obj.maxContextChars)) {
-    clean.maxContextChars = Math.min(Math.trunc(obj.maxContextChars), 10_000_000);
+    clean.maxContextChars = Math.min(Math.trunc(obj.maxContextChars), MAX_AUTO_COMPRESS_THRESHOLD_CHARS);
   }
   if (typeof obj.execTimeoutMs === 'number' && obj.execTimeoutMs > 0 && Number.isFinite(obj.execTimeoutMs)) {
     clean.execTimeoutMs = Math.min(Math.trunc(obj.execTimeoutMs), 3_600_000);

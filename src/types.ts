@@ -172,8 +172,8 @@ export interface AgentConfig {
 
 /** Default auto-compress threshold in chars (Beverly's example: 500k). */
 export const DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS = 500_000;
-/** Hard cap for autoCompressThresholdChars, same as maxContextChars. */
-export const MAX_AUTO_COMPRESS_THRESHOLD_CHARS = 10_000_000;
+/** Hard cap for autoCompressThresholdChars, same as maxContextChars (1 juta karakter — provider terbesar saat ini). */
+export const MAX_AUTO_COMPRESS_THRESHOLD_CHARS = 1_000_000;
 /** Default total tool-call budget per session. */
 export const DEFAULT_MAX_SESSION_TOOL_CALLS = 180;
 /** Hard cap for maxSessionToolCalls. */

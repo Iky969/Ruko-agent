@@ -60,7 +60,7 @@ test('defaults: auto-compress ON dengan ambang 500.000 karakter', () => {
   assert.equal(DEFAULT_CONFIG.autoCompress, true);
   assert.equal(DEFAULT_CONFIG.autoCompressThresholdChars, 500_000);
   assert.equal(DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS, 500_000);
-  assert.equal(MAX_AUTO_COMPRESS_THRESHOLD_CHARS, 10_000_000);
+  assert.equal(MAX_AUTO_COMPRESS_THRESHOLD_CHARS, 1_000_000);
 });
 
 test('sanitizeConfigFile menerima nilai auto-compress yang valid', () => {
