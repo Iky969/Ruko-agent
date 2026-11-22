@@ -288,9 +288,16 @@ test('integrasi agent: npm test jalan di research mode, rm diblok', async () => 
   const tmp = mkdtempSync(join(tmpdir(), 'ruko-research-test-'));
   setWorkspaceRoot(tmp);
   try {
+    // Skrip test ditulis sebagai file sungguhan (test.cjs), BUKAN `node -e "..."`
+    // inline di package.json: npm menjalankan skrip lewat `cmd /d /s /c` di
+    // Windows, dan kutip ganda bersarang di dalam skrip dirusak aturan strip
+    // kutip cmd.exe — `node -e "console.log(...)"` gagal hanya di Windows
+    // (CI PR #46: test ini 1 gagal di windows-latest 18.x/20.x, lolos di
+    // Ubuntu/macOS). File .cjs tanpa kutip bekerja di semua platform.
+    writeFileSync(join(tmp, 'test.cjs'), "console.log('TEST-RAN-OK');\n", 'utf8');
     writeFileSync(
       join(tmp, 'package.json'),
-      JSON.stringify({ name: 'tmp-proj', scripts: { test: 'node -e "console.log(\'TEST-RAN-OK\')"' } }),
+      JSON.stringify({ name: 'tmp-proj', scripts: { test: 'node test.cjs' } }),
       'utf8',
     );
     // NOTE: exec selalu jalan di process.cwd() (perilaku lama Ruko) — jadi
