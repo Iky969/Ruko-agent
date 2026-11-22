@@ -4,7 +4,7 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-0%20runtime-success.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-1335%20passed-brightgreen.svg)](src/tests/)
+[![Tests](https://img.shields.io/badge/tests-1522%20passed-brightgreen.svg)](src/tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-Linux%20%7C%20Windows%20%7C%20macOS-blue.svg)](.github/workflows/ci.yml)
 [![Security](https://img.shields.io/badge/security-CodeQL%20%7C%20Secret%20Scanning%20%7C%20Dependabot-success.svg)](.github/SECURITY.md)
@@ -324,7 +324,7 @@ Config di `./.ruko/config.json` mode `0o600`:
 
 ```bash
 npm run typecheck   # static type check
-npm test            # 1336 tests (1 skip khusus Windows pada Linux)
+npm test            # 1526 tests (1522 pass lokal Linux; 2 skip; 2 fail artefak env sandbox — lihat CHANGELOGv2.md)
 npm run test:e2e    # E2E test
 ```
 

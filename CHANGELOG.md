@@ -1,6 +1,6 @@
-# PROGRESS.md
+# CHANGELOG — Log Sesi & Handoff Ruko
 
-> Dokumen status pengerjaan **Ruko — AI Coding Agent CLI**. Diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya.
+> Log status pengerjaan **Ruko — AI Coding Agent CLI**, diperbarui di akhir setiap sesi kerja. Ini adalah sumber kebenaran (source of truth) dan checkpoint handoff untuk AI berikutnya — **bukan** changelog rilis. Untuk catatan rilis v2.x, lihat [CHANGELOGv2.md](CHANGELOGv2.md).
 
 ### ⚠️ TEMUAN KEAMANAN PENTING — Bypass Sandbox Tulis via Symlink di Windows: libuv Mengabaikan `O_NOFOLLOW` (29 September 2026) — Hasil Review PR #22
 
