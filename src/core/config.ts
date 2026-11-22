@@ -3,6 +3,8 @@ import { dirname, join } from 'node:path';
 import {
   AgentConfig,
   DEFAULT_CONFIG,
+  MAX_AUTO_COMPRESS_THRESHOLD_CHARS,
+  MAX_SESSION_TOOL_CALLS,
   ProviderProfile,
   UiMode,
   resolveProfileCredentials,
@@ -35,6 +37,9 @@ export interface RukoConfigFile {
   guardianTimeoutMs?: number;
   trustedWorkspace?: boolean;
   maxToolIterations?: number;
+  maxSessionToolCalls?: number;
+  autoCompress?: boolean;
+  autoCompressThresholdChars?: number;
 }
 
 export function defaultConfigPath(): string {
@@ -172,7 +177,7 @@ export function sanitizeConfigFile(raw: unknown): Partial<RukoConfigFile> {
     clean.maxLogChars = Math.min(Math.trunc(obj.maxLogChars), 1_000_000);
   }
   if (typeof obj.maxContextChars === 'number' && obj.maxContextChars > 0 && Number.isFinite(obj.maxContextChars)) {
-    clean.maxContextChars = Math.min(Math.trunc(obj.maxContextChars), 10_000_000);
+    clean.maxContextChars = Math.min(Math.trunc(obj.maxContextChars), MAX_AUTO_COMPRESS_THRESHOLD_CHARS);
   }
   if (typeof obj.execTimeoutMs === 'number' && obj.execTimeoutMs > 0 && Number.isFinite(obj.execTimeoutMs)) {
     clean.execTimeoutMs = Math.min(Math.trunc(obj.execTimeoutMs), 3_600_000);
@@ -312,6 +317,32 @@ export function sanitizeConfigFile(raw: unknown): Partial<RukoConfigFile> {
   }
   if (typeof obj.maxToolIterations === 'number' && obj.maxToolIterations > 0 && Number.isFinite(obj.maxToolIterations)) {
     clean.maxToolIterations = Math.min(Math.trunc(obj.maxToolIterations), 1_000);
+  }
+  if (typeof obj.maxSessionToolCalls === 'number' && Number.isFinite(obj.maxSessionToolCalls)) {
+    if (obj.maxSessionToolCalls <= 0) {
+      console.warn('[config] Mengabaikan maxSessionToolCalls: harus angka positif.');
+    } else {
+      clean.maxSessionToolCalls = Math.min(Math.trunc(obj.maxSessionToolCalls), MAX_SESSION_TOOL_CALLS);
+    }
+  } else if (obj.maxSessionToolCalls !== undefined) {
+    console.warn('[config] Mengabaikan maxSessionToolCalls: harus angka.');
+  }
+  if (typeof obj.autoCompress === 'boolean') {
+    clean.autoCompress = obj.autoCompress;
+  } else if (obj.autoCompress !== undefined) {
+    console.warn('[config] Mengabaikan autoCompress: harus true/false.');
+  }
+  if (typeof obj.autoCompressThresholdChars === 'number' && Number.isFinite(obj.autoCompressThresholdChars)) {
+    if (obj.autoCompressThresholdChars <= 0) {
+      console.warn('[config] Mengabaikan autoCompressThresholdChars: harus angka positif dalam karakter.');
+    } else {
+      clean.autoCompressThresholdChars = Math.min(
+        Math.trunc(obj.autoCompressThresholdChars),
+        MAX_AUTO_COMPRESS_THRESHOLD_CHARS,
+      );
+    }
+  } else if (obj.autoCompressThresholdChars !== undefined) {
+    console.warn('[config] Mengabaikan autoCompressThresholdChars: harus angka dalam karakter.');
   }
 
   return clean;

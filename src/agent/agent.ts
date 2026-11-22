@@ -18,7 +18,7 @@ import {
   WorkflowTree,
   yellow,
 } from '../core/ui.js';
-import { AgentConfig, ContextMessage, createDefaultSessionState, SessionState } from '../types.js';
+import { AgentConfig, ContextMessage, createDefaultSessionState, DEFAULT_MAX_SESSION_TOOL_CALLS, SessionState } from '../types.js';
 import { LLMProvider } from './llm.js';
 import {
   allRoles,
@@ -168,6 +168,25 @@ export class Agent {
   private consecutiveRepeatCount = 0;
   /** Sliding window history of recent tool call signatures for N-gram cycle detection. */
   private callHistory: string[] = [];
+  /**
+   * Total tool calls honoured in this session (all turns, Agent lifetime).
+   * This is the ONE session-wide budget (maxSessionToolCalls, default 180):
+   * when it is reached, further tool calls are refused with a report, but
+   * the session and its context are NOT reset — the user keeps going in the
+   * same session. Reset only via resetSessionToolBudget() (/clear) or a
+   * fresh process. NOT reset per turn (unlike callHistory/callCounts).
+   */
+  private sessionToolCallCount = 0;
+
+  /** How many tool calls this session has used (for /settings display). */
+  public getSessionToolCallCount(): number {
+    return this.sessionToolCallCount;
+  }
+
+  /** Reset the session tool budget (used by /clear for a fresh conversation). */
+  public resetSessionToolBudget(): void {
+    this.sessionToolCallCount = 0;
+  }
   /** Tracks consecutive failed turns for context rollback (req.md Fase IV). */
   private consecutiveFailedTurns = 0;
   /** Maximum consecutive failed turns before rollback (default 2). */
@@ -340,25 +359,51 @@ export class Agent {
     this.sessionState = createDefaultSessionState();
   }
 
-  /** Parameter injection loop detector per-SessionState (Fase 1). */
+  /**
+   * Parameter injection loop detector (Fase 1) — thresholds only decide
+   * WHEN a repetition warning fires; they are never a hard stop (see the
+   * tool loop: repetition only skips that one call with a warning).
+   *
+   * Direction is deliberately the opposite of the old code: read-only
+   * tools (read_file, glob, code_search, ...) get the STRICT thresholds
+   * (2) by default, because without forced auto-compact their content
+   * stays in context — re-reading the same content is pointless. Exec /
+   * test / mutating tools get the RELAXED thresholds (10), because
+   * re-running a test or a command after a fix is legitimate work, not a
+   * loop. One exception: in research mode (bug-hunting reads a lot) the
+   * original read-only relaxation is kept (loop/cycle thresholds 10).
+   * The old build-explore relaxation is NOT restored.
+   *
+   * One exception is uniform for every tool: softWarningThreshold is
+   * always 2. An identical call back-to-back (nothing changed in
+   * between) is always skipped with a warning (§5 guard) — including a
+   * destructive exec. The relaxed thresholds only govern the looser
+   * signals (cycle / total repeat cap) below.
+   */
   public getLoopDetectorParams(tool: string): LoopDetectorParams {
     const isReadOnly = IDEMPOTENT_READ_TOOLS.has(tool);
     const mode = this.sessionState?.mode ?? 'default';
-    let relaxed = false;
 
-    if (mode === 'research' && isReadOnly) {
-      relaxed = true;
-    } else if (mode === 'build' && this.sessionState?.buildPhase === 'explore' && isReadOnly) {
-      relaxed = true;
-    }
-
-    if (relaxed) {
+    // Research mode keeps its original read-only relaxation (loop/cycle
+    // thresholds 10): bug-hunting reads a lot. The identical-consecutive
+    // guard (softWarningThreshold) stays 2 for every tool/mode (§5).
+    if (isReadOnly && mode === 'research') {
       return {
         loopThreshold: 10,
         consecutiveThreshold: 10,
         cycleThreshold: 10,
-        softWarningThreshold: 10,
+        softWarningThreshold: 2,
         readOnlyRelaxed: true,
+      };
+    }
+
+    if (!isReadOnly) {
+      return {
+        loopThreshold: 10,
+        consecutiveThreshold: 10,
+        cycleThreshold: 10,
+        softWarningThreshold: 2,
+        readOnlyRelaxed: false,
       };
     }
 
@@ -402,6 +447,7 @@ export class Agent {
     return buildSystemPrompt({
       role: this.activeRole(),
       planMode: this.planMode,
+      researchMode: this.sessionState.mode === 'research',
       mode: this.config.mode ?? 'beginner',
       agentDoc: readAgentDocSafe(),
       memory: readMemorySafe(ws),
@@ -465,6 +511,7 @@ export class Agent {
       const result = JSON.parse(await runToolCall({ tool: 'exec', command: cmd }, {
         config: this.config, confirm: this.confirm, llmProvider: this.llmProvider,
         workspaceRoot: ws, hostState: this.hostState, planMode: this.planMode,
+        researchMode: this.sessionState.mode === 'research',
         scopeAmendmentManager: this.scopeAmendmentManager,
       }));
       if (result.error) return result.error;
@@ -871,30 +918,42 @@ export class Agent {
           // Cycle detection across steps (N-gram cycle detector)
           const cycle = this.detectCycle(this.callHistory, sig);
 
-          // 1. Interupsi loop agen jika:
-          // - Pemanggilan berturut-turut > params.consecutiveThreshold kali (consecutive loop)
-          // - Terdeteksi siklus N-gram berulang > params.cycleThreshold kali (cycle loop)
-          // - Tool signature dipanggil ulang melebihi repeat cap (> params.loopThreshold)
+          // 1. Pola pemanggilan berulang terdeteksi (consecutive / siklus
+          // N-gram / repeat cap) — ini HANYA peringatan, bukan hard stop:
+          // pemanggilan ini dilewati, model diberi tahu, dan turn tetap
+          // jalan. Alasannya: pola yang sama belum tentu loop — misalnya
+          // membaca baris 100–120 lalu 200–230 adalah kemajuan yang sah,
+          // dan test yang dijalankan ulang setelah perbaikan adalah kerja
+          // yang wajar. Satu-satunya hard stop adalah budget total tool
+          // per sesi (di bawah) dan batas iterasi per instruksi.
           if (
             this.consecutiveRepeatCount > loopParams.consecutiveThreshold ||
             (cycle && cycle.count > loopParams.cycleThreshold) ||
             (this.callCounts.get(sig) ?? 0) > loopParams.loopThreshold
           ) {
-            if (tree.isTreeActive) {
-              tree.finish('Dihentikan karena deteksi loop');
-            }
             const cycleInfo = (cycle && cycle.count > loopParams.cycleThreshold)
               ? `siklus pemanggilan ${cycle.cycleLength} tool berulang ${cycle.count}×`
               : `tool "${call.tool}" dengan argumen sama sudah dipanggil > ${loopParams.loopThreshold}×`;
-            return (
-              `[deteksi loop] ${cycleInfo} — eksekusi dihentikan paksa. Dilarang melanjutkan pembacaan berulang atau printf. Berikan respons akhir sekarang berdasarkan data yang sudah terkumpul.`
-            );
+            tree.log(yellow(`⚠ Pola tool berulang terdeteksi (${cycleInfo}) — pemanggilan ini dilewati.`));
+            messages.push({
+              role: 'tool',
+              content: `[WARNING: Pola pemanggilan tool berulang terdeteksi (${cycleInfo}). Pemanggilan ini dilewati — JANGAN mengulanginya lagi. Gunakan data yang sudah ada di riwayat, atau lanjutkan ke langkah berikutnya dengan tool/argumen yang berbeda.]`,
+              timestamp: new Date().toISOString(),
+              tool_call_id: toolCallId,
+              name: call.tool,
+            });
+            this.callHistory.push(sig);
+            continue;
           }
 
           // 2. Jika perintah terdeteksi identik berturut-turut atau duplikat dalam batch yang sama,
           // cegah eksekusi ulang I/O dan kirim warning terstandarisasi dengan intervensi aktif.
+          // (>=, bukan ===: setiap pengulangan identik berturut-turut setelah
+          // yang pertama dilewati — termasuk exec destruktif — karena di
+          // antara keduanya tidak ada yang berubah. Ambang longgar di atas
+          // hanya berlaku untuk sinyal siklus / total repeat cap.)
           if (
-            this.consecutiveRepeatCount === loopParams.softWarningThreshold ||
+            this.consecutiveRepeatCount >= loopParams.softWarningThreshold ||
             (isBatchDuplicate && !loopParams.readOnlyRelaxed)
           ) {
             const warn = 'Perintah identik terdeteksi berulang, dilewati';
@@ -909,6 +968,29 @@ export class Agent {
             this.callHistory.push(sig);
             continue;
           }
+
+          // Budget total tool per sesi (SATU-SATUNYA hard stop berbasis
+          // jumlah tool): kalau sudah mencapai maxSessionToolCalls
+          // (default 180), tolak tool call ini dan berhenti dengan laporan
+          // apa adanya. Ini hanya JEDA — sesi dan konteks TIDAK di-reset
+          // dan user TIDAK perlu sesi baru: instruksi berikutnya tetap bisa
+          // jalan di sesi yang sama, atau budget dinaikkan dulu via
+          // /settings session-tools. Jawaban akhir tanpa tool tetap boleh.
+          const maxSessionTools = this.config.maxSessionToolCalls ?? DEFAULT_MAX_SESSION_TOOL_CALLS;
+          if (this.sessionToolCallCount >= maxSessionTools) {
+            if (tree.isTreeActive) {
+              tree.finish('Batas tool sesi tercapai');
+            }
+            const shortInstruction = instruction.length > 200 ? `${instruction.slice(0, 200)}…` : instruction;
+            lastRawResponse =
+              `[batas tool sesi] Total pemanggilan tool dalam sesi ini sudah mencapai ${this.sessionToolCallCount}/${maxSessionTools} — eksekusi tool dihentikan di sini, apa adanya.\n` +
+              `Selesai: ${tree.currentStep} langkah tool sudah dijalankan pada instruksi ini (total ${this.sessionToolCallCount} pemanggilan tool dalam sesi ini).\n` +
+              `Belum selesai: instruksi "${shortInstruction}" belum tuntas karena budget tool sesi habis di tengah jalan.\n` +
+              `Sesi dan konteks TIDAK di-reset dan TIDAK perlu sesi baru — lanjutkan saja di sesi yang sama: beri instruksi berikutnya, atau naikkan dulu budgetnya via /settings session-tools <jumlah> (/config set maxSessionToolCalls <jumlah>) lalu ulangi instruksi yang belum selesai.`;
+            lastHadToolCalls = tree.currentStep > 0;
+            return lastRawResponse;
+          }
+          this.sessionToolCallCount += 1;
 
           // Solusi 3: In-turn idempotent tool cache.
           // Jika tool read-only sudah pernah dijalankan pada turn ini dengan argumen identik
@@ -956,6 +1038,7 @@ export class Agent {
                 tree.log(line);
               },
               planMode: this.planMode,
+              researchMode: this.sessionState.mode === 'research',
               signal,
               llmProvider: this.llmProvider,
               workspaceRoot: this.workspaceRoot,

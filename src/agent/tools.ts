@@ -373,6 +373,12 @@ export interface ToolDeps {
    * refused outright while the CLI has it active.
    */
   planMode?: boolean;
+  /**
+   * Research mode (mode cari bug): enforced in CODE like plan mode —
+   * mutation tools are refused outright, exec is limited to the test
+   * command allowlist (see dispatcherGate.isResearchModeAllowedExec).
+   */
+  researchMode?: boolean;
   /** v0.7: abort signal — an interrupted turn kills its running exec child. */
   signal?: AbortSignal;
   /**
@@ -1858,6 +1864,7 @@ export async function runToolCall(call: ToolCall, deps: ToolDeps = {}): Promise<
     args: call,
     hostState: deps.hostState,
     planMode: deps.planMode,
+    researchMode: deps.researchMode,
     scopeManager: deps.scopeAmendmentManager,
     isInteractive: (deps.subagentDepth ?? 0) === 0 && deps.confirm !== undefined,
     workspaceRoot: ws,
@@ -2596,6 +2603,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
           },
           {
             planMode: deps.planMode,
+            researchMode: deps.researchMode,
             workspaceRoot: ws,
             depth: (deps.subagentDepth ?? 0) + 1,
             timeoutMs,
