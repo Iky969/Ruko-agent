@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Agent } from '../agent/agent.js';
@@ -17,6 +17,31 @@ import {
 import { AgentConfig, ContextMessage, DEFAULT_CONFIG } from '../types.js';
 
 /** Scripted provider: returns one canned reply per chat() call. */
+
+// Diagnostik CI Windows: output test child dilewatkan pipeline TAP node:test
+// yang mengawali tiap baris dengan `# `, sehingga workflow command `::notice`
+// yang ditulis dari dalam test TIDAK PERNAH menjadi annotation GitHub
+// (terbukti di 2 run: diagnostik tidak muncul). Maka test integrasi ini
+// menulis hasil tiap bagiannya ke file JSON di tmpdir; scripts/run-tests.mjs
+// (proses induk) membacanya setelah runner selesai dan meneruskannya sebagai
+// annotation — hanya bila ada kegagalan. File dihapus run-tests.mjs di awal
+// run berikutnya supaya tidak basi.
+const RESEARCH_DEBUG_FILE = join(tmpdir(), 'ruko-research-debug.json');
+function writeResearchDebug(part: string, data: Record<string, unknown>): void {
+  try {
+    let all: Record<string, unknown> = {};
+    try {
+      all = JSON.parse(readFileSync(RESEARCH_DEBUG_FILE, 'utf8')) as Record<string, unknown>;
+    } catch {
+      // Belum ada file / rusak — mulai dari kosong.
+    }
+    all[part] = data;
+    writeFileSync(RESEARCH_DEBUG_FILE, JSON.stringify(all));
+  } catch {
+    // Diagnostik tidak boleh menutupi hasil test.
+  }
+}
+
 class FakeProvider implements LLMProvider {
   readonly name = 'fake';
   readonly isConfigured = true;
@@ -317,14 +342,10 @@ test('integrasi agent: npm test jalan di research mode, rm diblok', async () => 
     const agent = new Agent(ctx, provider, baseConfig, async () => true, tmp);
     agent.sessionState.mode = 'research';
 
-    // Diagnostik CI Windows: dicetak SELALU sebagai annotation (notice) via
-    // process.stdout.write dengan newline di depan — console.log biasa bisa
-    // menempel di tengah baris output streaming agent (`\r` tanpa `\n`)
-    // sehingga GitHub tidak mengenalinya sebagai workflow command, dan
-    // diagnostik yang diletakkan setelah assert tidak pernah jalan bila
-    // kegagalan terjadi sebelum assert (mis. handleInstruction melempar
-    // atau tool call tidak ter-parse sehingga hanya 1 chat call).
-    const esc = (s: string) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+    // Diagnostik CI Windows: dicetak SEBELUM assert (kegagalan bisa terjadi
+    // di assert `result` / tidak adanya panggilan ke-2) — ditulis ke file
+    // (lihat writeResearchDebug), bukan ke stdout, karena pipeline TAP
+    // mengawali output child dengan `# ` dan workflow command tidak dikenali.
     let result = '';
     let calls = 0;
     let toolContent = '(belum dieksekusi)';
@@ -336,9 +357,7 @@ test('integrasi agent: npm test jalan di research mode, rm diblok', async () => 
     } catch (err) {
       toolContent = `THROW: ${err instanceof Error ? err.message : String(err)}`;
     }
-    process.stdout.write(
-      `\n::notice title=Research debug npm::result=${esc(JSON.stringify(result))} calls=${calls} tool=${esc(toolContent.slice(0, 1500))}\n`,
-    );
+    writeResearchDebug('npm', { result, calls, tool: toolContent.slice(0, 1500) });
     assert.equal(result, 'Test sudah dijalankan.');
     assert.ok(toolContent.includes('TEST-RAN-OK'), 'npm test harus benar-benar dieksekusi');
 
@@ -359,9 +378,7 @@ test('integrasi agent: npm test jalan di research mode, rm diblok', async () => 
     } catch (err) {
       toolContent2 = `THROW: ${err instanceof Error ? err.message : String(err)}`;
     }
-    process.stdout.write(
-      `\n::notice title=Research debug rm::result=${esc(JSON.stringify(result2))} calls=${calls2} tool=${esc(toolContent2.slice(0, 1500))}\n`,
-    );
+    writeResearchDebug('rm', { result: result2, calls: calls2, tool: toolContent2.slice(0, 1500) });
     assert.equal(result2, 'Perintah ditolak, lanjut baca saja.');
     assert.ok(toolContent2.includes('research mode aktif'));
   } finally {
