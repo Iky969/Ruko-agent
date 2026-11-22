@@ -267,7 +267,7 @@ Ruko menerapkan defense-in-depth:
 | `/compact` | Paksa kompresi history |
 | `/plan on\|off` | Mode rencana (blokir write/exec); balas nomor opsi → auto-off + eksekusi |
 | `/scope [allow <path>\|status\|reset]` | Setujui path mutasi, lihat kontrak, atau cabut seluruh scope sesi |
-| `/mode [default\|research\|code\|build]` | Mode operasional agen (AgentMode: `default`\|`research`\|`code`\|`build`) |
+| `/mode [default\|research\|code\|build]` | Mode operasional agen (AgentMode: `default`\|`research`\|`code`\|`build`). `research` = mode cari bug: boleh baca + jalankan perintah test (`npm test`, `node --test`, ...), tanpa mengubah file — ditegakkan di level kode, bukan cuma prompt. |
 | `/reasoning [low\|medium\|high]` | Tingkat reasoning native (default medium) |
 | `/yolo on\|off` | Mode auto-approve |
 | `/undo [path]` | Batalkan perubahan file |

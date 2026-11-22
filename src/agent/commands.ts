@@ -9,7 +9,7 @@ import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
 import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot, runToolCall } from './tools.js';
-import { AgentConfig, AgentMode, createDefaultSessionState, DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS, DEFAULT_CONFIG, MAX_AUTO_COMPRESS_THRESHOLD_CHARS, ProviderProfile, ReasoningLevel, SessionState, UiMode } from '../types.js';
+import { AgentConfig, AgentMode, createDefaultSessionState, DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS, DEFAULT_CONFIG, DEFAULT_MAX_SESSION_TOOL_CALLS, MAX_AUTO_COMPRESS_THRESHOLD_CHARS, MAX_SESSION_TOOL_CALLS, ProviderProfile, ReasoningLevel, SessionState, UiMode } from '../types.js';
 import { ConnectionResult, createProvider, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
 
@@ -301,11 +301,13 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'clear',
     category: 'Operasi & Eksekusi',
-    help: 'Hapus konteks percakapan saat ini.',
+    help: 'Hapus konteks percakapan saat ini (sekaligus reset budget tool sesi).',
     run: (_args, env) => {
       const removed = env.ctx.size;
       env.ctx.clear();
-      console.log(`Konteks dibersihkan (${removed} pesan dihapus).`);
+      // Percakapan baru = budget tool sesi baru.
+      env.agent?.resetSessionToolBudget?.();
+      console.log(`Konteks dibersihkan (${removed} pesan dihapus; budget tool sesi di-reset).`);
     },
   },
   {
@@ -500,7 +502,7 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'mode',
     category: 'Sistem & Bantuan',
-    help: 'Mode agen (Default, Research, Code, Build) untuk mengatur batasan kerja.',
+    help: 'Mode agen: Default (bebas), Research (cari bug: baca + test, tanpa mutasi), Code, Build.',
     hint: '[default|research|code|build]',
     run: async (args, env) => {
       const rawArg = args.trim().toLowerCase();
@@ -522,7 +524,7 @@ const COMMANDS: CommandDef[] = [
         }
         const labelMap: Record<AgentMode, string> = {
           default: 'Default (perilaku bawaan)',
-          research: 'Research (relaksasi loop untuk tool read-only)',
+          research: 'Research (cari bug: baca + test, tanpa mutasi; exec hanya perintah test)',
           code: 'Code (threshold loop standar)',
           build: 'Build [fase: explore]',
         };
@@ -547,7 +549,7 @@ const COMMANDS: CommandDef[] = [
           defaultId: currentState.mode,
           items: [
             { id: 'default', label: 'Default', description: 'Perilaku bawaan sistem saat ini.' },
-            { id: 'research', label: 'Research', description: 'Relaksasi batas loop khusus whitelist tool read-only.' },
+            { id: 'research', label: 'Research', description: 'Cari bug: boleh baca + jalankan test (npm test, node --test, ...), tanpa mengubah file.' },
             { id: 'code', label: 'Code', description: 'Batas loop standar, tanpa pengecualian.' },
             { id: 'build', label: 'Build', description: 'Fase explore (longgar) lalu beralih ke mutate (ketat).' },
           ],
@@ -560,7 +562,7 @@ const COMMANDS: CommandDef[] = [
 
       // Non-interactive fallback
       const current = getSessionState().mode;
-      console.log(`Mode aktif saat ini: ${current}. Pilihan: default, research, code, build.`);
+      console.log(`Mode aktif saat ini: ${current}. Pilihan: default, research (cari bug: baca + test, tanpa mutasi), code, build.`);
     },
   },
   {
@@ -688,7 +690,9 @@ const COMMANDS: CommandDef[] = [
       const result = JSON.parse(await runToolCall({ tool: 'exec', command: args }, {
         config: env.config, confirm: env.confirm, llmProvider: env.llm,
         workspaceRoot: getWorkspaceRoot(), hostState: env.agent?.getHostState(),
-        planMode: env.agent?.planMode, scopeAmendmentManager: env.agent?.getScopeAmendmentManager(),
+        planMode: env.agent?.planMode,
+        researchMode: env.agent?.sessionState.mode === 'research',
+        scopeAmendmentManager: env.agent?.getScopeAmendmentManager(),
       }));
       if (result.error) {
         console.log(result.error);
@@ -749,8 +753,8 @@ const COMMANDS: CommandDef[] = [
     name: 'settings',
     aliases: ['setting', 'set'],
     category: 'Konfigurasi & Budget',
-    help: 'Dashboard konfigurasi: lihat & ubah budget context, max token, model, role, approval, auto-compress, dan mode.',
-    hint: '[context|max-tokens|iterations|role|mode|approval|auto-compress|auto-compress-threshold|save] [nilai]',
+    help: 'Dashboard konfigurasi: lihat & ubah budget context, max token, model, role, approval, auto-compress, budget tool sesi, dan mode.',
+    hint: '[context|max-tokens|iterations|session-tools|role|mode|approval|auto-compress|auto-compress-threshold|save] [nilai]',
     run: async (args, env) => {
       const parts = args.trim().split(/\s+/);
       const sub = parts[0]?.toLowerCase();
@@ -775,6 +779,7 @@ const COMMANDS: CommandDef[] = [
           `  • Context Window:   ${budgetChars.toLocaleString()} chars (~${budgetTokens.toLocaleString()} tokens)`,
           `  • Status Konteks:   ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}% terpakai`,
           `  • Auto-Compress:    ${(env.config.autoCompress ?? true) ? 'ON' : 'OFF'} (ambang ${(env.config.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS).toLocaleString()} chars; OFF = riwayat dibiarkan utuh, kompres hanya via /compact)`,
+          `  • Tool Sesi:        ${env.agent?.getSessionToolCallCount?.() ?? 0}/${env.config.maxSessionToolCalls ?? DEFAULT_MAX_SESSION_TOOL_CALLS} dipakai (batas total tool per sesi; habis = jeda + laporan, sesi tetap tersimpan)`,
           `  • Max Output:       ${maxOut.toLocaleString()} tokens per-turn (max_tokens)`,
           `  • Max Iterations:   ${maxIter} iterasi tool per-turn`,
           ``,
@@ -788,6 +793,7 @@ const COMMANDS: CommandDef[] = [
           `  • /settings context <128k|500k|unlimited>   Atur limit context window`,
           `  • /settings auto-compress <on|off>         Nyalakan/matikan kompresi otomatis riwayat`,
           `  • /settings auto-compress-threshold <500k> Ambang karakter pemicu auto-compress`,
+          `  • /settings session-tools <jumlah|180>     Batas total pemanggilan tool per sesi`,
           `  • /settings max-tokens <jumlah|4096>       Atur limit token output per-turn`,
           `  • /settings iterations <jumlah|30>         Atur limit iterasi tool per-turn`,
           `  • /settings role <default|reviewer|teacher> Atur peran aktif`,
@@ -971,6 +977,28 @@ const COMMANDS: CommandDef[] = [
         }
         env.updateConfig({ autoCompressThresholdChars: n });
         console.log(green(`✔ Ambang auto-compress diperbarui menjadi ${n.toLocaleString()} karakter (~${Math.round(n / 4).toLocaleString()} token).`));
+        return;
+      }
+
+      if (sub === 'session-tools' || sub === 'sessiontools' || sub === 'session-tool-budget') {
+        if (!val) {
+          const used = env.agent?.getSessionToolCallCount?.() ?? 0;
+          const max = env.config.maxSessionToolCalls ?? DEFAULT_MAX_SESSION_TOOL_CALLS;
+          console.log(`Budget tool sesi saat ini: ${used}/${max} dipakai.`);
+          console.log('Gunakan: /settings session-tools <jumlah> (contoh: /settings session-tools 180). Habis = jeda + laporan, sesi tetap tersimpan.');
+          return;
+        }
+        const count = Number(val.replace(/_/g, ''));
+        if (!Number.isFinite(count) || count <= 0 || !Number.isInteger(count)) {
+          console.log('Error: nilai session-tools harus berupa bilangan bulat positif (contoh: /settings session-tools 180).');
+          return;
+        }
+        if (count > MAX_SESSION_TOOL_CALLS) {
+          console.log(`Error: session-tools tidak boleh melebihi ${MAX_SESSION_TOOL_CALLS.toLocaleString()}.`);
+          return;
+        }
+        env.updateConfig({ maxSessionToolCalls: count });
+        console.log(green(`✔ Batas total tool per sesi diperbarui menjadi ${count} pemanggilan.`));
         return;
       }
 
@@ -1166,6 +1194,7 @@ const COMMANDS: CommandDef[] = [
             `maxLogChars: ${c.maxLogChars}`,
             `maxContextChars: ${c.maxContextChars}`,
             `autoCompress: ${c.autoCompress ?? true}  |  autoCompressThresholdChars: ${c.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS}`,
+            `maxSessionToolCalls: ${c.maxSessionToolCalls ?? DEFAULT_MAX_SESSION_TOOL_CALLS}`,
             `maxOutputTokens: ${c.maxOutputTokens ?? 4096}`,
             `execTimeoutMs: ${c.execTimeoutMs}`,
             `approvalEnabled: ${c.approvalEnabled}`,
@@ -1365,6 +1394,19 @@ function parseConfigNumber(val: string): number {
 async function applyConfigPatch(env: CommandEnv, key: string, value: string): Promise<void> {
   const patch: Partial<AgentConfig> = {};
   switch (key) {
+    case 'maxSessionToolCalls': {
+      const n = parseConfigNumber(value);
+      if (Number.isNaN(n) || n <= 0 || !Number.isInteger(n)) {
+        console.log(`Nilai tidak valid untuk ${key}: ${value} (contoh: /config set maxSessionToolCalls 180)`);
+        return;
+      }
+      if (n > MAX_SESSION_TOOL_CALLS) {
+        console.log(`Nilai tidak valid untuk ${key}: ${value} melebihi batas maksimum ${MAX_SESSION_TOOL_CALLS.toLocaleString()}.`);
+        return;
+      }
+      patch.maxSessionToolCalls = n;
+      break;
+    }
     case 'maxLogChars':
     case 'maxContextChars':
     case 'maxOutputTokens':
@@ -1504,7 +1546,7 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
       if (patch.model !== env.llm.model) env.llm.setModel(patch.model);
       break;
     default:
-      console.log(`Key tidak dikenal: ${key} (provider, model, apiKey, baseUrl, maxLogChars, maxContextChars, maxOutputTokens, execTimeoutMs, approvalEnabled, funAnimations, autoCompress, autoCompressThresholdChars)`);
+      console.log(`Key tidak dikenal: ${key} (provider, model, apiKey, baseUrl, maxLogChars, maxContextChars, maxOutputTokens, execTimeoutMs, approvalEnabled, funAnimations, autoCompress, autoCompressThresholdChars, maxSessionToolCalls)`);
       return;
   }
   env.updateConfig(patch);

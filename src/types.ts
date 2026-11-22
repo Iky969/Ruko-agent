@@ -148,6 +148,15 @@ export interface AgentConfig {
   /** Maximum tool iterations per instruction (default 30). */
   maxToolIterations?: number;
   /**
+   * Total tool-call budget for the whole session (default 180). When the
+   * agent has made this many tool calls in the session, further tool calls
+   * are refused with a report — the session and its context are NOT reset,
+   * the user can keep going in the same session (next instruction, or after
+   * raising this budget). This is the single session-wide stop; per-tool /
+   * per-loop repetition is only a warning, never a hard stop.
+   */
+  maxSessionToolCalls?: number;
+  /**
    * Auto-compress history once it reaches autoCompressThresholdChars.
    * Default true (old behaviour). Set false to keep the full history
    * intact during long sessions and compress only manually via /compact.
@@ -165,6 +174,10 @@ export interface AgentConfig {
 export const DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS = 500_000;
 /** Hard cap for autoCompressThresholdChars, same as maxContextChars. */
 export const MAX_AUTO_COMPRESS_THRESHOLD_CHARS = 10_000_000;
+/** Default total tool-call budget per session. */
+export const DEFAULT_MAX_SESSION_TOOL_CALLS = 180;
+/** Hard cap for maxSessionToolCalls. */
+export const MAX_SESSION_TOOL_CALLS = 10_000;
 
 export const DEFAULT_CONFIG: AgentConfig = {
   maxContextChars: 512_000,
@@ -182,6 +195,7 @@ export const DEFAULT_CONFIG: AgentConfig = {
   guardianEnabled: true,
   guardianTimeoutMs: 5_000,
   maxToolIterations: 30,
+  maxSessionToolCalls: DEFAULT_MAX_SESSION_TOOL_CALLS,
   autoCompress: true,
   autoCompressThresholdChars: DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS,
 };

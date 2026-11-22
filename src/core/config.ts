@@ -4,6 +4,7 @@ import {
   AgentConfig,
   DEFAULT_CONFIG,
   MAX_AUTO_COMPRESS_THRESHOLD_CHARS,
+  MAX_SESSION_TOOL_CALLS,
   ProviderProfile,
   UiMode,
   resolveProfileCredentials,
@@ -36,6 +37,7 @@ export interface RukoConfigFile {
   guardianTimeoutMs?: number;
   trustedWorkspace?: boolean;
   maxToolIterations?: number;
+  maxSessionToolCalls?: number;
   autoCompress?: boolean;
   autoCompressThresholdChars?: number;
 }
@@ -315,6 +317,15 @@ export function sanitizeConfigFile(raw: unknown): Partial<RukoConfigFile> {
   }
   if (typeof obj.maxToolIterations === 'number' && obj.maxToolIterations > 0 && Number.isFinite(obj.maxToolIterations)) {
     clean.maxToolIterations = Math.min(Math.trunc(obj.maxToolIterations), 1_000);
+  }
+  if (typeof obj.maxSessionToolCalls === 'number' && Number.isFinite(obj.maxSessionToolCalls)) {
+    if (obj.maxSessionToolCalls <= 0) {
+      console.warn('[config] Mengabaikan maxSessionToolCalls: harus angka positif.');
+    } else {
+      clean.maxSessionToolCalls = Math.min(Math.trunc(obj.maxSessionToolCalls), MAX_SESSION_TOOL_CALLS);
+    }
+  } else if (obj.maxSessionToolCalls !== undefined) {
+    console.warn('[config] Mengabaikan maxSessionToolCalls: harus angka.');
   }
   if (typeof obj.autoCompress === 'boolean') {
     clean.autoCompress = obj.autoCompress;
