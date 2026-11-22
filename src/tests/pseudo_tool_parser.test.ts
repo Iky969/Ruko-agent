@@ -708,7 +708,8 @@ test('End-to-End Item 1b: tool call di dalam <thought> tidak bocor ke reasoning 
     assert.equal(finalAnswer, 'Isi note adalah ISI-NOTE.');
 
     const plainLogs = stripAnsi(out);
-    assert.ok(plainLogs.includes('Reasoning'), 'reasoning box harus dirender (RUKO_SHOW_REASONING=1)');
+    assert.ok(plainLogs.includes('┌─Ruko'), 'reasoning box harus dirender (RUKO_SHOW_REASONING=1)');
+    assert.ok(plainLogs.includes('Membaca note.txt.'), 'isi thought tampil di dalam box');
     assert.ok(!plainLogs.includes('<|DSML|'), 'DSML tidak boleh bocor ke reasoning box');
     assert.ok(!plainLogs.includes('<invoke'), 'tag invoke tidak boleh bocor ke reasoning box');
     assert.ok(!plainLogs.includes('</parameter>'), 'tag penutup tidak boleh bocor ke reasoning box');

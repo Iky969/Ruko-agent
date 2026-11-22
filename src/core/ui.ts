@@ -50,6 +50,8 @@ function wrap(code: string, text: string): string {
 
 export const bold = (s: string): string => wrap('1', s);
 export const dim = (s: string): string => wrap('2', s);
+/** Abu-abu terang (ANSI 90) untuk teks thought — beda dari output biasa. */
+export const gray = (s: string): string => wrap('90', s);
 export const red = (s: string): string => wrap('31', s);
 export const green = (s: string): string => wrap('32', s);
 export const yellow = (s: string): string => wrap('33', s);
@@ -1605,62 +1607,100 @@ export class ThinkingTicker {
 }
 
 /**
- * Bungkus blok reasoning/thinking dengan frame pembatas garis tipis (ala Hermes CLI):
- *
- * ┌─ Reasoning ─────────────────────────────────────────
- * │ <isi teks reasoning berwarna ANSI gray / dim \x1b[90m>
- * └─────────────────────────────────────────────────────
- *
- * Panjang garis horizontal atas (`┌─ Reasoning ───`) dibuat responsif menyesuaikan
- * process.stdout.columns / terminalWidth atau dipotong rapi tanpa penutup kanan kaku
- * agar tidak patah di layar ponsel.
+ * Hapus HANYA tag penanda <thought> / </thought> / <think> / </think> dari
+ * teks (isi di antaranya dipertahankan). Tag tidak boleh tercetak ke layar —
+ * mereka hanya penanda blok thought. Berbeda dengan stripThoughtBlocks yang
+ * menghapus seluruh isi blok beserta isinya.
  */
-export function renderReasoningBox(reasoning: string, width?: number): string {
-  const plain = reasoning.trim();
+export function stripThoughtTags(text: string): string {
+  if (!text) return '';
+  return text.replace(/<\/?(?:thought|think)>/gi, '');
+}
+
+export interface ReasoningBoxOptions {
+  /** Tampilkan maksimal N baris isi (mode collapsed); sisanya diringkas di footer. */
+  maxLines?: number;
+  /** Baris ringkasan di dalam box, mis. "Thought for 3.2s (123 tokens)". */
+  footer?: string;
+}
+
+/** Frame box thought (dipakai renderReasoningBox dan ReasoningPanel agar konsisten). */
+export function reasoningBoxFrame(width?: number): { top: string; bottom: string; maxInner: number } {
+  const cols = width ?? terminalWidth();
+  const headerLabel = '┌─Ruko';
+  const targetWidth = Math.max(headerLabel.length + 5, Math.min(cols, 80));
+  const topDashes = '─'.repeat(Math.max(3, targetWidth - headerLabel.length - 1));
+  const bottomDashes = '─'.repeat(Math.max(3, targetWidth - 2));
+  return {
+    top: green(`${headerLabel}${topDashes}┐`),
+    bottom: green(`└${bottomDashes}┘`),
+    // Lebar dalam: 4 spasi indent + margin kanan.
+    maxInner: Math.max(10, targetWidth - 6),
+  };
+}
+
+/**
+ * Bungkus blok reasoning/thinking dalam box multi-baris:
+ *
+ * ┌─Ruko────────────────────────────────────────┐
+ *     <isi teks thought berwarna abu-abu \x1b[90m>
+ *     <baris berikutnya>
+ * └─────────────────────────────────────────────┘
+ *
+ * Garis box berwarna hijau (ANSI 32) supaya kelihatan, isi berwarna abu-abu
+ * supaya beda dari output biasa. Tag <thought>/<think> tidak pernah tercetak
+ * (dihapus oleh stripThoughtTags, isinya dipertahankan). Lebar responsif
+ * menyesuaikan process.stdout.columns / terminalWidth (maks 80).
+ */
+export function renderReasoningBox(
+  reasoning: string,
+  width?: number,
+  options: ReasoningBoxOptions = {},
+): string {
+  const plain = stripThoughtTags(reasoning).trim();
   if (!plain) return '';
 
-  const cols = width ?? terminalWidth();
-  const prefix = '┌─ Reasoning ';
-  const prefixLen = visibleLength(prefix); // 13
-  const targetWidth = Math.max(prefixLen + 5, Math.min(cols, 80));
-  const topDashes = '─'.repeat(Math.max(3, targetWidth - prefixLen));
-  const bottomDashes = '─'.repeat(Math.max(prefixLen + 5, targetWidth - 1));
+  const { top: topBorder, bottom: bottomBorder, maxInner } = reasoningBoxFrame(width);
 
-  const topBorder = dim(`${prefix}${topDashes}`);
-  const bottomBorder = dim(`└${bottomDashes}`);
-
-  // Inside max width for wrapping
-  const maxInner = Math.max(10, cols - 3);
-
-  const lines = plain.split(/\r?\n/);
-  const framedLines: string[] = [];
-
-  for (const line of lines) {
+  const wrapped: string[] = [];
+  for (const line of plain.split(/\r?\n/)) {
     const trimmed = line.trimEnd();
     if (!trimmed) {
-      framedLines.push(dim('│'));
+      wrapped.push('');
       continue;
     }
 
     if (visibleLength(trimmed) <= maxInner) {
-      framedLines.push(`${dim('│')} ${dim(trimmed)}`);
-    } else {
-      const words = trimmed.split(' ');
-      let cur = '';
-      for (const w of words) {
-        if (!cur) {
-          cur = w;
-        } else if (visibleLength(cur + ' ' + w) <= maxInner) {
-          cur += ' ' + w;
-        } else {
-          framedLines.push(`${dim('│')} ${dim(cur)}`);
-          cur = w;
-        }
-      }
-      if (cur) {
-        framedLines.push(`${dim('│')} ${dim(cur)}`);
+      wrapped.push(trimmed);
+      continue;
+    }
+    const words = trimmed.split(' ');
+    let cur = '';
+    for (const w of words) {
+      if (!cur) {
+        cur = w;
+      } else if (visibleLength(cur + ' ' + w) <= maxInner) {
+        cur += ' ' + w;
+      } else {
+        wrapped.push(cur);
+        cur = w;
       }
     }
+    if (cur) wrapped.push(cur);
+  }
+
+  const totalLines = wrapped.length;
+  const shown = options.maxLines != null ? wrapped.slice(0, options.maxLines) : wrapped;
+  const framedLines: string[] = shown.map((l) => (l ? `    ${gray(l)}` : ''));
+
+  // Baris ringkasan di dalam box: waktu/token + sisa baris (mode collapsed).
+  const footerParts: string[] = [];
+  if (options.footer) footerParts.push(options.footer);
+  if (options.maxLines != null && totalLines > options.maxLines) {
+    footerParts.push(`${totalLines - options.maxLines} baris lagi — Ctrl+R untuk melihat semua`);
+  }
+  if (footerParts.length > 0) {
+    framedLines.push(gray(`    — ${footerParts.join(' · ')}`));
   }
 
   return [topBorder, ...framedLines, bottomBorder].join('\n');
@@ -1675,16 +1715,22 @@ export type ReasoningExpandMode = 'collapsed' | 'expanded';
  * Panel Reasoning/Thinking terpisah (Fase 3) — section box sendiri yang
  * TIDAK mencampur log tool call. Default COLLAPSED; toggle via Ctrl+R.
  *
- * Rute tampilan:
- *  - `onLive`    : dipakai SAAT model masih berpikir — satu baris in-place
- *                  (\r\u001b[2K) ala ThinkingTicker, hilang total saat beres.
- *  - `onPermanent`: dipakai saat reasoning selesai — menghasilkan TEPAT SATU
- *                  baris permanen (collapsed) atau box penuh (expanded).
+ * Tampilan: box Ruko yang di-streaming TERBUKA selama model berpikir —
+ * garis atas + isi (abu-abu) dicetak baris demi baris begitu tiba, TANPA
+ * garis bawah. Garis penutup `└...┘` baru dicetak saat segmen thought
+ * selesai (finishSegment / finish). Tidak ada lagi render satu baris
+ * collapsed "• Thought for Xs" di bawah: yang tampil HANYA box.
+ * Garis box hijau, isi abu-abu, tag <thought>/<think> tidak tercetak.
  *
- * Alasan buffer streaming (Fase 3): render per-baris selesai DENGAN throttle
- * waktu. Per-baris menjaga blok logis reasoning tetap utuh dan tidak terpotong
- * di tengah kata; throttle 100ms mencegah banjir redraw ANSI pada chunk SSE
- * kecil (jitter frame 10x lebih cepat dari refresh mata) tanpa terasa lag.
+ * Mode collapsed/expanded hanya berpengaruh pada re-render pasca-selesai
+ * (Ctrl+R setelah segmen berakhir, via onPermanent): collapsed me-render
+ * ulang box ringkas (maks 3 baris + ringkasan), expanded box penuh. Saat
+ * streaming, box selalu menampilkan isi penuh — total baris belum diketahui
+ * sebelum segmen selesai. RUKO_SHOW_REASONING=1 memaksa expanded.
+ *
+ * Baris yang sudah selesai dicetak segera; baris parsial (belum ada newline)
+ * ditampilkan in-place dan ditulis ulang dengan throttle 100ms supaya chunk
+ * SSE kecil tidak membanjiri redraw.
  */
 export class ReasoningPanel {
   private buffer = '';
@@ -1694,6 +1740,14 @@ export class ReasoningPanel {
   private renderedOnce = false;
   private lastElapsedSec = 0;
   private lastTokens: number | null = null;
+  /** Garis atas box sudah dicetak untuk segmen ini. */
+  private boxOpened = false;
+  /** Baris lengkap yang sudah dicetak live untuk segmen ini. */
+  private printedLines = 0;
+  /** Baris parsial sedang ditampilkan in-place di baris terakhir. */
+  private partialShown = false;
+  /** Isi baris parsial yang sedang ditampilkan (untuk deteksi perubahan). */
+  private lastPartialShown = '';
 
   constructor(
     private readonly options: {
@@ -1721,6 +1775,10 @@ export class ReasoningPanel {
       this.finished = false;
       this.segmentEmitted = false;
       this.renderedOnce = false;
+      this.boxOpened = false;
+      this.printedLines = 0;
+      this.partialShown = false;
+      this.lastPartialShown = '';
     }
     if (this.finished) return;
     this.startTime = Date.now();
@@ -1731,21 +1789,20 @@ export class ReasoningPanel {
     if (this.finished) {
       // Chunk baru setelah finish = segmen reasoning BARU pada turn yang sama
       // (model bisa mengirim <thought> berkali-kali). Segmen sebelumnya sudah
-      // jadi baris/box permanen sendiri; mulai buffer segar.
+      // ditutup dengan garis bawahnya sendiri; mulai buffer dan box segar.
       this.finished = false;
       this.segmentEmitted = false;
       this.renderedOnce = false;
       this.buffer = '';
       this.startTime = Date.now();
+      this.boxOpened = false;
+      this.printedLines = 0;
+      this.partialShown = false;
+      this.lastPartialShown = '';
     }
     if (!this.startTime) this.startTime = Date.now();
     this.buffer += chunk;
-
-    const now = Date.now();
-    const throttle = this.options.throttleMs ?? 100;
-    if (!this.renderedOnce || now - this.lastRenderMs >= throttle) {
-      this.renderLive();
-    }
+    this.streamBoxLines();
   }
 
   /** Toggle expand/collapse (Ctrl+R). Me-render ulang permanen jika sudah beres. */
@@ -1773,25 +1830,91 @@ export class ReasoningPanel {
     }
   }
 
-  private renderLive(): void {
-    this.renderedOnce = true;
-    this.lastRenderMs = Date.now();
+  /**
+   * Stream box TERBUKA: cetak garis atas sekali, lalu baris lengkap yang baru
+   * tiba (abu-abu, indent 4 spasi). Baris parsial (belum ada newline)
+   * ditampilkan in-place di baris terakhir dan ditulis ulang dengan throttle
+   * 100ms. Garis bawah TIDAK dicetak di sini — box tetap terbuka selama
+   * model masih berpikir; penutupnya hanya di closeStreamedBox().
+   */
+  private streamBoxLines(): void {
+    if (!this.boxOpened) {
+      this.writeLive(`${reasoningBoxFrame(this.options.width?.() ?? undefined).top}\n`);
+      this.boxOpened = true;
+    }
+    // Tag <thought>/<think> tidak boleh tercetak bahkan saat live.
+    const lines = stripThoughtTags(this.buffer).split('\n');
+    const complete = lines.slice(0, -1);
+    const partial = lines[lines.length - 1] ?? '';
+    const fresh = complete.slice(this.printedLines);
 
-    const cols = this.options.width ? this.options.width() : terminalWidth();
-    const cleaned = this.buffer.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
-    const prefix = '┌─ Reasoning: ';
-    const suffix = '...';
-    const overhead = prefix.length + suffix.length;
-    const maxSnippet = Math.max(10, cols - 1 - overhead);
-    const snippet = cleaned.length > maxSnippet ? cleaned.slice(-maxSnippet).trimStart() : cleaned;
-    const line = dim(`${prefix}${snippet}${suffix}`);
-    const clamped = truncateVisible(line, Math.max(10, cols - 2));
-    this.writeLive(`\r\u001b[2K${clamped}`);
+    const now = Date.now();
+    const throttle = this.options.throttleMs ?? 100;
+    if (this.partialShown) {
+      const partialChanged = partial !== this.lastPartialShown;
+      const throttlePassed = !this.renderedOnce || now - this.lastRenderMs >= throttle;
+      if (fresh.length === 0 && (!partialChanged || !throttlePassed)) {
+        return; // Throttle: biarkan parsial lama tetap di layar.
+      }
+      // Baris parsial lama dihapus dulu sebelum baris lengkap / parsial baru.
+      this.clearLive();
+      this.partialShown = false;
+    }
+    for (const line of fresh) {
+      this.writeLive(line ? `    ${gray(line)}\n` : '\n');
+      this.printedLines += 1;
+    }
+    if (partial.trim()) {
+      this.writeLive(`    ${gray(partial)}`);
+      this.partialShown = true;
+      this.lastPartialShown = partial;
+      this.renderedOnce = true;
+      this.lastRenderMs = now;
+    } else {
+      this.partialShown = false;
+      this.lastPartialShown = '';
+    }
   }
 
   /**
-   * Satu baris selesai (\n) atau reasoning berakhir. Permanen TEPAT SEKALI;
-   * bentuk tergantung mode: collapsed = satu baris ringkas, expanded = box.
+   * Tutup box yang sedang di-stream: flush baris parsial sebagai baris
+   * lengkap, cetak footer ringkasan, lalu garis bawah penutup. Hanya
+   * dipanggil saat segmen thought selesai (finishSegment / finish).
+   */
+  private closeStreamedBox(): void {
+    if (!this.boxOpened) this.streamBoxLines();
+    const lines = stripThoughtTags(this.buffer).split('\n');
+    const complete = lines.slice(0, -1);
+    const partial = lines[lines.length - 1] ?? '';
+    if (this.partialShown) {
+      this.clearLive();
+      this.partialShown = false;
+    }
+    for (const line of complete.slice(this.printedLines)) {
+      this.writeLive(line ? `    ${gray(line)}\n` : '\n');
+      this.printedLines += 1;
+    }
+    if (partial.trim()) {
+      this.writeLive(`    ${gray(partial)}\n`);
+      this.printedLines += 1;
+    }
+    this.lastPartialShown = '';
+    this.writeLive(`${gray(`    — ${this.summaryFooter()}`)}\n`);
+    this.writeLive(`${reasoningBoxFrame(this.options.width?.() ?? undefined).bottom}\n`);
+    this.boxOpened = false;
+  }
+
+  /** Teks box penuh (untuk nilai balik finish / re-render toggle). */
+  private fullBoxText(): string {
+    return renderReasoningBox(this.buffer, this.options.width?.() ?? undefined, {
+      footer: this.summaryFooter(),
+    });
+  }
+
+  /**
+   * Reasoning berakhir: tutup box yang sedang di-stream (garis bawah +
+   * footer) dan kembalikan teks box penuh. TIDAK me-render ulang box lewat
+   * onPermanent — box sudah ada di layar dari streaming.
    */
   finish(): string | null {
     if (!this.buffer.trim()) {
@@ -1799,52 +1922,73 @@ export class ReasoningPanel {
       this.startTime = 0;
       return null;
     }
-    // Segmen yang sudah di-permanenkan oleh finishSegment TIDAK di-render ulang.
+    // Segmen yang sudah ditutup oleh finishSegment TIDAK ditutup ulang.
     if (this.segmentEmitted) return stripAnsi(this.lastPermanentLine ?? '');
     this.finished = true;
     this.lastElapsedSec = Math.max(0, (Date.now() - (this.startTime || Date.now())) / 1000);
     // Token usage dari API (jika provider menyediakan); null = tidak tersedia.
     this.lastTokens = this.options.getTokens?.() ?? null;
-    this.clearLive();
-    this.emitPermanent();
+    this.closeStreamedBox();
+    this.lastPermanentLine = this.fullBoxText();
+    this.segmentEmitted = true;
     return stripAnsi(this.lastPermanentLine ?? '');
   }
 
   private lastPermanentLine: string | null = null;
 
   /**
-   * Satu blok <thought> berakhir di tengah turn — segmen ini di-permanenkan
-   * sekarang (baris collapsed / box). Segmen berikutnya buka section baru.
+   * Satu blok <thought> berakhir di tengah turn — tutup box segmen ini
+   * (garis bawah + footer). Segmen berikutnya buka box baru.
    */
   finishSegment(): void {
     if (this.segmentEmitted || !this.buffer.trim()) return;
     this.finished = true;
     this.lastElapsedSec = Math.max(0, (Date.now() - (this.startTime || Date.now())) / 1000);
     this.lastTokens = this.options.getTokens?.() ?? null;
-    this.clearLive();
-    this.emitPermanent();
+    this.closeStreamedBox();
+    this.lastPermanentLine = this.fullBoxText();
+    this.segmentEmitted = true;
     this.startTime = 0;
   }
 
-  /** Bentuk baris permanen collapsed: "Thought for Xs" (+ "(Y tokens)" jika tersedia). */
-  collapsedLine(): string | null {
-    if (!this.buffer.trim()) return null;
+  /** Ringkasan waktu/token untuk footer di dalam box, mis. "Thought for 3.2s (123 tokens)". */
+  private summaryFooter(): string {
     const secNum = this.lastElapsedSec;
     const secStr = secNum < 1
       ? Math.max(0.1, Number(secNum.toFixed(1))).toString()
       : secNum.toFixed(1).replace(/\.0$/, '');
     const tokens = this.lastTokens;
-    const base = `• Thought for ${secStr}s`;
-    const detail = tokens != null ? ` (${tokens} tokens)` : '';
-    return dim(`${base}${detail}`);
+    return `Thought for ${secStr}s${tokens != null ? ` (${tokens} tokens)` : ''}`;
+  }
+
+  /**
+   * Bentuk permanen collapsed: box Ruko ringkas — maksimal 3 baris isi +
+   * baris ringkasan waktu/token di dalam box. Bukan lagi satu baris
+   * "• Thought for Xs": isi thought tetap terlihat di layar (abu-abu),
+   * dibatasi supaya tidak membanjiri log; Ctrl+R membuka box penuh.
+   */
+  collapsedLine(): string | null {
+    if (!this.buffer.trim()) return null;
+    return renderReasoningBox(this.buffer, this.options.width?.() ?? undefined, {
+      maxLines: 3,
+      footer: this.summaryFooter(),
+    });
   }
 
   private segmentEmitted = false;
 
+  /**
+   * Re-render box untuk toggle Ctrl+R SETELAH segmen selesai (satu-satunya
+   * pemakaian onPermanent sekarang — saat finish, box sudah ada di layar
+   * dari streaming, jadi finish tidak memanggil ini). Collapsed = box
+   * ringkas, expanded = box penuh.
+   */
   private emitPermanent(): void {
     const mode = this.getMode();
     const line = mode === 'expanded'
-      ? renderReasoningBox(this.buffer, this.options.width?.() ?? undefined)
+      ? renderReasoningBox(this.buffer, this.options.width?.() ?? undefined, {
+        footer: this.summaryFooter(),
+      })
       : this.collapsedLine() ?? '';
     this.lastPermanentLine = line;
     this.segmentEmitted = true;
