@@ -8,7 +8,8 @@
  * skill kecil muat dan gampang dipakai harian.
  *
  * Alur:
- *   1. Sumber dibaca (file di workspace, atau teks langsung via `--text`).
+ *   1. Sumber dibaca (file di workspace, teks langsung via `--text`, atau
+ *      URL GitHub — lihat `learnGithubSource`).
  *   2. `splitLearnContent` memecah berdasarkan struktur dokumen (heading).
  *      Bila dokumen tidak terstruktur, `categorizeWithLlm` memakai LLM dengan
  *      prompt JSON (`buildLearnCategorizePrompt`) untuk mengkategorikan.
@@ -19,18 +20,23 @@
  *      dari `src/core/skills.ts`; sesi learn disimpan sebagai JSON di
  *      `.ruko/learn/` supaya bisa diaudit / diulang.
  *
- * Modul ini murni (pure) kecuali `categorizeWithLlm` dan `installLearnSkills`:
- * LLM di-inject lewat interface minimal `LearnLlm` supaya test unit tidak
- * pernah memanggil LLM beneran.
+ * Modul ini murni (pure) kecuali `categorizeWithLlm`, `installLearnSkills`,
+ * dan `learnGithubSource`: LLM di-inject lewat interface minimal `LearnLlm`
+ * supaya test unit tidak pernah memanggil LLM beneran; network/git untuk
+ * sumber GitHub di-inject lewat `GithubLearnDeps` supaya test tidak pernah
+ * menyentuh network beneran.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join, relative, resolve, sep } from 'node:path';
+import { checkSsrfSafety, pinnedHttpFetch } from '../agent/webtools.js';
 import { readSkill, sanitizeSkillName, saveSkill } from './skills.js';
 
-/** Satu sumber learn: file di workspace, atau teks yang dikirim langsung. */
+/** Satu sumber learn: file di workspace, teks langsung, atau URL GitHub. */
 export interface LearnSource {
-  kind: 'file' | 'text';
-  /** Label sumber untuk ditampilkan & disimpan (path relatif, atau 'teks langsung'). */
+  kind: 'file' | 'text' | 'github';
+  /** Label sumber untuk ditampilkan & disimpan (path relatif, 'teks langsung', atau 'github:owner/repo@branch/path'). */
   label: string;
 }
 
@@ -103,7 +109,7 @@ export const LEARN_SESSION_JSON_SCHEMA = {
       type: 'object',
       required: ['kind', 'label'],
       properties: {
-        kind: { type: 'string', enum: ['file', 'text'] },
+        kind: { type: 'string', enum: ['file', 'text', 'github'] },
         label: { type: 'string', minLength: 1 },
       },
     },
@@ -424,6 +430,371 @@ export async function categorizeWithLlm(llm: LearnLlm, content: string): Promise
     { maxTokens: 4096 },
   );
   return parseLearnCategorizeResponse(answer);
+}
+
+// ---------------------------------------------------------------------------
+// Sumber GitHub (URL) — file tunggal via fetch raw, repo via shallow clone
+// ---------------------------------------------------------------------------
+//
+// Keamanan (ditulis juga di deskripsi PR #47):
+//   - Hanya host github.com (dan www.github.com) serta raw.githubusercontent.com
+//     yang diterima; host lain ditolak sebelum ada request apa pun.
+//   - Fetch memakai `checkSsrfSafety` + `pinnedHttpFetch` yang sama dengan
+//     web_fetch (IP pinning per hop, redirect maks 5, SSRF guard diulang
+//     tiap hop) — tidak ada fetch polos tanpa validasi.
+//   - Clone memakai `git` CLI dengan argumen terpisah (execFileSync, tanpa
+//     shell) ke direktori sementara; isi clone HANYA dibaca sebagai teks,
+//     TIDAK PERNAH dieksekusi; direktori sementara selalu dibersihkan
+//     (finally), berhasil maupun gagal.
+//   - Batas ukuran tetap berlaku: satu sumber maks MAX_LEARN_SOURCE_CHARS,
+//     satu repo maks MAX_LEARN_REPO_FILES file dan MAX_LEARN_REPO_TOTAL_CHARS
+//     karakter — repo raksasa dipotong, bukan diunduh utuh tanpa batas.
+
+/** Host yang diizinkan untuk sumber GitHub. Host lain ditolak. */
+export const LEARN_GITHUB_HOSTS = ['github.com', 'www.github.com', 'raw.githubusercontent.com'] as const;
+/** Batas jumlah file dokumen yang dipelajari dari satu repo/direktori. */
+export const MAX_LEARN_REPO_FILES = 20;
+/** Batas total karakter yang dipelajari dari satu repo/direktori. */
+export const MAX_LEARN_REPO_TOTAL_CHARS = 200_000;
+/** Timeout fetch file raw dari GitHub. */
+export const LEARN_GITHUB_FETCH_TIMEOUT_MS = 30_000;
+/** Timeout shallow clone repo. */
+export const LEARN_GITHUB_CLONE_TIMEOUT_MS = 120_000;
+/** Ekstensi file yang dianggap dokumen dan dibaca dari hasil clone. */
+const LEARN_REPO_DOC_EXTENSIONS = new Set(['.md', '.markdown', '.mdx', '.txt']);
+
+/** Target learn dari sebuah URL GitHub. */
+export type GithubLearnTarget =
+  | { kind: 'file'; owner: string; repo: string; branch: string; path: string; rawUrl: string }
+  | { kind: 'repo'; owner: string; repo: string; branch: string | null; path: string };
+
+const GITHUB_NAME_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function isSafeGithubSegment(seg: string): boolean {
+  return seg.length > 0 && seg !== '.' && seg !== '..' && GITHUB_NAME_SEGMENT.test(seg);
+}
+
+function encodeGithubPath(path: string): string {
+  return path
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+}
+
+/**
+ * Parse URL GitHub menjadi target learn, atau `null` bila bukan URL GitHub
+ * yang didukung. Bentuk yang dikenali:
+ *   - File:  github.com/<owner>/<repo>/blob/<branch>/<path>
+ *            github.com/<owner>/<repo>/raw/<branch>/<path>
+ *            raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>
+ *   - Repo:  github.com/<owner>/<repo>[/.git]
+ *            github.com/<owner>/<repo>/tree/<branch>[/<path>]
+ * Bentuk lain (issues, pulls, actions, gist, …) ditolak. Catatan: branch
+ * yang mengandung `/` tidak bisa dibedakan dari path — segmen pertama
+ * setelah blob/raw/tree selalu dianggap nama branch.
+ */
+export function parseGithubUrl(raw: string): GithubLearnTarget | null {
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  const host = url.hostname.toLowerCase();
+  if (!(LEARN_GITHUB_HOSTS as readonly string[]).includes(host)) return null;
+
+  const segments = url.pathname
+    .split('/')
+    .filter(Boolean)
+    .map((s) => {
+      try {
+        return decodeURIComponent(s);
+      } catch {
+        return s;
+      }
+    });
+
+  if (host === 'raw.githubusercontent.com') {
+    if (segments.length < 4) return null;
+    const [owner, repoRaw, branch, ...rest] = segments;
+    const repo = repoRaw.replace(/\.git$/, '');
+    if (!isSafeGithubSegment(owner) || !isSafeGithubSegment(repo) || !isSafeGithubSegment(branch)) return null;
+    if (rest.length === 0 || rest.some((s) => !isSafeGithubSegment(s))) return null;
+    const path = rest.join('/');
+    return {
+      kind: 'file',
+      owner,
+      repo,
+      branch,
+      path,
+      rawUrl: `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(branch)}/${encodeGithubPath(path)}`,
+    };
+  }
+
+  // github.com / www.github.com
+  if (segments.length < 2) return null;
+  const owner = segments[0];
+  const repo = segments[1].replace(/\.git$/, '');
+  if (!isSafeGithubSegment(owner) || !isSafeGithubSegment(repo)) return null;
+  const rest = segments.slice(2);
+  if (rest.length === 0) {
+    return { kind: 'repo', owner, repo, branch: null, path: '' };
+  }
+  if (rest[0] === 'blob' || rest[0] === 'raw') {
+    if (rest.length < 3) return null;
+    const branch = rest[1];
+    const pathSegs = rest.slice(2);
+    if (!isSafeGithubSegment(branch) || pathSegs.some((s) => !isSafeGithubSegment(s))) return null;
+    const path = pathSegs.join('/');
+    return {
+      kind: 'file',
+      owner,
+      repo,
+      branch,
+      path,
+      rawUrl: `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(branch)}/${encodeGithubPath(path)}`,
+    };
+  }
+  if (rest[0] === 'tree') {
+    if (rest.length < 2) return null;
+    const branch = rest[1];
+    const pathSegs = rest.slice(2);
+    if (!isSafeGithubSegment(branch) || pathSegs.some((s) => !isSafeGithubSegment(s))) return null;
+    return { kind: 'repo', owner, repo, branch, path: pathSegs.join('/') };
+  }
+  return null;
+}
+
+/** Label sumber yang disimpan di sesi learn untuk target GitHub. */
+export function githubLearnLabel(target: GithubLearnTarget): string {
+  if (target.kind === 'file') {
+    return `github:${target.owner}/${target.repo}@${target.branch}/${target.path}`;
+  }
+  const at = target.branch ? `@${target.branch}` : '';
+  const sub = target.path ? `/${target.path}` : '';
+  return `github:${target.owner}/${target.repo}${at}${sub}`;
+}
+
+/** Dependensi network/git untuk sumber GitHub — di-inject supaya test tidak menyentuh network. */
+export interface GithubLearnDeps {
+  /** Ambil isi teks dari satu URL raw. Default: fetch dengan SSRF guard + IP pinning (lihat bawah). */
+  fetchText?: (url: string) => Promise<string>;
+  /** Clone satu repo ke direktori tujuan (sudah dibuatkan). Default: `git clone --depth 1` via execFileSync. */
+  cloneRepo?: (cloneUrl: string, branch: string | null, destDir: string) => void | Promise<void>;
+}
+
+/**
+ * Fetch isi file raw dari GitHub dengan perlindungan yang sama seperti
+ * web_fetch: SSRF guard + IP pinning diulang tiap hop redirect (maks 5),
+ * timeout 30 detik, tolak content-type non-teks, dan batas byte
+ * (MAX_LEARN_SOURCE_CHARS * 4 — pemanggil tetap memotong ke batas karakter).
+ */
+export async function fetchGithubRawText(rawUrl: string): Promise<string> {
+  const maxBytes = MAX_LEARN_SOURCE_CHARS * 4;
+  let current = new URL(rawUrl);
+  const visited = new Set<string>([current.href]);
+  for (let hop = 0; hop <= 5; hop += 1) {
+    const ssrf = await checkSsrfSafety(current, {});
+    if (!ssrf.safe || !ssrf.pinnedIp) {
+      throw new Error(`Fetch GitHub ditolak: ${ssrf.reason ?? 'tidak ada IP aman untuk di-pin'}`);
+    }
+    const res = await pinnedHttpFetch(current, {
+      pinnedIp: ssrf.pinnedIp,
+      ipFamily: ssrf.ipFamily ?? 4,
+      timeoutMs: LEARN_GITHUB_FETCH_TIMEOUT_MS,
+      maxBytes,
+      headers: {
+        'User-Agent': 'Ruko-Agent/1.7 (learn)',
+        Accept: 'text/plain, text/markdown, application/json;q=0.9, */*;q=0.1',
+      },
+    });
+    if ([301, 302, 303, 307, 308].includes(res.status)) {
+      const locRaw = res.headers.location;
+      const locationHeader = Array.isArray(locRaw) ? locRaw[0] : locRaw;
+      if (!locationHeader) throw new Error(`Fetch GitHub gagal: HTTP ${res.status} redirect tanpa header Location.`);
+      const next = new URL(locationHeader, current.href);
+      if (visited.has(next.href)) throw new Error(`Fetch GitHub ditolak: siklus redirect ke "${next.href}".`);
+      visited.add(next.href);
+      current = next;
+      continue;
+    }
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`Fetch GitHub gagal: HTTP ${res.status} ${res.statusText ?? ''}`.trim());
+    }
+    const ctRaw = res.headers['content-type'];
+    const contentType = (Array.isArray(ctRaw) ? ctRaw[0] : ctRaw) ?? '';
+    if (contentType) {
+      const ct = contentType.toLowerCase();
+      const isText = ct.startsWith('text/') || ct.includes('application/json') || ct.includes('charset=');
+      if (!isText) {
+        throw new Error(`Fetch GitHub ditolak: content-type "${contentType}" bukan teks.`);
+      }
+    }
+    return res.text;
+  }
+  throw new Error('Fetch GitHub ditolak: batas maksimal 5 redirect terlampaui.');
+}
+
+/** Default clone: shallow, tanpa shell, timeout 120 detik. */
+export function cloneGithubRepoDefault(cloneUrl: string, branch: string | null, destDir: string): void {
+  const args = ['clone', '--depth', '1'];
+  if (branch) args.push('--branch', branch);
+  args.push(cloneUrl, destDir);
+  execFileSync('git', args, { stdio: 'pipe', timeout: LEARN_GITHUB_CLONE_TIMEOUT_MS });
+}
+
+function isBinaryText(sample: string): boolean {
+  return sample.includes('\0');
+}
+
+function collectRepoFiles(dir: string, out: string[]): void {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue;
+    if (entry.name === 'node_modules') continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectRepoFiles(full, out);
+    } else if (entry.isFile()) {
+      out.push(full);
+    }
+  }
+}
+
+export interface RepoLearnContent {
+  content: string;
+  files: string[];
+  truncated: boolean;
+}
+
+/**
+ * Baca dokumen dari hasil clone (atau satu file di dalamnya) sebagai konten
+ * learn. Satu file → dibaca langsung. Direktori → semua file `.md`/`.txt`
+ * di bawahnya (README dulu, lalu alfabetis), masing-masing diawali heading
+ * `## <path-relatif>` supaya `splitLearnContent` memecahnya per file.
+ * File biner dilewati; batas file & total karakter dipatuhi (kelebihan
+ * dipotong dengan `truncated: true`). TIDAK mengeksekusi apa pun.
+ */
+export function collectRepoLearnContent(cloneDir: string, subPath: string): RepoLearnContent {
+  const root = resolve(cloneDir);
+  const target = subPath ? resolve(root, subPath) : root;
+  const prefix = root.endsWith(sep) ? root : root + sep;
+  if (target !== root && !target.startsWith(prefix)) {
+    throw new Error(`Path repo di luar batas clone: "${subPath}".`);
+  }
+  if (!existsSync(target)) {
+    throw new Error(`Path tidak ditemukan di repo: "${subPath || '(root)'}".`);
+  }
+  const stat = statSync(target);
+  let files: string[] = [];
+  if (stat.isFile()) {
+    files = [target];
+  } else if (stat.isDirectory()) {
+    const all: string[] = [];
+    collectRepoFiles(target, all);
+    files = all
+      .filter((f) => {
+        const lower = f.toLowerCase();
+        return [...LEARN_REPO_DOC_EXTENSIONS].some((ext) => lower.endsWith(ext));
+      })
+      .sort((a, b) => {
+        const ra = relative(target, a);
+        const rb = relative(target, b);
+        const aReadme = /(^|\/)readme\./i.test(ra) ? 0 : 1;
+        const bReadme = /(^|\/)readme\./i.test(rb) ? 0 : 1;
+        if (aReadme !== bReadme) return aReadme - bReadme;
+        return ra.localeCompare(rb);
+      });
+  } else {
+    throw new Error(`Path bukan file/direktori: "${subPath}".`);
+  }
+  if (files.length === 0) {
+    throw new Error('Tidak ada dokumen (.md/.txt) yang bisa dipelajari di path ini.');
+  }
+
+  const sections: string[] = [];
+  const used: string[] = [];
+  let totalChars = 0;
+  let truncated = false;
+  for (const file of files) {
+    if (used.length >= MAX_LEARN_REPO_FILES) {
+      truncated = true;
+      break;
+    }
+    let body: string;
+    try {
+      body = readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    if (!body.trim() || isBinaryText(body.slice(0, 8192))) continue;
+    const rel = stat.isFile() ? basename(file) : relative(target, file) || basename(file);
+    const section = `## ${rel}\n\n${body.trim()}`;
+    if (totalChars + section.length > MAX_LEARN_REPO_TOTAL_CHARS && used.length > 0) {
+      truncated = true;
+      break;
+    }
+    sections.push(section);
+    used.push(rel);
+    totalChars += section.length;
+  }
+  if (sections.length === 0) {
+    throw new Error('Tidak ada dokumen teks yang bisa dipelajari di path ini.');
+  }
+  return { content: sections.join('\n\n'), files: used, truncated };
+}
+
+/**
+ * Ambil konten learn dari sebuah URL GitHub. File tunggal → fetch raw.
+ * Repo/direktori → shallow clone ke direktori sementara (selalu dibersihkan),
+ * lalu baca dokumennya. Mengembalikan konten + label sumber untuk sesi learn.
+ * Melempar Error yang jelas bila URL bukan GitHub, fetch/clone gagal, atau
+ * konten melebihi batas ukuran.
+ */
+export async function learnGithubSource(
+  rawUrl: string,
+  deps: GithubLearnDeps = {},
+): Promise<{ content: string; label: string; files?: string[]; truncated?: boolean }> {
+  const target = parseGithubUrl(rawUrl);
+  if (!target) {
+    throw new Error(
+      'URL GitHub tidak dikenali. Bentuk yang didukung: github.com/<owner>/<repo>[/tree/<branch>/<path>] atau .../blob/<branch>/<path>, dan raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>.',
+    );
+  }
+  const label = githubLearnLabel(target);
+  if (target.kind === 'file') {
+    const fetchText = deps.fetchText ?? fetchGithubRawText;
+    const content = await fetchText(target.rawUrl);
+    if (!content.trim()) throw new Error(`File GitHub kosong: ${label}.`);
+    if (content.length > MAX_LEARN_SOURCE_CHARS) {
+      throw new Error(
+        `File GitHub terlalu besar (${content.length.toLocaleString()} karakter, maks ${MAX_LEARN_SOURCE_CHARS.toLocaleString()}). Pelajari per bagian saja.`,
+      );
+    }
+    return { content, label };
+  }
+
+  const fetchClone = deps.cloneRepo ?? cloneGithubRepoDefault;
+  const tmpDir = mkdtempSync(join(tmpdir(), 'ruko-learn-github-'));
+  try {
+    const cloneUrl = `https://github.com/${target.owner}/${target.repo}.git`;
+    await fetchClone(cloneUrl, target.branch, tmpDir);
+    const collected = collectRepoLearnContent(tmpDir, target.path);
+    if (collected.content.length > MAX_LEARN_SOURCE_CHARS) {
+      throw new Error(
+        `Konten repo terlalu besar (${collected.content.length.toLocaleString()} karakter, maks ${MAX_LEARN_SOURCE_CHARS.toLocaleString()}). Pelajari subdirektori yang lebih kecil.`,
+      );
+    }
+    return { content: collected.content, label, files: collected.files, truncated: collected.truncated };
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -7,10 +7,15 @@ import {
   buildLearnAskPrompt,
   buildLearnCategorizePrompt,
   categorizeWithLlm,
+  collectRepoLearnContent,
   createLearnSession,
+  githubLearnLabel,
   installLearnSkills,
   LEARN_SESSION_JSON_SCHEMA,
+  learnGithubSource,
+  MAX_LEARN_REPO_FILES,
   MAX_LEARN_SKILL_CHARS,
+  parseGithubUrl,
   parseLearnCategorizeResponse,
   parseLearnSelection,
   renderLearnAskText,
@@ -335,5 +340,140 @@ test('/learn: URL ditolak, file hilang dilaporkan, tanpa argumen menampilkan usa
   } finally {
     setWorkspaceRoot(null);
     rmSync(tmpWs, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Sumber GitHub (URL)
+// ---------------------------------------------------------------------------
+
+test('parseGithubUrl: file blob/raw → target file + rawUrl', () => {
+  const blob = parseGithubUrl('https://github.com/owner-1/repo.js/blob/main/docs/SKILL.md');
+  assert.deepEqual(blob, {
+    kind: 'file',
+    owner: 'owner-1',
+    repo: 'repo.js',
+    branch: 'main',
+    path: 'docs/SKILL.md',
+    rawUrl: 'https://raw.githubusercontent.com/owner-1/repo.js/main/docs/SKILL.md',
+  });
+  assert.equal(githubLearnLabel(blob!), 'github:owner-1/repo.js@main/docs/SKILL.md');
+
+  const raw = parseGithubUrl('https://raw.githubusercontent.com/owner/repo/dev/panduan.md');
+  assert.equal(raw?.kind, 'file');
+  assert.equal((raw as { rawUrl: string }).rawUrl, 'https://raw.githubusercontent.com/owner/repo/dev/panduan.md');
+
+  // github.com/.../raw/... juga jadi file raw
+  const ghRaw = parseGithubUrl('https://github.com/o/r/raw/main/a.md');
+  assert.equal(ghRaw?.kind, 'file');
+});
+
+test('parseGithubUrl: repo root & tree/<branch>/<path> → target repo', () => {
+  const root = parseGithubUrl('https://github.com/owner/repo');
+  assert.deepEqual(root, { kind: 'repo', owner: 'owner', repo: 'repo', branch: null, path: '' });
+  assert.equal(githubLearnLabel(root!), 'github:owner/repo');
+
+  const gitSuffix = parseGithubUrl('https://github.com/owner/repo.git');
+  assert.equal(gitSuffix?.kind, 'repo');
+
+  const tree = parseGithubUrl('https://github.com/owner/repo/tree/main/docs/skills');
+  assert.deepEqual(tree, { kind: 'repo', owner: 'owner', repo: 'repo', branch: 'main', path: 'docs/skills' });
+  assert.equal(githubLearnLabel(tree!), 'github:owner/repo@main/docs/skills');
+
+  const treeBranchOnly = parseGithubUrl('https://github.com/owner/repo/tree/dev');
+  assert.deepEqual(treeBranchOnly, { kind: 'repo', owner: 'owner', repo: 'repo', branch: 'dev', path: '' });
+});
+
+test('parseGithubUrl: host lain & bentuk GitHub non-konten ditolak', () => {
+  assert.equal(parseGithubUrl('https://gitlab.com/owner/repo'), null);
+  assert.equal(parseGithubUrl('https://example.com/skill.md'), null);
+  assert.equal(parseGithubUrl('https://github.com/owner/repo/issues/12'), null);
+  assert.equal(parseGithubUrl('https://github.com/owner/repo/pull/3'), null);
+  assert.equal(parseGithubUrl('https://github.com/owner'), null);
+  assert.equal(parseGithubUrl('https://github.com/owner/repo/blob/main'), null);
+  assert.equal(parseGithubUrl('not-a-url'), null);
+  assert.equal(parseGithubUrl('ftp://github.com/owner/repo'), null);
+  assert.equal(parseGithubUrl('https://github.com/owner/repo/blob/main/../../etc/passwd'), null);
+});
+
+test('learnGithubSource: file tunggal memakai fetch mock, tanpa network', async () => {
+  const seen: string[] = [];
+  const result = await learnGithubSource('https://github.com/o/r/blob/main/SKILL.md', {
+    fetchText: async (url) => {
+      seen.push(url);
+      return BIG_DOC;
+    },
+  });
+  assert.deepEqual(seen, ['https://raw.githubusercontent.com/o/r/main/SKILL.md']);
+  assert.equal(result.content, BIG_DOC);
+  assert.equal(result.label, 'github:o/r@main/SKILL.md');
+});
+
+test('learnGithubSource: repo memakai clone mock, temp dibersihkan, README dulu', async () => {
+  let capturedDir = '';
+  const result = await learnGithubSource('https://github.com/o/r', {
+    cloneRepo: (cloneUrl, branch, destDir) => {
+      assert.equal(cloneUrl, 'https://github.com/o/r.git');
+      assert.equal(branch, null);
+      capturedDir = destDir;
+      mkdirSync(join(destDir, 'docs'), { recursive: true });
+      writeFileSync(join(destDir, 'docs', 'z-panduan.md'), '## Z\nIsi z.\n', 'utf8');
+      writeFileSync(join(destDir, 'README.md'), '# Repo\n\n## Awal\nIsi awal.\n', 'utf8');
+      writeFileSync(join(destDir, 'script.sh'), '#!/bin/sh\necho hi\n', 'utf8');
+    },
+  });
+  assert.ok(capturedDir.length > 0);
+  assert.ok(!existsSync(capturedDir), 'direktori sementara clone harus dibersihkan');
+  assert.equal(result.label, 'github:o/r');
+  assert.deepEqual(result.files, ['README.md', 'docs/z-panduan.md']);
+  assert.ok(result.content.indexOf('README.md') < result.content.indexOf('z-panduan.md'), 'README dipelajari dulu');
+  assert.ok(!result.content.includes('echo hi'), 'file non-dokumen tidak ikut dipelajari');
+  assert.equal(result.truncated, false);
+
+  // Kategori dari konten repo terpecah seperti biasa
+  const cats = splitLearnContent(result.content);
+  assert.ok(cats.some((c) => c.title === 'README.md' || c.title.includes('Awal')));
+});
+
+test('learnGithubSource: URL bukan GitHub & fetch gagal → Error jelas', async () => {
+  await assert.rejects(
+    learnGithubSource('https://example.com/skill.md'),
+    /URL GitHub tidak dikenali/,
+  );
+  await assert.rejects(
+    learnGithubSource('https://github.com/o/r/blob/main/x.md', {
+      fetchText: async () => {
+        throw new Error('HTTP 404');
+      },
+    }),
+    /HTTP 404/,
+  );
+});
+
+test('collectRepoLearnContent: satu file, batas file, dan path di luar clone ditolak', () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'ruko-learn-repo-'));
+  try {
+    writeFileSync(join(tmpDir, 'SKILL.md'), '## Satu\nIsi satu.\n', 'utf8');
+    const single = collectRepoLearnContent(tmpDir, 'SKILL.md');
+    assert.deepEqual(single.files, ['SKILL.md']);
+    assert.ok(single.content.includes('Isi satu.'));
+
+    // Batas jumlah file: 21 file → hanya 20 dipakai, truncated true
+    const manyDir = join(tmpDir, 'many');
+    mkdirSync(manyDir, { recursive: true });
+    for (let i = 0; i < MAX_LEARN_REPO_FILES + 1; i += 1) {
+      writeFileSync(join(manyDir, `f${String(i).padStart(2, '0')}.md`), `## F${i}\nIsi ${i}.\n`, 'utf8');
+    }
+    const many = collectRepoLearnContent(tmpDir, 'many');
+    assert.equal(many.files.length, MAX_LEARN_REPO_FILES);
+    assert.equal(many.truncated, true);
+
+    assert.throws(() => collectRepoLearnContent(tmpDir, '../luar'), /di luar batas clone/);
+    assert.throws(() => collectRepoLearnContent(tmpDir, 'tidak-ada'), /tidak ditemukan/);
+    const emptyDir = join(tmpDir, 'kosong');
+    mkdirSync(emptyDir, { recursive: true });
+    assert.throws(() => collectRepoLearnContent(tmpDir, 'kosong'), /Tidak ada dokumen/);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
   }
 });

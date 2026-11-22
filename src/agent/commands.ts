@@ -19,7 +19,9 @@ import {
   categorizeWithLlm,
   createLearnSession,
   installLearnSkills,
+  learnGithubSource,
   MAX_LEARN_SOURCE_CHARS,
+  parseGithubUrl,
   parseLearnSelection,
   renderLearnAskText,
   saveLearnSession,
@@ -656,8 +658,8 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'learn',
     category: 'Sistem & Bantuan',
-    help: 'Pelajari skill/doc besar, pecah jadi kategori, pasang yang dipilih sebagai skill kecil.',
-    hint: '<path|--text ...> [--all|--only a,b] [--no-llm]',
+    help: 'Pelajari skill/doc besar (file, teks, atau URL GitHub), pecah jadi kategori, pasang yang dipilih sebagai skill kecil.',
+    hint: '<path|url-github|--text ...> [--all|--only a,b] [--no-llm]',
     run: async (args, env) => {
       const ws = getWorkspaceRoot();
 
@@ -690,23 +692,51 @@ const COMMANDS: CommandDef[] = [
 
       if (!sourcePath && inlineText === null) {
         console.log(
-          'Penggunaan: /learn <path-file> [--all|--only a,b] [--no-llm]\n' +
+          'Penggunaan: /learn <path-file|url-github> [--all|--only a,b] [--no-llm]\n' +
             '         /learn --text <teks> [--all|--only a,b]\n' +
-            'Contoh: /learn docs/panduan-besar.md   → pelajari, lalu pilih kategori yang dipasang.',
+            'Contoh: /learn docs/panduan-besar.md   → pelajari, lalu pilih kategori yang dipasang.\n' +
+            '        /learn https://github.com/owner/repo/blob/main/SKILL.md --all\n' +
+            '        /learn https://github.com/owner/repo   → clone dangkal, pelajari README + file .md.',
         );
-        return;
-      }
-      if (sourcePath && /^https?:\/\//i.test(sourcePath)) {
-        console.log('URL belum didukung /learn — simpan dulu isinya sebagai file di workspace, lalu /learn <path>.');
         return;
       }
 
       // --- Baca sumber
       let content = '';
       let sourceLabel = '';
-      if (inlineText !== null) {
+      let sourceKind: 'file' | 'text' | 'github' = 'file';
+      if (sourcePath && /^https?:\/\//i.test(sourcePath)) {
+        // URL: hanya GitHub (github.com / raw.githubusercontent.com). Host lain
+        // ditolak sebelum ada request — lihat parseGithubUrl di core/learn.ts.
+        const target = parseGithubUrl(sourcePath);
+        if (!target) {
+          console.log(
+            'URL belum didukung /learn — hanya URL GitHub yang bisa dipelajari (github.com/<owner>/<repo>[/tree/<branch>/<path>] atau .../blob/<branch>/<path>, dan raw.githubusercontent.com). ' +
+              'Untuk host lain, simpan dulu isinya sebagai file di workspace, lalu /learn <path>.',
+          );
+          return;
+        }
+        console.log(dim(`Mengambil dari GitHub: ${sourcePath}…`));
+        try {
+          const gh = await learnGithubSource(sourcePath);
+          content = gh.content;
+          sourceLabel = gh.label;
+          sourceKind = 'github';
+          if (gh.files) {
+            console.log(
+              dim(
+                `Dipakai ${gh.files.length} dokumen dari repo${gh.truncated ? ' (dipotong ke batas file/ukuran learn)' : ''}: ${gh.files.join(', ')}`,
+              ),
+            );
+          }
+        } catch (e) {
+          console.log(`Gagal mengambil dari GitHub: ${(e as Error).message}`);
+          return;
+        }
+      } else if (inlineText !== null) {
         content = inlineText;
         sourceLabel = 'teks langsung';
+        sourceKind = 'text';
       } else {
         const abs = resolvePath(ws, sourcePath as string);
         try {
@@ -752,7 +782,7 @@ const COMMANDS: CommandDef[] = [
         return;
       }
 
-      const session = createLearnSession({ kind: sourcePath ? 'file' : 'text', label: sourceLabel }, categories);
+      const session = createLearnSession({ kind: sourceKind, label: sourceLabel }, categories);
       let sessionPath = '';
       try {
         sessionPath = saveLearnSession(session, ws);
