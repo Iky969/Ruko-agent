@@ -28,6 +28,13 @@ export interface PinnedRequestOptions {
   timeoutMs: number;
   signal?: AbortSignal;
   headers: Record<string, string>;
+  /**
+   * Batas byte stream yang dibuffer. Default `MAX_WEB_FETCH_CHARS * 8`
+   * (perilaku lama web_fetch). Pemakaian lain yang butuh isi lebih besar
+   * (mis. `/learn` dari raw.githubusercontent.com) boleh menaikkan ini —
+   * pemanggil tetap yang membatasi panjang akhir teksnya.
+   */
+  maxBytes?: number;
 }
 
 export interface PinnedResponse {
@@ -671,7 +678,7 @@ export function pinnedHttpFetch(
     req.on('response', (res) => {
       const chunks: Buffer[] = [];
       let totalBytes = 0;
-      const maxStreamBytes = MAX_WEB_FETCH_CHARS * 8;
+      const maxStreamBytes = options.maxBytes ?? MAX_WEB_FETCH_CHARS * 8;
 
       res.on('data', (chunk: Buffer) => {
         if (totalBytes < maxStreamBytes) {

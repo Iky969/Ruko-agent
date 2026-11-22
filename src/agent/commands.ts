@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import type { Confirmer } from '../core/approval.js';
 import { join, relative as relativeFromCwd, resolve as resolvePath } from 'node:path';
 import { Context } from '../core/context.js';
@@ -14,6 +14,19 @@ import { ConnectionResult, createProvider, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
 
 import { scanSkills } from '../core/skills.js';
+import {
+  buildLearnAskPrompt,
+  categorizeWithLlm,
+  createLearnSession,
+  installLearnSkills,
+  learnGithubSource,
+  MAX_LEARN_SOURCE_CHARS,
+  parseGithubUrl,
+  parseLearnSelection,
+  renderLearnAskText,
+  saveLearnSession,
+  splitLearnContent,
+} from '../core/learn.js';
 import type { SelectorOptions } from '../core/tui.js';
 import type { Agent } from './agent.js';
 
@@ -643,6 +656,185 @@ const COMMANDS: CommandDef[] = [
         ),
       );
       console.log(dim('Direktori: .ruko/skills/ (lokal) dan ~/.ruko/skills/ (global)'));
+    },
+  },
+  {
+    name: 'learn',
+    category: 'Sistem & Bantuan',
+    help: 'Pelajari skill/doc besar (file, teks, atau URL GitHub), pecah jadi kategori, pasang yang dipilih sebagai skill kecil.',
+    hint: '<path|url-github|--text ...> [--all|--only a,b] [--no-llm]',
+    run: async (args, env) => {
+      const ws = getWorkspaceRoot();
+
+      // --- Parse argumen: <path> | --text <teks> | --all | --only <a,b> | --no-llm
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      let sourcePath: string | null = null;
+      let inlineText: string | null = null;
+      let installAll = false;
+      let onlyValue: string | null = null;
+      let noLlm = false;
+      for (let i = 0; i < parts.length; i += 1) {
+        const p = parts[i];
+        if (p === '--all') installAll = true;
+        else if (p === '--no-llm') noLlm = true;
+        else if (p === '--only') {
+          onlyValue = parts[i + 1] ?? '';
+          i += 1;
+        } else if (p.startsWith('--only=')) {
+          onlyValue = p.slice('--only='.length);
+        } else if (p === '--text') {
+          inlineText = parts.slice(i + 1).join(' ').replace(/^["']|["']$/g, '');
+          break;
+        } else if (p.startsWith('--')) {
+          console.log(`Flag tidak dikenal: "${p}". Penggunaan: /learn <path> | /learn --text <teks> [--all|--only a,b] [--no-llm]`);
+          return;
+        } else if (!sourcePath) {
+          sourcePath = p;
+        }
+      }
+
+      if (!sourcePath && inlineText === null) {
+        console.log(
+          'Penggunaan: /learn <path-file|url-github> [--all|--only a,b] [--no-llm]\n' +
+            '         /learn --text <teks> [--all|--only a,b]\n' +
+            'Contoh: /learn docs/panduan-besar.md   → pelajari, lalu pilih kategori yang dipasang.\n' +
+            '        /learn https://github.com/owner/repo/blob/main/SKILL.md --all\n' +
+            '        /learn https://github.com/owner/repo   → clone dangkal, pelajari README + file .md.',
+        );
+        return;
+      }
+
+      // --- Baca sumber
+      let content = '';
+      let sourceLabel = '';
+      let sourceKind: 'file' | 'text' | 'github' = 'file';
+      if (sourcePath && /^https?:\/\//i.test(sourcePath)) {
+        // URL: hanya GitHub (github.com / raw.githubusercontent.com). Host lain
+        // ditolak sebelum ada request — lihat parseGithubUrl di core/learn.ts.
+        const target = parseGithubUrl(sourcePath);
+        if (!target) {
+          console.log(
+            'URL belum didukung /learn — hanya URL GitHub yang bisa dipelajari (github.com/<owner>/<repo>[/tree/<branch>/<path>] atau .../blob/<branch>/<path>, dan raw.githubusercontent.com). ' +
+              'Untuk host lain, simpan dulu isinya sebagai file di workspace, lalu /learn <path>.',
+          );
+          return;
+        }
+        console.log(dim(`Mengambil dari GitHub: ${sourcePath}…`));
+        try {
+          const gh = await learnGithubSource(sourcePath);
+          content = gh.content;
+          sourceLabel = gh.label;
+          sourceKind = 'github';
+          if (gh.files) {
+            console.log(
+              dim(
+                `Dipakai ${gh.files.length} dokumen dari repo${gh.truncated ? ' (dipotong ke batas file/ukuran learn)' : ''}: ${gh.files.join(', ')}`,
+              ),
+            );
+          }
+        } catch (e) {
+          const safeErrorMessage = String((e as Error).message ?? e).replace(/[\r\n]+/g, ' ');
+          console.log(`Gagal mengambil dari GitHub: ${safeErrorMessage}`);
+          return;
+        }
+      } else if (inlineText !== null) {
+        content = inlineText;
+        sourceLabel = 'teks langsung';
+        sourceKind = 'text';
+      } else {
+        const abs = resolvePath(ws, sourcePath as string);
+        try {
+          assertInsideWorkspace(abs, ws);
+        } catch (e) {
+          console.log(`Error: ${(e as Error).message}`);
+          return;
+        }
+        if (!existsSync(abs)) {
+          console.log(`File tidak ditemukan: ${sourcePath}`);
+          return;
+        }
+        content = readFileSync(abs, 'utf8');
+        sourceLabel = relativeFromCwd(ws, abs) || (sourcePath as string);
+      }
+      if (!content.trim()) {
+        console.log('Sumber kosong — tidak ada yang bisa dipelajari.');
+        return;
+      }
+      if (content.length > MAX_LEARN_SOURCE_CHARS) {
+        console.log(
+          `Sumber terlalu besar (${content.length.toLocaleString()} karakter, maks ${MAX_LEARN_SOURCE_CHARS.toLocaleString()}). ` +
+            'Pecah dulu filenya, atau pelajari per bagian.',
+        );
+        return;
+      }
+
+      // --- Pecah jadi kategori (struktural dulu, LLM hanya bila tak terstruktur)
+      let categories = splitLearnContent(content);
+      if (categories.length <= 1 && !noLlm && content.trim().length > 4000 && env.llm.isConfigured) {
+        console.log(dim('Dokumen tidak terstruktur — meminta LLM mengkategorikan…'));
+        try {
+          const llmCategories = await categorizeWithLlm(env.llm, content);
+          if (llmCategories.length >= 2) {
+            categories = llmCategories;
+          }
+        } catch (e) {
+          console.log(dim(`Kategorisasi LLM gagal (${(e as Error).message}) — memakai pemecahan struktural.`));
+        }
+      }
+      if (categories.length === 0) {
+        console.log('Tidak ada kategori yang bisa dipelajari dari sumber ini.');
+        return;
+      }
+
+      const session = createLearnSession({ kind: sourceKind, label: sourceLabel }, categories);
+      let sessionPath = '';
+      try {
+        sessionPath = saveLearnSession(session, ws);
+      } catch (e) {
+        console.log(dim(`Sesi learn tidak bisa disimpan (${(e as Error).message}) — lanjut tanpa arsip sesi.`));
+      }
+
+      // --- Tanyakan pilihan ke user (prompt JSON: semua / nomor / nama)
+      let selected;
+      try {
+        if (installAll) {
+          selected = categories;
+        } else if (onlyValue !== null) {
+          selected = parseLearnSelection(onlyValue, session);
+        } else {
+          console.log(renderLearnAskText(session));
+          if (!env.ask) {
+            console.log(dim('Non-interaktif: ulangi dengan --all atau --only <nama/nomor>, contoh: /learn docs/x.md --only 1,3'));
+            return;
+          }
+          // Pertanyaan diajukan mengikuti spesifikasi JSON buildLearnAskPrompt
+          // (opsi + format jawaban); jawaban di-parse dengan parseLearnSelection.
+          const askSpec = JSON.parse(buildLearnAskPrompt(session)) as { question: string };
+          const answer = await env.ask(`${askSpec.question} (semua / nomor / nama): `);
+          selected = parseLearnSelection(answer, session);
+        }
+      } catch (e) {
+        console.log(`Error: ${(e as Error).message}`);
+        return;
+      }
+
+      // --- Pasang sebagai skill kecil
+      const { installed } = installLearnSkills(session, selected, ws);
+      try {
+        saveLearnSession(session, ws);
+      } catch {
+        // Arsip sesi gagal diperbarui — pemasangan sudah berhasil, abaikan.
+      }
+      console.log(
+        renderBox(
+          `Learn: ${installed.length} skill terpasang`,
+          installed.map(
+            (s) => `${green('●')} ${bold(s.name.padEnd(20))} ${s.filePath}${s.overwrote ? dim(' (menimpa skill lama)') : ''}`,
+          ),
+        ),
+      );
+      if (sessionPath) console.log(dim(`Sesi learn tersimpan: ${sessionPath}`));
+      console.log(dim('Skill kecil ikut tersuntik ke system prompt (batas 8000 karakter) — cek dengan /skills.'));
     },
   },
   {
