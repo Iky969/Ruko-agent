@@ -1,4 +1,4 @@
-import { AgentConfig, ContextMessage, ContextRole } from '../types.js';
+import { AgentConfig, ContextMessage, ContextRole, DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS } from '../types.js';
 import { compressHistory } from './compressor.js';
 
 /**
@@ -74,12 +74,25 @@ export class Context {
   }
 
   /**
-   * Compresses the oldest turns into one digest message until the total fits
-   * the configured budget. Returns the number of chars removed (0 when the
-   * history already fits or cannot be compressed further).
+   * Auto-compress: folds the oldest turns into one digest message, but ONLY
+   * when auto-compress is enabled and the history has reached
+   * autoCompressThresholdChars (default 500_000). Below the threshold the
+   * history is left intact, so long sessions keep full detail and the agent
+   * does not re-do early steps it has "forgotten". Returns the number of
+   * chars removed (0 when auto-compress is off, the threshold is not
+   * reached yet, or the history already fits / cannot be compressed).
+   *
+   * The fold target is the threshold itself, capped by maxContextChars —
+   * the per-turn window() still only sends the most recent maxContextChars,
+   * so raising the threshold above maxContextChars alone does not widen
+   * what the model sees per turn. Use /compact (compressNow) for a manual
+   * fold at any time; it is not affected by this setting.
    */
   compress(keepLast = 6): number {
-    return this.compressTo(this.config.maxContextChars, keepLast);
+    if (this.config.autoCompress === false) return 0;
+    const threshold = this.config.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS;
+    if (this.totalChars < threshold) return 0;
+    return this.compressTo(Math.min(this.config.maxContextChars, threshold), keepLast);
   }
 
   /** Forced compaction (`/compact`): folds toward 65% of the budget (§5). */

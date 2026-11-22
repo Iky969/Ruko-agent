@@ -147,7 +147,24 @@ export interface AgentConfig {
   trustedWorkspace?: boolean;
   /** Maximum tool iterations per instruction (default 30). */
   maxToolIterations?: number;
+  /**
+   * Auto-compress history once it reaches autoCompressThresholdChars.
+   * Default true (old behaviour). Set false to keep the full history
+   * intact during long sessions and compress only manually via /compact.
+   */
+  autoCompress?: boolean;
+  /**
+   * Total history chars at which auto-compress kicks in (default 500_000).
+   * Auto-compress folds the oldest turns until the history fits this
+   * threshold (capped by maxContextChars). Only used when autoCompress is on.
+   */
+  autoCompressThresholdChars?: number;
 }
+
+/** Default auto-compress threshold in chars (Beverly's example: 500k). */
+export const DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS = 500_000;
+/** Hard cap for autoCompressThresholdChars, same as maxContextChars. */
+export const MAX_AUTO_COMPRESS_THRESHOLD_CHARS = 10_000_000;
 
 export const DEFAULT_CONFIG: AgentConfig = {
   maxContextChars: 512_000,
@@ -165,6 +182,8 @@ export const DEFAULT_CONFIG: AgentConfig = {
   guardianEnabled: true,
   guardianTimeoutMs: 5_000,
   maxToolIterations: 30,
+  autoCompress: true,
+  autoCompressThresholdChars: DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS,
 };
 
 /**

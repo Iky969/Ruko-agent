@@ -7,6 +7,11 @@ Format berbasis [Keep a Changelog](https://keepachangelog.com/id/1.0.0/) dan tun
 
 ## [2.2.0] - Unreleased
 
+### Context — Auto-Compress yang Bisa Diatur
+- **Setting baru `autoCompress` (default `true`) dan `autoCompressThresholdChars` (default `500_000`):** kompresi otomatis riwayat kini hanya berjalan bila diaktifkan dan total riwayat sudah mencapai ambang. Di bawah ambang, riwayat dibiarkan utuh supaya kerja panjang tidak kehilangan detail langkah awal (yang sebelumnya memicu pengulangan tool lalu stop max iterations/loop). Ubah via `/settings auto-compress <on|off>`, `/settings auto-compress-threshold <500k>`, atau `/config set autoCompress[ThresholdChars] <nilai>`; tersimpan di `.ruko/config.json` seperti setting lain. `/compact` manual tetap jalan kapan pun.
+- **Batasan yang diketahui:** `window()` per giliran tetap dibatasi `maxContextChars` (default 512.000), jadi menaikkan ambang di atas itu saja tidak memperlebar apa yang dilihat model per giliran — naikkan juga `maxContextChars` bila ingin ambang lebih besar berpengaruh penuh.
+- **Test:** 14 test regresi baru (`src/tests/auto_compress.test.ts`); full suite 1540 total / 1536 pass / 2 fail (2 fail lama artefak environment sandbox, sama seperti main).
+
 ### Security & Approval
 - **Scope & Plan/Act:** bootstrap scope yang memerlukan otorisasi host, perintah `/scope allow|status|reset`, validasi input `/plan`, serta diagnostik penolakan scope yang menyebut penyebabnya.
 - **Approval sesi:** grant `[a/y/n]` untuk command yang aman dan exact-match selama sesi aktif; tidak mengubah allowlist persisten atau melewati Plan Mode maupun scope.

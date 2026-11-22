@@ -489,9 +489,20 @@ export class SystemLoop {
           this.ctx.totalChars / this.config.maxContextChars > 0.5 &&
           (this.ctx.size & 1) === 0
         ) {
-          // warn at most every other turn to stay quiet (§5 token discipline)
-          console.log(yellow('⚠ konteks > 50% — pertimbangkan /compact-equivalent: riwayat lama otomatis dikompres.'));
+          // warn at most every other turn to stay quiet (§5 token discipline).
+          // This is only a warning: auto-compress itself is gated separately
+          // in Context.compress() by the autoCompress setting + threshold.
+          const autoOff = this.config.autoCompress === false;
+          console.log(
+            yellow(
+              autoOff
+                ? '⚠ konteks > 50% — auto-compress MATI, riwayat dibiarkan utuh. Gunakan /compact untuk merapikan manual, atau nyalakan lagi via /settings auto-compress on.'
+                : '⚠ konteks > 50% — auto-compress berjalan saat mencapai ambang (lihat /settings). Gunakan /compact untuk merapikan sekarang.',
+            ),
+          );
         }
+        // Auto-compress (gated in Context.compress()): only folds history when
+        // autoCompress is on and totalChars reached autoCompressThresholdChars.
         const removed = this.ctx.compress();
         if (removed > 0) {
           console.log(`[konteks dikompres: -${removed} chars dari history lama]`);

@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import {
   AgentConfig,
   DEFAULT_CONFIG,
+  MAX_AUTO_COMPRESS_THRESHOLD_CHARS,
   ProviderProfile,
   UiMode,
   resolveProfileCredentials,
@@ -35,6 +36,8 @@ export interface RukoConfigFile {
   guardianTimeoutMs?: number;
   trustedWorkspace?: boolean;
   maxToolIterations?: number;
+  autoCompress?: boolean;
+  autoCompressThresholdChars?: number;
 }
 
 export function defaultConfigPath(): string {
@@ -312,6 +315,23 @@ export function sanitizeConfigFile(raw: unknown): Partial<RukoConfigFile> {
   }
   if (typeof obj.maxToolIterations === 'number' && obj.maxToolIterations > 0 && Number.isFinite(obj.maxToolIterations)) {
     clean.maxToolIterations = Math.min(Math.trunc(obj.maxToolIterations), 1_000);
+  }
+  if (typeof obj.autoCompress === 'boolean') {
+    clean.autoCompress = obj.autoCompress;
+  } else if (obj.autoCompress !== undefined) {
+    console.warn('[config] Mengabaikan autoCompress: harus true/false.');
+  }
+  if (typeof obj.autoCompressThresholdChars === 'number' && Number.isFinite(obj.autoCompressThresholdChars)) {
+    if (obj.autoCompressThresholdChars <= 0) {
+      console.warn('[config] Mengabaikan autoCompressThresholdChars: harus angka positif dalam karakter.');
+    } else {
+      clean.autoCompressThresholdChars = Math.min(
+        Math.trunc(obj.autoCompressThresholdChars),
+        MAX_AUTO_COMPRESS_THRESHOLD_CHARS,
+      );
+    }
+  } else if (obj.autoCompressThresholdChars !== undefined) {
+    console.warn('[config] Mengabaikan autoCompressThresholdChars: harus angka dalam karakter.');
   }
 
   return clean;
