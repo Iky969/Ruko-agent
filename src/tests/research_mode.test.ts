@@ -317,20 +317,28 @@ test('integrasi agent: npm test jalan di research mode, rm diblok', async () => 
     const agent = new Agent(ctx, provider, baseConfig, async () => true, tmp);
     agent.sessionState.mode = 'research';
 
-    const { result } = await captureConsole(() => agent.handleInstruction('jalankan test'));
-    const toolMsgs = (provider.receivedMessages[1] ?? []).filter((m) => m.role === 'tool');
-    const toolContent = toolMsgs[0]?.content ?? '(tidak ada tool message)';
-    // Diagnostik CI Windows: diletakkan SEBELUM assert (kegagalan bisa
-    // terjadi di assert `result` / tidak adanya panggilan ke-2, sebelum
-    // diagnostik lama sempat jalan). Hasilnya dicetak sebagai annotation
-    // GitHub (`::error::` dibaca runner → terlihat di UI PR tanpa menggali
-    // log mentah) — hanya saat ada yang tidak sesuai.
+    // Diagnostik CI Windows: dicetak SELALU sebagai annotation (notice) via
+    // process.stdout.write dengan newline di depan — console.log biasa bisa
+    // menempel di tengah baris output streaming agent (`\r` tanpa `\n`)
+    // sehingga GitHub tidak mengenalinya sebagai workflow command, dan
+    // diagnostik yang diletakkan setelah assert tidak pernah jalan bila
+    // kegagalan terjadi sebelum assert (mis. handleInstruction melempar
+    // atau tool call tidak ter-parse sehingga hanya 1 chat call).
     const esc = (s: string) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
-    if (result !== 'Test sudah dijalankan.' || !toolContent.includes('TEST-RAN-OK')) {
-      console.log(
-        `::error title=Research debug npm::result=${esc(JSON.stringify(result))} calls=${provider.receivedMessages.length} tool=${esc(toolContent.slice(0, 1500))}`,
-      );
+    let result = '';
+    let calls = 0;
+    let toolContent = '(belum dieksekusi)';
+    try {
+      ({ result } = await captureConsole(() => agent.handleInstruction('jalankan test')));
+      calls = provider.receivedMessages.length;
+      const toolMsgs = (provider.receivedMessages[1] ?? []).filter((m) => m.role === 'tool');
+      toolContent = toolMsgs[0]?.content ?? '(tidak ada tool message)';
+    } catch (err) {
+      toolContent = `THROW: ${err instanceof Error ? err.message : String(err)}`;
     }
+    process.stdout.write(
+      `\n::notice title=Research debug npm::result=${esc(JSON.stringify(result))} calls=${calls} tool=${esc(toolContent.slice(0, 1500))}\n`,
+    );
     assert.equal(result, 'Test sudah dijalankan.');
     assert.ok(toolContent.includes('TEST-RAN-OK'), 'npm test harus benar-benar dieksekusi');
 
@@ -338,17 +346,22 @@ test('integrasi agent: npm test jalan di research mode, rm diblok', async () => 
     const rmCall = '```tool\n{"tool": "exec", "command": "rm -rf node_modules"}\n```';
     const provider2 = new FakeProvider([rmCall, 'Perintah ditolak, lanjut baca saja.']);
     agent.setLlmProvider(provider2);
-    const { result: result2 } = await captureConsole(() =>
-      agent.handleInstruction('hapus node_modules'),
-    );
-    assert.equal(result2, 'Perintah ditolak, lanjut baca saja.');
-    const toolMsgs2 = (provider2.receivedMessages[1] ?? []).filter((m) => m.role === 'tool');
-    const toolContent2 = toolMsgs2[0]?.content ?? '(tidak ada tool message)';
-    if (result2 !== 'Perintah ditolak, lanjut baca saja.' || !toolContent2.includes('research mode aktif')) {
-      console.log(
-        `::error title=Research debug rm::result=${esc(JSON.stringify(result2))} calls=${provider2.receivedMessages.length} tool=${esc(toolContent2.slice(0, 1500))}`,
-      );
+    let result2 = '';
+    let calls2 = 0;
+    let toolContent2 = '(belum dieksekusi)';
+    try {
+      ({ result: result2 } = await captureConsole(() =>
+        agent.handleInstruction('hapus node_modules'),
+      ));
+      calls2 = provider2.receivedMessages.length;
+      const toolMsgs2 = (provider2.receivedMessages[1] ?? []).filter((m) => m.role === 'tool');
+      toolContent2 = toolMsgs2[0]?.content ?? '(tidak ada tool message)';
+    } catch (err) {
+      toolContent2 = `THROW: ${err instanceof Error ? err.message : String(err)}`;
     }
+    process.stdout.write(
+      `\n::notice title=Research debug rm::result=${esc(JSON.stringify(result2))} calls=${calls2} tool=${esc(toolContent2.slice(0, 1500))}\n`,
+    );
     assert.equal(result2, 'Perintah ditolak, lanjut baca saja.');
     assert.ok(toolContent2.includes('research mode aktif'));
   } finally {
