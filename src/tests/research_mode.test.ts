@@ -335,7 +335,15 @@ test('integrasi agent: npm test jalan di research mode, rm diblok', async () => 
     // call ditolak sebagai malformed HANYA di Windows (di Linux/macOS path
     // memakai `/` jadi JSON-nya valid). Ini penyebab Windows 18.x/20.x
     // masih merah di PR #46 setelah fix test.cjs.
-    const testCall = JSON.stringify({ tool: 'exec', command: `cd ${tmp} && npm test` });
+    // Perintah yang diuji: `cd <tmp> && npm test`. Di Windows, runner
+    // menaruh repo di D: dan %TEMP% di C: — `cd C:\...` TANPA /d hanya
+    // mengganti direktori di drive C, drive aktif tetap D:, sehingga `npm
+    // test` malah menjalankan suite repo sendiri (terbukti di annotation
+    // "Research debug": output berisi `> ruko@2.2.0 test`, bukan
+    // `TEST-RAN-OK`). `cd /d` adalah idiom cmd.exe untuk pindah drive.
+    const cdCmd =
+      process.platform === 'win32' ? `cd /d ${tmp} && npm test` : `cd ${tmp} && npm test`;
+    const testCall = JSON.stringify({ tool: 'exec', command: cdCmd });
     const testCallBlock = `\`\`\`tool\n${testCall}\n\`\`\``;
     const provider = new FakeProvider([testCallBlock, 'Test sudah dijalankan.']);
     const ctx = new Context(baseConfig);
