@@ -34,7 +34,7 @@ import { runToolCall } from '../agent/tools.js';
 describe('Temuan 1: resolveTscJsPath fallback #4/#5 (createRequire)', () => {
   /** Workspace tiruan: node_modules/typescript HANYA berisi bin/tsc.js. */
   function makeBinJsOnlyWorkspace(): { root: string; ws: string; expected: string } {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ruko-gov14-'));
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ruko-gov14-')));
     const tsDir = path.join(root, 'node_modules', 'typescript');
     fs.mkdirSync(path.join(tsDir, 'bin'), { recursive: true });
     fs.writeFileSync(
@@ -61,7 +61,7 @@ describe('Temuan 1: resolveTscJsPath fallback #4/#5 (createRequire)', () => {
   });
 
   test('fallback #5: exports map mengarahkan ./lib/tsc.js ke berkas lain', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ruko-gov15-'));
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ruko-gov15-')));
     try {
       const tsDir = path.join(root, 'node_modules', 'typescript');
       fs.mkdirSync(path.join(tsDir, 'lib'), { recursive: true });
