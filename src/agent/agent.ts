@@ -604,6 +604,11 @@ export class Agent {
           },
         });
         let raw: string;
+        // True bila stream berakhir saat parser masih di dalam <thought>
+        // (tag penutup tidak pernah tiba di giliran ini). Dipakai untuk
+        // nudge penutup eksplisit di bawah — thought yang belum ditutup
+        // tidak boleh dianggap jawaban akhir.
+        let endedInThought = false;
         try {
           raw = await this.llmProvider.chat(messages, {
             onToken: (token) => thoughtParser.feed(token),
@@ -629,6 +634,7 @@ export class Agent {
           }
           throw err;
         } finally {
+          endedInThought = thoughtParser.isInThought();
           thoughtParser.end();
           thoughtReveal.end();
           finishThinking();
@@ -717,7 +723,9 @@ export class Agent {
             });
             messages.push({
               role: 'user',
-              content: 'Fase thinking telah selesai. Silakan panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir langsung kepada pengguna.',
+              content: endedInThought
+                ? 'Blok <thought> kamu belum ditutup. Tutup dulu dengan </thought>, lalu panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir langsung kepada pengguna.'
+                : 'Fase thinking telah selesai. Silakan panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir langsung kepada pengguna.',
               timestamp: new Date().toISOString(),
             });
             continue;
