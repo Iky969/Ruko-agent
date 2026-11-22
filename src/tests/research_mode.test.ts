@@ -318,19 +318,20 @@ test('integrasi agent: npm test jalan di research mode, rm diblok', async () => 
     agent.sessionState.mode = 'research';
 
     const { result } = await captureConsole(() => agent.handleInstruction('jalankan test'));
-    assert.equal(result, 'Test sudah dijalankan.');
-    const toolMsgs = provider.receivedMessages[1].filter((m) => m.role === 'tool');
+    const toolMsgs = (provider.receivedMessages[1] ?? []).filter((m) => m.role === 'tool');
     const toolContent = toolMsgs[0]?.content ?? '(tidak ada tool message)';
-    if (!toolContent.includes('TEST-RAN-OK')) {
-      // Diagnostik CI Windows: hasil exec dicetak sebagai annotation GitHub
-      // (`::error::` dibaca runner → terlihat di UI PR tanpa menggali log
-      // mentah) — hanya saat gagal. Penyebab Windows di test ini sudah dua
-      // kali berganti (kutip `node -e`, lalu JSON path) dan log job tidak
-      // selalu bisa dibaca dari luar, jadi kegagalan berikutnya harus
-      // membawa serta isi hasil exec-nya.
-      const esc = (s: string) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
-      console.log(`::error title=Research debug npm::${esc(toolContent.slice(0, 2000))}`);
+    // Diagnostik CI Windows: diletakkan SEBELUM assert (kegagalan bisa
+    // terjadi di assert `result` / tidak adanya panggilan ke-2, sebelum
+    // diagnostik lama sempat jalan). Hasilnya dicetak sebagai annotation
+    // GitHub (`::error::` dibaca runner → terlihat di UI PR tanpa menggali
+    // log mentah) — hanya saat ada yang tidak sesuai.
+    const esc = (s: string) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+    if (result !== 'Test sudah dijalankan.' || !toolContent.includes('TEST-RAN-OK')) {
+      console.log(
+        `::error title=Research debug npm::result=${esc(JSON.stringify(result))} calls=${provider.receivedMessages.length} tool=${esc(toolContent.slice(0, 1500))}`,
+      );
     }
+    assert.equal(result, 'Test sudah dijalankan.');
     assert.ok(toolContent.includes('TEST-RAN-OK'), 'npm test harus benar-benar dieksekusi');
 
     // Perintah mutasi di sesi yang sama tetap diblok.
@@ -341,12 +342,14 @@ test('integrasi agent: npm test jalan di research mode, rm diblok', async () => 
       agent.handleInstruction('hapus node_modules'),
     );
     assert.equal(result2, 'Perintah ditolak, lanjut baca saja.');
-    const toolMsgs2 = provider2.receivedMessages[1].filter((m) => m.role === 'tool');
+    const toolMsgs2 = (provider2.receivedMessages[1] ?? []).filter((m) => m.role === 'tool');
     const toolContent2 = toolMsgs2[0]?.content ?? '(tidak ada tool message)';
-    if (!toolContent2.includes('research mode aktif')) {
-      const esc = (s: string) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
-      console.log(`::error title=Research debug rm::${esc(toolContent2.slice(0, 2000))}`);
+    if (result2 !== 'Perintah ditolak, lanjut baca saja.' || !toolContent2.includes('research mode aktif')) {
+      console.log(
+        `::error title=Research debug rm::result=${esc(JSON.stringify(result2))} calls=${provider2.receivedMessages.length} tool=${esc(toolContent2.slice(0, 1500))}`,
+      );
     }
+    assert.equal(result2, 'Perintah ditolak, lanjut baca saja.');
     assert.ok(toolContent2.includes('research mode aktif'));
   } finally {
     setWorkspaceRoot(null);
