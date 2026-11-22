@@ -734,7 +734,14 @@ export function collectRepoLearnContent(cloneDir: string, subPath: string): Repo
       continue;
     }
     if (!body.trim() || isBinaryText(body.slice(0, 8192))) continue;
-    const rel = stat.isFile() ? basename(file) : relative(target, file) || basename(file);
+    // PERBAIKAN (CI Windows): normalisasi ke separator POSIX. `relative()`
+    // di Windows menghasilkan `docs\z-panduan.md` (backslash) sehingga
+    // `result.files` dan heading `## <rel>` berbeda antar-OS dan
+    // `deepEqual(result.files, ['README.md', 'docs/z-panduan.md'])` gagal
+    // hanya di Windows (CI PR #47: 1 gagal di windows-latest 18.x/20.x).
+    const rel = (stat.isFile() ? basename(file) : relative(target, file) || basename(file))
+      .split(sep)
+      .join('/');
     const section = `## ${rel}\n\n${body.trim()}`;
     if (totalChars + section.length > MAX_LEARN_REPO_TOTAL_CHARS && used.length > 0) {
       truncated = true;
