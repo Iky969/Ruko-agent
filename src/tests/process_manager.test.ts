@@ -319,12 +319,21 @@ test('get_status returns deterministic running, exited, and stale states', async
 
     // 2. Exited state
     const exitProc = defaultProcessManager.startProcess('node -e "process.exit(7)"', ws);
-    await new Promise((r) => setTimeout(r, 400));
-    const s2Raw = await runToolCall(
-      { tool: 'get_status', process_id: exitProc.id },
-      { workspaceRoot: ws },
-    );
-    const s2 = JSON.parse(s2Raw);
+    // PERBAIKAN (flake CI): jangan assert langsung setelah sleep 400ms —
+    // di bawah beban paralel / runner lambat, event 'exit' child bisa belum
+    // diproses manager sehingga status masih 'running'. Poll sampai 'exited'
+    // (maks 5 dtk), mengikuti pola polling yang sudah dipakai di file ini
+    // untuk read_process_logs di Windows.
+    let s2: any = null;
+    for (let i = 0; i < 50; i += 1) {
+      const s2Raw = await runToolCall(
+        { tool: 'get_status', process_id: exitProc.id },
+        { workspaceRoot: ws },
+      );
+      s2 = JSON.parse(s2Raw);
+      if (s2.status === 'exited') break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
     assert.equal(s2.ok, true);
     assert.equal(s2.status, 'exited');
     assert.equal(s2.exitCode, 7);
