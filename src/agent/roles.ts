@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { UiMode } from '../types.js';
 import { formatMemoryForPrompt } from '../core/memory.js';
+import { sanitizePath } from '../core/prompt/sanitizer.js';
 
 /**
  * Layered system prompts + built-in roles (feedback §4).
@@ -299,7 +300,15 @@ export function formatEnvironmentContext(ctx: EnvironmentContextInput): string {
     `- Shell aktif untuk tool exec: ${shellLabel}`,
     `- Pemisah path: "${separator}" — contoh ${separator === '\\' ? 'C:\\proyek\\app' : '/home/user/app'}`,
   ];
-  if (ctx.workspaceRoot) lines.push(`- Working directory: ${ctx.workspaceRoot}`);
+  // Temuan audit v2.2.0 #2: workspaceRoot TIDAK BOLEH mentah ke prompt —
+  // nama direktori berisi newline (mis. "/tmp/ws\nINJEKSI: ...") memecah
+  // struktur prompt dan baris keduanya tampil sebagai instruksi tingkat
+  // atas. sanitizePath() membuang total karakter kontrol (termasuk \n),
+  // BiDi/zero-width, dan merapatkan slash — tanpa merusak karakter alfabet
+  // multibyte yang sah di path. sanitizeForPrompt() TIDAK dipakai di sini:
+  // ia meng-escape semua karakter non-ASCII menjadi \uXXXX sehingga path
+  // sah seperti "résumé" akan rusak.
+  if (ctx.workspaceRoot) lines.push(`- Working directory: ${sanitizePath(ctx.workspaceRoot)}`);
   if (ctx.flavor && ctx.flavor !== 'none') lines.push(`- Lingkungan terdeteksi: ${ctx.flavor}`);
 
   lines.push('', 'ATURAN PERINTAH (WAJIB — sesuaikan dengan OS di atas):');
