@@ -9,7 +9,7 @@ import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
 import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot, runToolCall } from './tools.js';
-import { AgentConfig, AgentMode, createDefaultSessionState, DEFAULT_CONFIG, ProviderProfile, ReasoningLevel, SessionState, UiMode } from '../types.js';
+import { AgentConfig, AgentMode, createDefaultSessionState, DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS, DEFAULT_CONFIG, MAX_AUTO_COMPRESS_THRESHOLD_CHARS, ProviderProfile, ReasoningLevel, SessionState, UiMode } from '../types.js';
 import { ConnectionResult, createProvider, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
 
@@ -100,11 +100,12 @@ export function renderContextDashboard(env: CommandEnv): void {
     `Max output tokens aktif: ${maxOut.toLocaleString()} tokens (per-turn)`,
     `Karakter aktif saat ini: ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}%`,
     `Pesan dalam konteks: ${env.ctx.size} pesan (messages: ${env.ctx.size})`,
+    `Auto-compress: ${(env.config.autoCompress ?? true) ? 'ON' : 'OFF'} (ambang ${(env.config.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS).toLocaleString()} chars — OFF = riwayat utuh, kompres manual via /compact)`,
     `Threshold log summarizer: ${env.config.maxLogChars} chars`,
     `Timeout eksekusi: ${env.config.execTimeoutMs}ms`,
     `Status konfigurasi: ${isPersistent ? 'Tersimpan di .ruko/config.json (survive lintas sesi)' : 'Menggunakan nilai default sesi (belum disimpan)'}`,
     `───────────────────────────────────────────────────────`,
-    `Hint: Atur budget dengan /context set <jumlah|50k> atau /settings context <128k|500k|unlimited>`,
+    `Hint: Atur budget dengan /context set <jumlah|50k> atau /settings context <128k|500k|unlimited>; auto-compress via /settings auto-compress <on|off> dan /settings auto-compress-threshold <500k>`,
   ];
 
   const maxInner = Math.max(10, terminalWidth() - 4);
@@ -748,8 +749,8 @@ const COMMANDS: CommandDef[] = [
     name: 'settings',
     aliases: ['setting', 'set'],
     category: 'Konfigurasi & Budget',
-    help: 'Dashboard konfigurasi: lihat & ubah budget context, max token, model, role, approval, dan mode.',
-    hint: '[context|max-tokens|iterations|role|mode|approval|save] [nilai]',
+    help: 'Dashboard konfigurasi: lihat & ubah budget context, max token, model, role, approval, auto-compress, dan mode.',
+    hint: '[context|max-tokens|iterations|role|mode|approval|auto-compress|auto-compress-threshold|save] [nilai]',
     run: async (args, env) => {
       const parts = args.trim().split(/\s+/);
       const sub = parts[0]?.toLowerCase();
@@ -773,6 +774,7 @@ const COMMANDS: CommandDef[] = [
           `TOKEN & CONTEXT BUDGET:`,
           `  • Context Window:   ${budgetChars.toLocaleString()} chars (~${budgetTokens.toLocaleString()} tokens)`,
           `  • Status Konteks:   ${usedChars.toLocaleString()} chars (~${usedTokens.toLocaleString()} tokens) — ${pct}% terpakai`,
+          `  • Auto-Compress:    ${(env.config.autoCompress ?? true) ? 'ON' : 'OFF'} (ambang ${(env.config.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS).toLocaleString()} chars; OFF = riwayat dibiarkan utuh, kompres hanya via /compact)`,
           `  • Max Output:       ${maxOut.toLocaleString()} tokens per-turn (max_tokens)`,
           `  • Max Iterations:   ${maxIter} iterasi tool per-turn`,
           ``,
@@ -784,6 +786,8 @@ const COMMANDS: CommandDef[] = [
           `───────────────────────────────────────────────────────`,
           `Ubah pengaturan dengan perintah:`,
           `  • /settings context <128k|500k|unlimited>   Atur limit context window`,
+          `  • /settings auto-compress <on|off>         Nyalakan/matikan kompresi otomatis riwayat`,
+          `  • /settings auto-compress-threshold <500k> Ambang karakter pemicu auto-compress`,
           `  • /settings max-tokens <jumlah|4096>       Atur limit token output per-turn`,
           `  • /settings iterations <jumlah|30>         Atur limit iterasi tool per-turn`,
           `  • /settings role <default|reviewer|teacher> Atur peran aktif`,
@@ -917,6 +921,56 @@ const COMMANDS: CommandDef[] = [
         } else {
           console.log('Gunakan: /settings approval <on|off|yolo>');
         }
+        return;
+      }
+
+      if (sub === 'auto-compress' || sub === 'autocompress') {
+        if (!val) {
+          const on = env.config.autoCompress ?? true;
+          const threshold = env.config.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS;
+          console.log(`Auto-compress saat ini: ${on ? 'ON' : 'OFF'} (ambang ${threshold.toLocaleString()} karakter).`);
+          console.log('Gunakan: /settings auto-compress <on|off>');
+          return;
+        }
+        const v = val.toLowerCase();
+        if (v === 'on' || v === '1' || v === 'true') {
+          env.updateConfig({ autoCompress: true });
+          console.log(green('✔ Auto-compress diaktifkan — riwayat lama akan dilipat otomatis saat mencapai ambang.'));
+        } else if (v === 'off' || v === '0' || v === 'false') {
+          env.updateConfig({ autoCompress: false });
+          console.log(yellow('⚠ Auto-compress dimatikan — riwayat dibiarkan utuh sampai kamu merapikan manual dengan /compact.'));
+        } else {
+          console.log('Gunakan: /settings auto-compress <on|off>');
+        }
+        return;
+      }
+
+      if (sub === 'auto-compress-threshold' || sub === 'autocompressthreshold' || sub === 'compress-threshold') {
+        if (!val) {
+          const threshold = env.config.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS;
+          console.log(`Ambang auto-compress saat ini: ${threshold.toLocaleString()} karakter (~${Math.round(threshold / 4).toLocaleString()} token).`);
+          console.log('Gunakan: /settings auto-compress-threshold <nilai> (contoh: /settings auto-compress-threshold 500k)');
+          return;
+        }
+        const n = parseConfigNumber(val);
+        if (Number.isNaN(n) || n <= 0 || !Number.isInteger(n)) {
+          console.log('Error: nilai ambang harus berupa bilangan bulat positif dalam karakter (contoh: 500k, 1000000).');
+          return;
+        }
+        if (n > MAX_AUTO_COMPRESS_THRESHOLD_CHARS) {
+          console.log(`Error: ambang tidak boleh melebihi ${MAX_AUTO_COMPRESS_THRESHOLD_CHARS.toLocaleString()} karakter.`);
+          return;
+        }
+        if (n > env.config.maxContextChars) {
+          console.log(
+            yellow(
+              `Peringatan: ambang (${n.toLocaleString()} karakter) lebih besar dari maxContextChars (${env.config.maxContextChars.toLocaleString()}). ` +
+                'Riwayat tersimpan boleh tumbuh sampai ambang itu, tapi tiap giliran model tetap hanya melihat maxContextChars terakhir — naikkan juga maxContextChars bila ingin ambang ini berpengaruh penuh.',
+            ),
+          );
+        }
+        env.updateConfig({ autoCompressThresholdChars: n });
+        console.log(green(`✔ Ambang auto-compress diperbarui menjadi ${n.toLocaleString()} karakter (~${Math.round(n / 4).toLocaleString()} token).`));
         return;
       }
 
@@ -1111,6 +1165,7 @@ const COMMANDS: CommandDef[] = [
             `baseUrl: ${maskBaseUrl(c)}`,
             `maxLogChars: ${c.maxLogChars}`,
             `maxContextChars: ${c.maxContextChars}`,
+            `autoCompress: ${c.autoCompress ?? true}  |  autoCompressThresholdChars: ${c.autoCompressThresholdChars ?? DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS}`,
             `maxOutputTokens: ${c.maxOutputTokens ?? 4096}`,
             `execTimeoutMs: ${c.execTimeoutMs}`,
             `approvalEnabled: ${c.approvalEnabled}`,
@@ -1343,6 +1398,36 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
       }
       patch.funAnimations = /^(true|1)$/i.test(value);
       break;
+    case 'autoCompress':
+      if (!/^(true|false|1|0|on|off)$/i.test(value)) {
+        console.log('Nilai harus true/false (atau on/off)');
+        return;
+      }
+      patch.autoCompress = /^(true|1|on)$/i.test(value);
+      break;
+    case 'autoCompressThresholdChars': {
+      const n = parseConfigNumber(value);
+      if (Number.isNaN(n) || n <= 0 || !Number.isInteger(n)) {
+        console.log(`Nilai tidak valid untuk ${key}: ${value} (contoh: /config set autoCompressThresholdChars 500k)`);
+        return;
+      }
+      if (n > MAX_AUTO_COMPRESS_THRESHOLD_CHARS) {
+        console.log(
+          `Nilai tidak valid untuk ${key}: ${value} melebihi batas maksimum ${MAX_AUTO_COMPRESS_THRESHOLD_CHARS.toLocaleString()} karakter.`,
+        );
+        return;
+      }
+      if (n > env.config.maxContextChars) {
+        console.log(
+          yellow(
+            `Peringatan: ambang auto-compress (${n.toLocaleString()} karakter) lebih besar dari maxContextChars (${env.config.maxContextChars.toLocaleString()}). ` +
+              'Riwayat tersimpan boleh tumbuh sampai ambang itu, tapi tiap giliran model tetap hanya melihat maxContextChars terakhir — naikkan juga maxContextChars bila ingin ambang ini berpengaruh penuh.',
+          ),
+        );
+      }
+      patch.autoCompressThresholdChars = n;
+      break;
+    }
     case 'apiKey':
       patch.apiKey = value;
       env.llm.setCredentials?.(value, env.config.baseUrl ?? '');
@@ -1419,7 +1504,7 @@ async function applyConfigPatch(env: CommandEnv, key: string, value: string): Pr
       if (patch.model !== env.llm.model) env.llm.setModel(patch.model);
       break;
     default:
-      console.log(`Key tidak dikenal: ${key} (provider, model, apiKey, baseUrl, maxLogChars, maxContextChars, maxOutputTokens, execTimeoutMs, approvalEnabled, funAnimations)`);
+      console.log(`Key tidak dikenal: ${key} (provider, model, apiKey, baseUrl, maxLogChars, maxContextChars, maxOutputTokens, execTimeoutMs, approvalEnabled, funAnimations, autoCompress, autoCompressThresholdChars)`);
       return;
   }
   env.updateConfig(patch);
