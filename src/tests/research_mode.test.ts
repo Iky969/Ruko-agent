@@ -320,7 +320,18 @@ test('integrasi agent: npm test jalan di research mode, rm diblok', async () => 
     const { result } = await captureConsole(() => agent.handleInstruction('jalankan test'));
     assert.equal(result, 'Test sudah dijalankan.');
     const toolMsgs = provider.receivedMessages[1].filter((m) => m.role === 'tool');
-    assert.ok(toolMsgs[0].content.includes('TEST-RAN-OK'), 'npm test harus benar-benar dieksekusi');
+    const toolContent = toolMsgs[0]?.content ?? '(tidak ada tool message)';
+    if (!toolContent.includes('TEST-RAN-OK')) {
+      // Diagnostik CI Windows: hasil exec dicetak sebagai annotation GitHub
+      // (`::error::` dibaca runner → terlihat di UI PR tanpa menggali log
+      // mentah) — hanya saat gagal. Penyebab Windows di test ini sudah dua
+      // kali berganti (kutip `node -e`, lalu JSON path) dan log job tidak
+      // selalu bisa dibaca dari luar, jadi kegagalan berikutnya harus
+      // membawa serta isi hasil exec-nya.
+      const esc = (s: string) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+      console.log(`::error title=Research debug npm::${esc(toolContent.slice(0, 2000))}`);
+    }
+    assert.ok(toolContent.includes('TEST-RAN-OK'), 'npm test harus benar-benar dieksekusi');
 
     // Perintah mutasi di sesi yang sama tetap diblok.
     const rmCall = '```tool\n{"tool": "exec", "command": "rm -rf node_modules"}\n```';
@@ -331,7 +342,12 @@ test('integrasi agent: npm test jalan di research mode, rm diblok', async () => 
     );
     assert.equal(result2, 'Perintah ditolak, lanjut baca saja.');
     const toolMsgs2 = provider2.receivedMessages[1].filter((m) => m.role === 'tool');
-    assert.ok(toolMsgs2[0].content.includes('research mode aktif'));
+    const toolContent2 = toolMsgs2[0]?.content ?? '(tidak ada tool message)';
+    if (!toolContent2.includes('research mode aktif')) {
+      const esc = (s: string) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+      console.log(`::error title=Research debug rm::${esc(toolContent2.slice(0, 2000))}`);
+    }
+    assert.ok(toolContent2.includes('research mode aktif'));
   } finally {
     setWorkspaceRoot(null);
     rmSync(tmp, { recursive: true, force: true });
