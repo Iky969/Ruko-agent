@@ -32,7 +32,7 @@ class MockSequenceProvider implements LLMProvider {
   }
 }
 
-test('Circuit breaker: Simulasi 4 thought berturut tanpa tool call berhenti dengan error deskriptif', async () => {
+test('Episode counting: 4 thought berturut-turut tanpa tool call = 1 episode, TIDAK memicu breaker', async () => {
   const origDelay = process.env.RUKO_THOUGHT_LOOP_DELAY_MS;
   process.env.RUKO_THOUGHT_LOOP_DELAY_MS = '10';
   try {
@@ -44,21 +44,26 @@ test('Circuit breaker: Simulasi 4 thought berturut tanpa tool call berhenti deng
       thoughtOnly,
     ]);
 
-    const config = { ...DEFAULT_CONFIG };
+    // maxToolIterations kecil supaya test cepat: 6 giliran thought-only
+    // dalam SATU episode harus berjalan sampai batas iterasi, bukan breaker.
+    const config = { ...DEFAULT_CONFIG, maxToolIterations: 6 };
     const ctx = new Context(config);
     const agent = new Agent(ctx, provider, config);
 
     const result = await agent.handleInstruction('jalankan pemeriksaan tanpa tool');
 
-    assert.equal(
-      result,
-      'Agent terjebak dalam thought loop tanpa memanggil tool.',
-      'Harus berhenti dengan pesan error deskriptif yang ditentukan',
+    assert.ok(
+      !result.includes('terjebak dalam thought loop'),
+      'Satu episode thought-only tidak boleh memicu breaker',
+    );
+    assert.ok(
+      result.includes('reached max tool iterations'),
+      'Run berakhir di batas iterasi (maxIterations), bukan breaker',
     );
     assert.equal(
       provider.receivedMessages.length,
-      4,
-      'Loop harus berhenti tepat pada percobaan ke-4, bukan hang atau infinite loop',
+      6,
+      'Semua 6 iterasi dijalankan (mock mengulang reply thought-only)',
     );
   } finally {
     if (origDelay !== undefined) {
@@ -69,7 +74,7 @@ test('Circuit breaker: Simulasi 4 thought berturut tanpa tool call berhenti deng
   }
 });
 
-test('Circuit breaker: Jeda minimum (500ms-1s) diterapkan sebelum giliran berikutnya saat turn thought-only', async () => {
+test('Circuit breaker: Jeda minimum (500ms) diterapkan sebelum giliran berikutnya saat turn thought-only', async () => {
   const origDelay = process.env.RUKO_THOUGHT_LOOP_DELAY_MS;
   delete process.env.RUKO_THOUGHT_LOOP_DELAY_MS; // Memastikan menggunakan jeda default 500ms
   try {
@@ -81,7 +86,9 @@ test('Circuit breaker: Jeda minimum (500ms-1s) diterapkan sebelum giliran beriku
       thoughtOnly,
     ]);
 
-    const config = { ...DEFAULT_CONFIG };
+    // 4 giliran = 1 episode: breaker tidak menendang, run berakhir di
+    // batas iterasi setelah 4 jeda (4 x 500ms = 2000ms minimum).
+    const config = { ...DEFAULT_CONFIG, maxToolIterations: 4 };
     const ctx = new Context(config);
     const agent = new Agent(ctx, provider, config);
 
@@ -89,10 +96,12 @@ test('Circuit breaker: Jeda minimum (500ms-1s) diterapkan sebelum giliran beriku
     const result = await agent.handleInstruction('proses data berat');
     const elapsedMs = Date.now() - startTime;
 
-    assert.equal(result, 'Agent terjebak dalam thought loop tanpa memanggil tool.');
-    // 4 thought-only turns = 3 jeda antar turn (3 x 500ms = 1500ms minimum)
     assert.ok(
-      elapsedMs >= 1400,
+      result.includes('reached max tool iterations'),
+      'Satu episode berakhir di batas iterasi, bukan breaker',
+    );
+    assert.ok(
+      elapsedMs >= 1800,
       `Harus ada jeda minimum 500ms per turn thought-only (elapsed: ${elapsedMs}ms)`,
     );
   } finally {

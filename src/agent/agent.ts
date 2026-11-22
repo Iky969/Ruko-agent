@@ -46,6 +46,31 @@ import type { ScopeAmendmentManager } from '../core/approval/scopeAmendment.js';
 /** Safety cap on how many tool iterations one instruction may trigger (default 30). */
 export const DEFAULT_MAX_TOOL_ITERATIONS = 30;
 
+/**
+ * Gabungkan reasoning yang di-stream (termasuk reasoning_content native
+ * seperti DeepSeek) ke konten pesan assistant yang disimpan ke history,
+ * tanpa menduplikasi blok thought yang sudah ada di `raw`.
+ *
+ * Kenapa perlu: `raw` hanya memuat `content` dari provider — reasoning
+ * native tidak ada di sana. Tanpa ini, retry kehilangan seluruh hasil
+ * berpikir dan model berpikir ulang dari nol. Isi reasoning disimpan
+ * LENGKAP sebagai blok <thought> (keputusan Beverly: simpan dulu untuk
+ * saat ini, supaya retry bisa membaca reasoning sepenuhnya dari awal).
+ */
+export function withStoredReasoning(raw: string, streamedThought: string): string {
+  const rawContent = raw.trim();
+  const thought = streamedThought.trim();
+  const parts: string[] = [];
+  // Reasoning native belum ada di raw → simpan sebagai blok <thought>.
+  // Kalau raw sudah memuat thought yang sama (jalur content-based, parser
+  // sudah merutekan isi blok ke streamedThought), jangan duplikasi.
+  if (thought && !rawContent.includes(thought.slice(0, 200))) {
+    parts.push(`<thought>\n${thought}\n</thought>`);
+  }
+  if (rawContent) parts.push(rawContent);
+  return parts.length > 0 ? parts.join('\n') : '<thought></thought>';
+}
+
 /** §5.35 — same tool+args invoked more than this many times = likely loop. */
 const LOOP_REPEAT_LIMIT = 2;
 
@@ -583,7 +608,14 @@ export class Agent {
     this.callCounts.clear();
     this.consecutiveRepeatCount = 0;
     this.lastCallSignature = null;
-    let consecutiveThoughtOnlyCount = 0;
+    // Episode counting (issue DeepSeek thought-loop): giliran thought-only
+    // yang berurutan TANPA output teks / tool call di antaranya dihitung
+    // SATU episode berpikir — bukan satu hitungan breaker per giliran.
+    // Breaker naik hanya saat episode BARU dimulai, dan menendang setelah
+    // 4 episode terpisah. Di dalam satu episode, retry dibatasi oleh
+    // maxIterations yang sudah ada (default 30).
+    let thoughtOnlyEpisodes = 0;
+    let inThoughtEpisode = false;
 
     try {
       for (let i = 0; i < maxIterations; i += 1) {
@@ -601,15 +633,16 @@ export class Agent {
         const mdFormatter = new TerminalMarkdownFormatter();
 
         // Fase 3: panel Reasoning TERPISAH dari log tool call — box section
-        // sendiri, default COLLAPSED ("• Thought for Xs"), expand/collapse
-        // via Ctrl+R. Env RUKO_SHOW_REASONING=1 tetap memaksa expanded.
+        // sendiri, default COLLAPSED (box ringkas, maks 3 baris isi),
+        // expand/collapse via Ctrl+R. Env RUKO_SHOW_REASONING=1 tetap
+        // memaksa expanded (box penuh).
         const showFullReasoning =
           process.env.RUKO_SHOW_REASONING === '1' || process.env.RUKO_REASONING === '1';
         const reasoningPanel = new ReasoningPanel({
           getMode: () =>
             showFullReasoning || this.reasoningExpanded ? 'expanded' : 'collapsed',
           // "Y tokens" HANYA dicetak bila API usage tersedia dari provider;
-          // selain itu null → baris collapsed cukup "Thought for Xs".
+          // selain itu null → footer box collapsed cukup "Thought for Xs".
           getTokens: () =>
             (this.llmProvider as { lastUsage?: { completionTokens?: number } | null }).lastUsage
               ?.completionTokens ?? null,
@@ -695,6 +728,8 @@ export class Agent {
         finishThinking();
 
         if (malformedBlocks.length > 0 && calls.length === 0) {
+          // Upaya tool call (walau malformed) menutup episode thought-only.
+          inThoughtEpisode = false;
           if (process.env.DEBUG || process.env.RUKO_DEBUG) {
             console.error(`[DEBUG] Malformed tool-call detected: ${malformedBlocks.join('; ')}`);
           }
@@ -722,20 +757,32 @@ export class Agent {
             /<thought>|<think>|\*Thought:/i.test(raw) ||
             Boolean((this.llmProvider as { lastReasoning?: string | null }).lastReasoning);
 
-          // Circuit breaker untuk thought loop (feedback.txt item 2):
-          // Jika agent menghasilkan respons "thought" tanpa tool_calls DAN tanpa teks jawaban ke user
-          // sebanyak 3-4 kali berturut-turut dalam satu turn, paksa loop berhenti dengan error deskriptif.
+          // Output teks yang terlihat menutup episode thought-only yang
+          // sedang berjalan (jawaban akhir mengakhiri run; nudge lanjutan
+          // seperti actionNudge/emptyFollowUp melanjutkan run di luar episode).
+          if (text.trim()) inThoughtEpisode = false;
+
+          // Circuit breaker untuk thought loop (feedback.txt item 2),
+          // dihitung per EPISODE: giliran thought-only berurutan tanpa
+          // output/tool di antaranya adalah satu episode yang sama.
+          // Breaker menendang setelah 4 episode thought-only yang TERPISAH
+          // (dipisahkan oleh output teks atau tool call), bukan setelah 4
+          // giliran — model reasoning (mis. DeepSeek) yang berpikir panjang
+          // tidak boleh dihukum karena satu episode berpikirnya panjang.
           if (hasThought && !text.trim()) {
-            consecutiveThoughtOnlyCount += 1;
-            if (consecutiveThoughtOnlyCount >= 4) {
-              if (tree.isTreeActive) {
-                tree.finish('Agent terjebak dalam thought loop');
+            if (!inThoughtEpisode) {
+              thoughtOnlyEpisodes += 1;
+              inThoughtEpisode = true;
+              if (thoughtOnlyEpisodes >= 4) {
+                if (tree.isTreeActive) {
+                  tree.finish('Agent terjebak dalam thought loop');
+                }
+                const errMsg = 'Agent terjebak dalam thought loop tanpa memanggil tool.';
+                this.lastResponseStreamed = false;
+                lastRawResponse = errMsg;
+                lastHadToolCalls = tree.currentStep > 0;
+                return errMsg;
               }
-              const errMsg = 'Agent terjebak dalam thought loop tanpa memanggil tool.';
-              this.lastResponseStreamed = false;
-              lastRawResponse = errMsg;
-              lastHadToolCalls = tree.currentStep > 0;
-              return errMsg;
             }
 
             // Tambahkan jeda minimum (500ms-1s) sebelum mengirim giliran berikutnya jika turn sebelumnya
@@ -763,16 +810,30 @@ export class Agent {
               return '';
             }
 
+            // Simpan reasoning LENGKAP ke history sesi (keputusan Beverly):
+            // pesan assistant memuat isi reasoning sebagai blok <thought>,
+            // supaya saat retry agent bisa membaca reasoning itu sepenuhnya
+            // dari awal — bukan placeholder kosong. Ini menambah isi context,
+            // tapi itu yang diminta untuk saat ini.
             messages.push({
               role: 'assistant',
-              content: raw.trim() || '<thought></thought>',
+              content: withStoredReasoning(raw, streamedThought),
               timestamp: new Date().toISOString(),
             });
+            // Nudge lanjutan dalam satu episode: minta model MELANJUTKAN,
+            // bukan mengulang berpikir dari awal. Kasus terpotong
+            // (finish_reason=length, mis. reasoning DeepSeek melebihi
+            // maxOutputTokens) mendapat nudge "lanjutkan dari tempat
+            // berhenti" supaya retry bisa maju tanpa reasoning lama.
+            const finishReason = this.llmProvider.lastFinishReason ?? 'stop';
+            const truncated = finishReason === 'length';
             messages.push({
               role: 'user',
-              content: endedInThought
-                ? 'Blok <thought> kamu belum ditutup. Tutup dulu dengan </thought>, lalu panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir langsung kepada pengguna.'
-                : 'Fase thinking telah selesai. Silakan panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir langsung kepada pengguna.',
+              content: truncated
+                ? 'Respons kamu terpotong di tengah berpikir karena batas output tercapai. Lanjutkan dari tempat kamu berhenti: ringkas kesimpulan sementaramu dalam satu kalimat, lalu langsung panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir. Jangan mengulang proses berpikir dari awal.'
+                : endedInThought
+                  ? 'Blok <thought> kamu belum ditutup. Tutup dulu dengan </thought>, lalu panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir langsung kepada pengguna.'
+                  : 'Fase thinking telah selesai. Lanjutkan dari kesimpulan terakhirmu: panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir langsung kepada pengguna. Jangan mengulang analisis yang sama dari awal.',
               timestamp: new Date().toISOString(),
             });
             continue;
@@ -838,7 +899,8 @@ export class Agent {
         }
 
         hasSeparatedFromTools = false;
-        consecutiveThoughtOnlyCount = 0;
+        // Tool call menutup episode thought-only yang sedang berjalan.
+        inThoughtEpisode = false;
 
         for (const call of calls) {
           if (MUTATING_TOOLS.has(call.tool)) {
@@ -848,7 +910,9 @@ export class Agent {
 
         // Text streamed before a tool call needs a line break before the logs.
         if (iterStreamed) process.stdout.write('\n');
-        const assistantContent = raw.trim();
+        // Simpan reasoning ke history juga untuk giliran tool call, supaya
+        // alasan di balik tool call tidak hilang dari sesi.
+        const assistantContent = withStoredReasoning(raw, streamedThought);
         const toolCalls = calls.map((c, idx) => ({
           id: (typeof c.id === 'string' && c.id.trim())
             ? c.id.trim()

@@ -103,12 +103,31 @@ test('Reasoning text does not leak into output stream or final assistant message
     assert.ok(!reply.includes('INTERNAL_REASONING_SECRET_KEY_9999'), 'reasoning must not leak to assistant response');
     assert.ok(reply.includes('Here is the final answer.'));
 
-    // 2. Permanent log lines in stdoutWrites MUST NOT contain raw reasoning text
+    // 2. Reasoning tampil HANYA di dalam box Ruko di layar — tidak di luar box,
+    //    dan tag <think> tidak pernah tercetak (aturan baru: box terlihat, bukan
+    //    disembunyikan seperti perilaku collapsed lama).
     const permanentLog = stdoutWrites
       .filter((w) => !w.startsWith('\r')) // ignore dynamic in-place updates
-      .join('');
-    assert.ok(!permanentLog.includes('INTERNAL_REASONING_SECRET_KEY_9999'), 'raw reasoning must not leak into permanent history');
-    assert.ok(permanentLog.includes('• Thought for'), 'summary line must be present in history');
+      .join('')
+      .replace(/\u001b\[\d+m/g, '');
+    assert.ok(permanentLog.includes('┌─Ruko'), 'box Ruko hadir di layar');
+    assert.ok(permanentLog.includes('Thought for'), 'footer box hadir di layar');
+    assert.ok(
+      permanentLog.includes('INTERNAL_REASONING_SECRET_KEY_9999'),
+      'isi reasoning terlihat di dalam box',
+    );
+    assert.ok(!permanentLog.includes('<think>'), 'tag <think> tidak tercetak');
+    assert.ok(!permanentLog.includes('<thought>'), 'tag <thought> tidak tercetak');
+    const beforeBox = permanentLog.slice(0, permanentLog.indexOf('┌─Ruko'));
+    const afterBox = permanentLog.slice(permanentLog.lastIndexOf('┘') + 1);
+    assert.ok(
+      !beforeBox.includes('INTERNAL_REASONING_SECRET_KEY_9999'),
+      'reasoning tidak muncul sebelum box',
+    );
+    assert.ok(
+      !afterBox.includes('INTERNAL_REASONING_SECRET_KEY_9999'),
+      'reasoning tidak muncul setelah box',
+    );
   } finally {
     process.stdout.write = origWrite;
     console.log = origLog;

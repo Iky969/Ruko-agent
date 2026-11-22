@@ -195,10 +195,12 @@ test('renderReasoningBox renders framed box with proper borders and width', () =
   const plain = stripAnsi(box);
   const lines = plain.split('\n');
 
-  assert.ok(lines[0].startsWith('┌─ Reasoning ──'));
-  assert.ok(lines[lines.length - 1].startsWith('└─'));
+  assert.ok(lines[0].startsWith('┌─Ruko'));
+  assert.ok(lines[0].endsWith('┐'));
+  assert.ok(lines[lines.length - 1].startsWith('└'));
+  assert.ok(lines[lines.length - 1].endsWith('┘'));
   for (let i = 1; i < lines.length - 1; i++) {
-    assert.ok(lines[i].startsWith('│ '));
+    assert.ok(lines[i].startsWith('    '));
   }
 
   for (const line of lines) {
