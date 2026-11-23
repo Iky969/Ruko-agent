@@ -1,8 +1,7 @@
 import { createInterface } from 'node:readline/promises';
 import { dim, whiteBright, bgBlue, green, red, yellow, bold } from './ui.js';
-import { missingConfigFields } from '../agent/llm.js';
-import { isHostnameOrSubdomain } from './config.js';
-import { createLineEditor } from './tui.js';
+import { createProvider, detectProviderKindDetailed, missingConfigFields } from '../agent/llm.js';
+import { createLineEditor, SelectorItem, SelectorOptions } from './tui.js';
 
 /**
  * Interactive first-time setup wizard.
@@ -52,7 +51,21 @@ export async function runSetupWizard(probe?: ConnectionProbe, options: SetupOpti
           question: async (q) => (await editor.readLine({ prompt: q })) ?? '',
           readSecret: async (q) => (await editor.readLine({ prompt: q, mask: true })) ?? '',
         },
-        setupOpts,
+        {
+          ...setupOpts,
+          listModels:
+            setupOpts.listModels ??
+            (async (r) => {
+              const p = createProvider({
+                apiKey: r.apiKey,
+                baseUrl: r.baseUrl,
+                model: r.model,
+                provider: r.provider,
+              });
+              return (await p.listModels?.()) ?? [];
+            }),
+          selectModel: setupOpts.selectModel ?? ((opts) => editor.askSelector(opts)),
+        },
       );
     } finally {
       editor.close();
@@ -70,6 +83,60 @@ export interface SetupOptions {
   probe?: ConnectionProbe;
   /** When true, explicitly prompts the user to select provider type (openai-compatible, anthropic, gemini). */
   askProvider?: boolean;
+  /** Lists models for the verified result (wizard model picker after a successful probe). */
+  listModels?: (result: SetupResult) => Promise<string[]>;
+  /** Opens the scrollable model picker (TTY editor hook; absent = no picker, typed model is used). */
+  selectModel?: (options: SelectorOptions) => Promise<string | null>;
+}
+
+/** Id of the "type the model id manually" entry at the bottom of the model picker. */
+export const MODEL_MANUAL_ENTRY_ID = '__manual__';
+
+/**
+ * Scrollable model picker: full model list + a manual-entry row at the
+ * bottom, default = current model. Returns the chosen model id, or null
+ * when the list is empty, the user cancels, or they pick manual entry —
+ * callers fall back to the typed model in all three cases.
+ */
+export async function pickModelWithSelector(
+  models: string[],
+  currentModel: string,
+  select: (options: SelectorOptions) => Promise<string | null>,
+): Promise<string | null> {
+  if (models.length === 0) return null;
+  const items: SelectorItem[] = models.map((m) => ({
+    id: m,
+    label: m,
+    description: m === currentModel ? 'Model saat ini' : `Model ${m}`,
+  }));
+  items.push({
+    id: MODEL_MANUAL_ENTRY_ID,
+    label: 'Ketik ID model manual…',
+    description: 'Tulis nama model sendiri.',
+  });
+  const chosen = await select({
+    title: 'Pilih Model',
+    items,
+    defaultId: currentModel,
+    pageSize: 20,
+    filterable: true,
+  });
+  if (!chosen || chosen === MODEL_MANUAL_ENTRY_ID) return null;
+  return chosen;
+}
+
+/** Human label for a provider kind, used by the auto-detect line. */
+export function providerKindLabel(kind: string): string {
+  switch (kind) {
+    case 'anthropic':
+      return 'anthropic (Anthropic Claude API)';
+    case 'gemini':
+      return 'gemini (Google Gemini API)';
+    case 'responses':
+      return 'responses (Codex / Responses API)';
+    default:
+      return 'openai-compatible (Ollama, LM Studio, vLLM, OpenAI, Groq, dll.)';
+  }
 }
 
 /**
@@ -138,29 +205,45 @@ export async function promptSetup(
 
     let provider: string | undefined;
     if (options.askProvider) {
-      const defaultProvider = (
-        isHostnameOrSubdomain(baseUrl, 'anthropic.com') || model.toLowerCase().startsWith('claude-')
-          ? 'anthropic'
-          : isHostnameOrSubdomain(baseUrl, 'googleapis.com') || model.toLowerCase().startsWith('gemini-')
-            ? 'gemini'
-            : 'openai-compatible'
-      );
+      // Auto-deteksi dari base URL + model (satu sumber kebenaran di
+      // detectProviderKindDetailed): ditampilkan sebelum daftar manual —
+      // Enter memakai yang terdeteksi, 1/2/3/4/nama menimpa manual.
+      // Keyakinan rendah ditampilkan eksplisit; yang memverifikasi tebakan
+      // adalah probe koneksi, bukan tebakan ini.
+      const detected = detectProviderKindDetailed(baseUrl, model);
+      const defaultProvider = detected.kind;
+      const lowConfidenceNote =
+        detected.confidence === 'low'
+          ? ' (keyakinan rendah — probe koneksi yang akan memastikan.)'
+          : '';
       try {
+        console.log(
+          dim(`  Terdeteksi: ${providerKindLabel(detected.kind)} — ${detected.reason}.${lowConfidenceNote}`),
+        );
         console.log(dim('  Pilih tipe provider:'));
         console.log(dim('    1) openai-compatible (Ollama, LM Studio, vLLM, OpenAI, Groq, dll.)'));
         console.log(dim('    2) anthropic (Anthropic Claude API)'));
         console.log(dim('    3) gemini (Google Gemini API)'));
-        const pChoice = cleanInput(await rl.question(`${green(`  Provider [1/2/3 atau nama] (default: ${defaultProvider}): `)}`));
+        console.log(dim('    4) responses (Codex / Responses API)'));
+        const pChoice = cleanInput(await rl.question(`${green(`  Provider [Enter=terdeteksi: ${defaultProvider}/1/2/3/4 atau nama] (default: ${defaultProvider}): `)}`));
         const pLower = pChoice.toLowerCase();
         if (pChoice === '2' || pLower === 'anthropic' || pLower === 'claude') {
           provider = 'anthropic';
         } else if (pChoice === '3' || pLower === 'gemini' || pLower === 'google') {
           provider = 'gemini';
+        } else if (
+          pChoice === '4' ||
+          pLower === 'responses' ||
+          pLower === 'responses-codex' ||
+          pLower === 'codex' ||
+          pLower === 'openai-responses'
+        ) {
+          provider = 'responses';
         } else if (pChoice === '1' || pLower === 'openai-compatible' || pLower === 'openai' || pLower === 'ollama') {
           provider = 'openai-compatible';
         } else if (!pChoice || pLower === 's' || pLower === 'simpan') {
           provider = defaultProvider;
-        } else if (/^[a-zA-Z0-9_-]+$/.test(pChoice) && (pLower.includes('openai') || pLower.includes('anthropic') || pLower.includes('gemini'))) {
+        } else if (/^[a-zA-Z0-9_-]+$/.test(pChoice) && (pLower.includes('openai') || pLower.includes('anthropic') || pLower.includes('gemini') || pLower.includes('responses') || pLower.includes('codex'))) {
           provider = pChoice;
         } else {
           provider = defaultProvider;
@@ -179,6 +262,30 @@ export async function promptSetup(
         const test = await options.probe(result);
         if (test.ok) {
           console.log(green(`  ✓ Terhubung ke ${test.message}`));
+          // Pemilih model: sesudah probe sukses, ambil daftar model dari
+          // provider lalu tawarkan pemilih scrollable. Pilihan diverifikasi
+          // ulang dengan probe; bila gagal, model terverifikasi semula
+          // dipertahankan. Daftar kosong/gagal/batal → model ketik dipakai.
+          if (options.listModels && options.selectModel) {
+            try {
+              const models = await options.listModels(result);
+              if (models.length > 0) {
+                const picked = await pickModelWithSelector(models, result.model, options.selectModel);
+                if (picked && picked !== result.model) {
+                  const verify = await options.probe({ ...result, model: picked });
+                  if (verify.ok) {
+                    result.model = picked;
+                  } else {
+                    console.log(
+                      dim(`  (Model ${picked} gagal diverifikasi — tetap memakai ${result.model}.)`),
+                    );
+                  }
+                }
+              }
+            } catch {
+              // Daftar model gagal diambil — model ketik tetap dipakai.
+            }
+          }
           break;
         }
         console.log(red(`  ✗ ${test.message}`));
@@ -217,6 +324,7 @@ export async function promptSetup(
               if (newProv) {
                 if (newProv === '2' || newProv.toLowerCase() === 'anthropic') result.provider = 'anthropic';
                 else if (newProv === '3' || newProv.toLowerCase() === 'gemini') result.provider = 'gemini';
+                else if (newProv === '4' || newProv.toLowerCase() === 'responses' || newProv.toLowerCase() === 'codex') result.provider = 'responses';
                 else if (newProv === '1' || newProv.toLowerCase() === 'openai-compatible') result.provider = 'openai-compatible';
                 else result.provider = newProv;
               }

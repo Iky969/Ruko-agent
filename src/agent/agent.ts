@@ -43,6 +43,23 @@ import { detectPlanOptionSelection } from '../core/plan.js';
 import { saveHostState, type HostState } from '../core/state/hostState.js';
 import type { ScopeAmendmentManager } from '../core/approval/scopeAmendment.js';
 
+/**
+ * True when a <thought>/<think> segment duplicates reasoning the provider
+ * already sent natively (same text via both channels). Containment check on
+ * whitespace-normalized text, only when the shorter side is at least 40
+ * characters — short overlaps (e.g. "I will check the file") are not proof
+ * of duplication. Used to drop the redundant tag segment from the panel.
+ */
+export function thoughtSegmentDuplicatesNative(tagText: string, nativeText: string): boolean {
+  const norm = (s: string): string => s.replace(/\s+/g, ' ').trim();
+  const tag = norm(tagText);
+  const native = norm(nativeText);
+  if (!tag || !native) return false;
+  const shorter = tag.length <= native.length ? tag : native;
+  if (shorter.length < 40) return false;
+  return native.includes(tag) || tag.includes(native);
+}
+
 /** Safety cap on how many tool iterations one instruction may trigger (default 30). */
 export const DEFAULT_MAX_TOOL_ITERATIONS = 30;
 
@@ -218,6 +235,8 @@ export class Agent {
   private readonly maxConsecutiveFailedTurns = 2;
   /** Fase 3: panel Reasoning aktif saat ini (null di luar turn). */
   private reasoningPanel: ReasoningPanel | null = null;
+  /** Thought-source detection already attempted once this session (null stays null — no re-probe per turn). */
+  private thoughtSourceProbed = false;
   /** Fase 3: mode expand/collapse panel Reasoning untuk turn berjalan. */
   private reasoningExpanded = false;
   /** Fase 4: mode expand/collapse block detail diff (Ctrl+D). */
@@ -486,6 +505,7 @@ export class Agent {
         workspaceRoot: ws,
         flavor: envProfile.flavor,
       }),
+      thoughtSource: this.sessionState.thoughtSource,
     });
   }
 
@@ -556,6 +576,31 @@ export class Agent {
 
   /** LLM mode: agent loop with tool calls, streaming the visible reply. */
   private async runWithLlm(instruction: string, signal?: AbortSignal): Promise<string> {
+    // Fase 3: setiap instruksi baru mulai dengan panel Reasoning COLLAPSED.
+    // Reset ini HARUS sinkron di awal turn, sebelum await pertama di bawah —
+    // Ctrl+R yang ditekan tepat setelah handleInstruction() dipanggil harus
+    // mendarat SETELAH reset, bukan dihapus olehnya.
+    this.reasoningExpanded = false;
+    this.reasoningPanel = null;
+    this.diffDetailExpanded = false;
+    // Fase 4: log baris mutasi turn ini — sumber re-render toggle Ctrl+D.
+    this.mutationSummaryBuffer = [];
+
+    // Single thought source, decided once per session from EMPIRICAL
+    // provider detection (never the model name). true → native only (the
+    // system prompt drops the <thought> mandate); false → <thought> fallback;
+    // null → unknown, the adaptive latch below decides from the first real
+    // turn. No chat probe at session start, by design.
+    if (this.sessionState.thoughtSource === undefined && !this.thoughtSourceProbed) {
+      this.thoughtSourceProbed = true;
+      try {
+        const visible = await this.llmProvider.detectVisibleReasoning?.();
+        if (visible === true) this.sessionState.thoughtSource = 'native';
+        else if (visible === false) this.sessionState.thoughtSource = 'thought-tag';
+      } catch {
+        // Detection failure = unknown; the latch decides from real turns.
+      }
+    }
     const history = this.ctx.window(this.config.maxContextChars).filter(
       (m) => m.role !== 'tool_call' && m.role !== 'tool'
     );
@@ -596,13 +641,6 @@ export class Agent {
 
     const maxIterations = this.config.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
     let hasSeparatedFromTools = false;
-    // Fase 3: setiap instruksi baru mulai dengan panel Reasoning COLLAPSED;
-    // state expand hiduk di instance agar Ctrl+R bisa men-toggle saat turn jalan.
-    this.reasoningExpanded = false;
-    this.reasoningPanel = null;
-    this.diffDetailExpanded = false;
-    // Fase 4: log baris mutasi turn ini — sumber re-render toggle Ctrl+D.
-    this.mutationSummaryBuffer = [];
 
     this.callHistory = [];
     this.callCounts.clear();
@@ -671,13 +709,27 @@ export class Agent {
         // spill into the reasoning ticker as ordinary text.
         const thoughtReveal = new RevealFilter((text) => reasoningPanel.feed(text));
         let streamedThought = '';
+        // Native reasoning text accumulated this turn (provider onThought).
+        let nativeThoughtText = '';
+        let nativeThoughtSeen = false;
+        // Tag-thought segment buffered until its closing tag: a segment that
+        // duplicates native reasoning (same text via both channels) is
+        // dropped here, so the panel never renders the same thought twice.
+        let pendingTagSegment = '';
         const thoughtParser = new ThoughtStreamParser({
           onText: (text) => reveal.feed(text),
           onThought: (thoughtChunk) => {
-            streamedThought += thoughtChunk;
-            thoughtReveal.feed(thoughtChunk);
+            pendingTagSegment += thoughtChunk;
           },
           onThoughtEnd: () => {
+            if (pendingTagSegment) {
+              const segment = pendingTagSegment;
+              pendingTagSegment = '';
+              if (!thoughtSegmentDuplicatesNative(segment, nativeThoughtText)) {
+                streamedThought += segment;
+                thoughtReveal.feed(segment);
+              }
+            }
             // Fase 3: akhiri SEGMEN reasoning ini (baris collapsed / box per
             // segmen) tanpa mematikan panel — <thought> berikutnya buka segmen baru.
             reasoningPanel.finishSegment();
@@ -694,6 +746,8 @@ export class Agent {
             onToken: (token) => thoughtParser.feed(token),
             onThought: (chunk) => {
               streamedThought += chunk;
+              nativeThoughtText += chunk;
+              nativeThoughtSeen = true;
               thoughtReveal.feed(chunk);
             },
             signal,
@@ -717,6 +771,13 @@ export class Agent {
           endedInThought = thoughtParser.isInThought();
           thoughtParser.end();
           thoughtReveal.end();
+          // Adaptive latch: detection was null (unknown backend), so the
+          // first real turn is the evidence — a stream carrying native
+          // reasoning upgrades the session to 'native', one way only, from
+          // the next turn (the prompt is built once per handleInstruction).
+          if (this.sessionState.thoughtSource === undefined && nativeThoughtSeen) {
+            this.sessionState.thoughtSource = 'native';
+          }
           finishThinking();
           reveal.end();
         }
