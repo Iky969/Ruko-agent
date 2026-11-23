@@ -39,7 +39,7 @@ import {
 } from './tools.js';
 import { getEnvProfile } from '../core/env.js';
 import { readMemorySafe } from '../core/memory.js';
-import { formatSkillsForPrompt, initDefaultSkills, loadSkillsContext, scanSkills, defaultSkillsDir, globalSkillsDir, type SkillDef } from '../core/skills.js';
+import { formatSkillsForPrompt, initDefaultSkills, loadSkillsContext, scanSkills, defaultSkillsDir, type SkillDef } from '../core/skills.js';
 import type { TieredGateResult } from '../core/verification/tieredGate.js';
 import { detectPlanOptionSelection } from '../core/plan.js';
 import { saveHostState, type HostState } from '../core/state/hostState.js';
