@@ -2232,6 +2232,35 @@ function malformedPrefixHold(text: string): number {
 }
 
 /**
+ * A `</tool>` closing tag, including the garbled forms a model sometimes
+ * emits (Beverly 2026-11-23: a valid `read_file` JSON was closed with
+ * `()>/tool>` instead of `</tool>`). The strict form is tried first.
+ */
+const TOOL_CLOSE_RE = /<\/tool\s*>|\(\)\s*>?\s*\/tool\s*>|(?:^|[}\n])\s*\/tool\s*>|<\/tool(?=[\s\n]|$)/;
+
+/** Index just past the closing tag of a `<tool>` block, or -1 if none is present yet. */
+function findToolCloseEnd(buffer: string): number {
+  const match = TOOL_CLOSE_RE.exec(buffer);
+  if (!match) return -1;
+  return match.index + match[0].length;
+}
+
+/**
+ * Repair a garbled `</tool>` closing tag a model sometimes emits (Beverly
+ * 2026-11-23: `()>/tool>`, bare `/tool>`, `</tool` without `>`). Only the
+ * closing-tag fragment is rewritten; the JSON body is left untouched, so a
+ * block whose JSON is invalid stays malformed. Used by parseToolCalls and
+ * stripToolBlocks so a valid call is not discarded (and its text does not
+ * leak into the visible reply) just because the closing tag is garbled.
+ */
+export function repairBrokenToolCloses(text: string): string {
+  return text
+    .replace(/\(\)\s*>?\s*\/tool\s*>/gi, '</tool>')
+    .replace(/<\/tool(?=[\s]|$)/gi, '</tool>')
+    .replace(/(^|[}\n])\s*\/tool\s*>/g, '$1</tool>');
+}
+
+/**
  * Protocol-aware streaming reveal filter.
  *
  * Feeds raw LLM tokens through `feed()`; emits only human-visible text to
@@ -2467,13 +2496,17 @@ export class RevealFilter {
       }
 
       if (this.hiddenType === 'tool_tag') {
-        const closeIdx = this.buffer.indexOf('</tool>');
-        if (closeIdx === -1) {
-          const hold = fencePrefixHold(this.buffer, '</tool>');
-          this.buffer = hold ? this.buffer.slice(this.buffer.length - hold) : '';
+        const closeEnd = findToolCloseEnd(this.buffer);
+        if (closeEnd === -1) {
+          // Hold a tail long enough to cover a closing tag split across
+          // chunks — the strict `</tool>` (7 chars) or a garbled
+          // `()>/tool>` (9 chars) — so the close is still recognised when
+          // the next chunk completes it.
+          const hold = Math.min(this.buffer.length, 12);
+          this.buffer = this.buffer.slice(this.buffer.length - hold);
           return;
         }
-        let rest = this.buffer.slice(closeIdx + 7);
+        let rest = this.buffer.slice(closeEnd);
         if (rest.startsWith('\r\n')) {
           rest = rest.slice(2);
         } else if (rest.startsWith('\n')) {

@@ -43,6 +43,93 @@ import { detectPlanOptionSelection } from '../core/plan.js';
 import { saveHostState, type HostState } from '../core/state/hostState.js';
 import type { ScopeAmendmentManager } from '../core/approval/scopeAmendment.js';
 
+// Pattern for a single line of "bare deliberation": the model thinking out
+// loud in the visible channel instead of emitting a tool call or a final
+// answer. See thought_leak.test.ts (Beverly, 2026-11-23 ~13:26 WIB): the
+// Ollama mimo session leaked its internal deliberation, every line prefixed
+// with `}...` ("I think I'm overthinking due to tool discipline.", "I need to
+// actually produce assistant final.", ...). A line matches when it is either
+// `}...`-prefixed (a marker that never appears in genuine answers) or when the
+// whole line is meta-talk about producing a tool call / final answer, or a
+// bare filler word ("Done.", "Proceed.", "(This is absurd).").
+const DELIBERATION_LINE_PATTERNS: RegExp[] = [
+  // Meta-talk about the act of producing output (substantive sentences never
+  // match these).
+  /\b(stuck in analysis|overthinking|end analysis|final channel|tool discipline|fenced block|tool call|assistant final|produce .* final|choose .* channel|write the tool call)\b/i,
+  /^(i (will|need to|think|just|have to|am|’m|'m)|i'm|i am)\b/i,
+  /^saya (akan|perlu|harus)\b/i,
+  // A line that is only a bare filler word / short imperative.
+  /^(end|done|okay|ok|go|now|proceed|final|no more|let'?s do|let'?s go|just output|do that|do it|lanjutkan|berpikir)\s*:?\.?$/i,
+  // A line that is only a parenthetical remark about the process.
+  /^\([^)]*\)\.?$/,
+];
+
+/** True when a line is deliberation rather than answer content. */
+function isDeliberationLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  // The `}...` prefix is the leak marker from the reported session: it never
+  // appears in genuine answers, so a line carrying it is always deliberation.
+  if (trimmed.startsWith('}...')) return true;
+  return DELIBERATION_LINE_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+/**
+ * True when the model's visible text is nothing but its own deliberation:
+ * every non-empty line is a deliberation line (see isDeliberationLine).
+ * A single line only counts when it carries the `}...` leak marker, so a
+ * legitimate one-word answer ("Done.", "Sudah.") is never misclassified.
+ */
+export function isBareDeliberation(text: string): boolean {
+  const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) return false;
+  if (lines.length === 1) return lines[0].startsWith('}...');
+  return lines.every((line) => isDeliberationLine(line));
+}
+
+/**
+ * Line-level router for the thought-leak prefix: while streaming, a complete
+ * line whose trimmed form starts with `}...` is routed to the thought sink
+ * (the reasoning panel) instead of the visible sink. All other lines pass
+ * through untouched. Partial lines are held until a newline arrives or end()
+ * is called, so a `}...` split across chunks is still routed correctly.
+ */
+export class DeliberationLineRouter {
+  private buffer = '';
+
+  constructor(
+    private readonly onVisible: (text: string) => void,
+    private readonly onThought: (text: string) => void,
+  ) {}
+
+  feed(text: string): void {
+    if (!text) return;
+    this.buffer += text;
+    let newlineIdx = this.buffer.indexOf('\n');
+    while (newlineIdx !== -1) {
+      const line = this.buffer.slice(0, newlineIdx + 1);
+      this.buffer = this.buffer.slice(newlineIdx + 1);
+      this.routeLine(line);
+      newlineIdx = this.buffer.indexOf('\n');
+    }
+  }
+
+  end(): void {
+    if (this.buffer) {
+      this.routeLine(this.buffer);
+      this.buffer = '';
+    }
+  }
+
+  private routeLine(line: string): void {
+    if (line.trim().startsWith('}...')) {
+      this.onThought(line);
+    } else {
+      this.onVisible(line);
+    }
+  }
+}
+
 /**
  * True when a <thought>/<think> segment duplicates reasoning the provider
  * already sent natively (same text via both channels). Containment check on
@@ -694,6 +781,10 @@ export class Agent {
           reasoningPanel.finish();
         };
 
+        // feedback.txt item 1b: reasoning chunks run through their OWN reveal
+        // filter, so a tool call emitted inside the thought stream can never
+        // spill into the reasoning ticker as ordinary text.
+        const thoughtReveal = new RevealFilter((text) => reasoningPanel.feed(text));
         const gate = new LineGate((text) => {
           finishThinking();
           process.stdout.write('\r\u001b[2K');
@@ -703,11 +794,14 @@ export class Agent {
           }
           process.stdout.write(mdFormatter.format(text));
         });
-        const reveal = new RevealFilter((text) => gate.push(text));
-        // feedback.txt item 1b: reasoning chunks run through their OWN reveal
-        // filter, so a tool call emitted inside the thought stream can never
-        // spill into the reasoning ticker as ordinary text.
-        const thoughtReveal = new RevealFilter((text) => reasoningPanel.feed(text));
+        // Thought-leak router (Beverly 2026-11-23): a `}...`-prefixed line is
+        // the model's deliberation spilling into the visible channel — route
+        // it to the reasoning panel instead of the visible output.
+        const leakRouter = new DeliberationLineRouter(
+          (text) => gate.push(text),
+          (text) => thoughtReveal.feed(text),
+        );
+        const reveal = new RevealFilter((text) => leakRouter.feed(text));
         let streamedThought = '';
         // Native reasoning text accumulated this turn (provider onThought).
         let nativeThoughtText = '';
@@ -780,6 +874,9 @@ export class Agent {
           }
           finishThinking();
           reveal.end();
+          // Flush the leak router's held partial line (it may be a `}...`
+          // deliberation line that belongs in the panel, not the answer).
+          leakRouter.end();
         }
         usage.completionChars += raw.length;
         const { calls, malformedBlocks } = parseToolCalls(raw);
@@ -817,6 +914,14 @@ export class Agent {
             extractThoughts(raw).length > 0 ||
             /<thought>|<think>|\*Thought:/i.test(raw) ||
             Boolean((this.llmProvider as { lastReasoning?: string | null }).lastReasoning);
+          // Bare deliberation (Beverly 2026-11-23): the model's visible text
+          // is nothing but its own deliberation — e.g. every line prefixed
+          // with `}...` ("I think I'm overthinking due to tool discipline.").
+          // It is NOT a final answer: treat it like a thought-only turn, so
+          // the breaker can fire instead of the leak being returned as the
+          // answer. Each such turn is its own episode (visible text was
+          // produced), so 4 deliberation turns in a row trip the breaker.
+          const bareDeliberation = isBareDeliberation(text);
 
           // Output teks yang terlihat menutup episode thought-only yang
           // sedang berjalan (jawaban akhir mengakhiri run; nudge lanjutan
@@ -830,7 +935,10 @@ export class Agent {
           // (dipisahkan oleh output teks atau tool call), bukan setelah 4
           // giliran — model reasoning (mis. DeepSeek) yang berpikir panjang
           // tidak boleh dihukum karena satu episode berpikirnya panjang.
-          if (hasThought && !text.trim()) {
+          // Giliran bare-deliberation dihitung sebagai episode sendiri
+          // (teks terlihat menutup episode sebelumnya), jadi 4 giliran
+          // deliberasi tanpa aksi menendang breaker.
+          if ((hasThought && !text.trim()) || bareDeliberation) {
             if (!inThoughtEpisode) {
               thoughtOnlyEpisodes += 1;
               inThoughtEpisode = true;
@@ -875,10 +983,18 @@ export class Agent {
             // pesan assistant memuat isi reasoning sebagai blok <thought>,
             // supaya saat retry agent bisa membaca reasoning itu sepenuhnya
             // dari awal — bukan placeholder kosong. Ini menambah isi context,
-            // tapi itu yang diminta untuk saat ini.
+            // tapi itu yang diminta untuk saat ini. Bare deliberation juga
+            // disimpan sebagai <thought> (bukan sebagai jawaban), supaya
+            // retry membacanya sebagai penalaran, bukan jawaban yang sudah
+            // diberikan.
+            const bareThought = bareDeliberation
+              ? [streamedThought.trim(), text.trim()].filter(Boolean).join('\n')
+              : '';
             messages.push({
               role: 'assistant',
-              content: withStoredReasoning(raw, streamedThought),
+              content: bareDeliberation
+                ? `<thought>\n${bareThought}\n</thought>`
+                : withStoredReasoning(raw, streamedThought),
               timestamp: new Date().toISOString(),
             });
             // Nudge lanjutan dalam satu episode: minta model MELANJUTKAN,
@@ -890,11 +1006,13 @@ export class Agent {
             const truncated = finishReason === 'length';
             messages.push({
               role: 'user',
-              content: truncated
-                ? 'Respons kamu terpotong di tengah berpikir karena batas output tercapai. Lanjutkan dari tempat kamu berhenti: ringkas kesimpulan sementaramu dalam satu kalimat, lalu langsung panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir. Jangan mengulang proses berpikir dari awal.'
-                : endedInThought
-                  ? 'Blok <thought> kamu belum ditutup. Tutup dulu dengan </thought>, lalu panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir langsung kepada pengguna.'
-                  : 'Fase thinking telah selesai. Lanjutkan dari kesimpulan terakhirmu: panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir langsung kepada pengguna. Jangan mengulang analisis yang sama dari awal.',
+              content: bareDeliberation
+                ? 'Penalaranmu barusan tampil sebagai jawaban terlihat tanpa memanggil tool atau memberi jawaban akhir. Jangan mengulang analisis itu: langsung panggil tool yang diperlukan melalui interface function call resmi, atau berikan jawaban akhir langsung kepada pengguna.'
+                : truncated
+                  ? 'Respons kamu terpotong di tengah berpikir karena batas output tercapai. Lanjutkan dari tempat kamu berhenti: ringkas kesimpulan sementaramu dalam satu kalimat, lalu langsung panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir. Jangan mengulang proses berpikir dari awal.'
+                  : endedInThought
+                    ? 'Blok <thought> kamu belum ditutup. Tutup dulu dengan </thought>, lalu panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir langsung kepada pengguna.'
+                    : 'Fase thinking telah selesai. Lanjutkan dari kesimpulan terakhirmu: panggil tool yang diperlukan melalui interface function call resmi atau berikan jawaban akhir langsung kepada pengguna. Jangan mengulang analisis yang sama dari awal.',
               timestamp: new Date().toISOString(),
             });
             continue;
