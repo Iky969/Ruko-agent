@@ -2,15 +2,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import type { Confirmer } from '../core/approval.js';
 import { join, relative as relativeFromCwd, resolve as resolvePath } from 'node:path';
 import { Context } from '../core/context.js';
-import { ALLOWED_API_KEY_ENV_VARS, isHostnameOrSubdomain, isPrivateOrLocalHost, saveConfig } from '../core/config.js';
-import { promptSetup, SetupResult } from '../core/wizard.js';
+import { ALLOWED_API_KEY_ENV_VARS, isPrivateOrLocalHost, saveConfig } from '../core/config.js';
+import { promptSetup, pickModelWithSelector, SetupResult } from '../core/wizard.js';
 import { bold, cyan, dim, formatDuration, formatK, green, renderBox, terminalWidth, visibleLength, yellow } from '../core/ui.js';
 import { listSnapshots, revertFile, undoLast } from '../core/undo.js';
 import { exportSessionTrajectory, listSessions, loadSession, saveSession, searchSessions } from '../core/session.js';
 import { checkMemoryWarning, clearMemory, hasMeaningfulMemory, readMemory } from '../core/memory.js';
 import { assertInsideWorkspace, assertNotSecurityCore, assertNotSensitivePath, getWorkspaceRoot, runToolCall } from './tools.js';
 import { AgentConfig, AgentMode, createDefaultSessionState, DEFAULT_AUTO_COMPRESS_THRESHOLD_CHARS, DEFAULT_CONFIG, DEFAULT_MAX_SESSION_TOOL_CALLS, MAX_AUTO_COMPRESS_THRESHOLD_CHARS, MAX_SESSION_TOOL_CALLS, ProviderProfile, ReasoningLevel, SessionState, UiMode } from '../types.js';
-import { ConnectionResult, createProvider, LLMProvider } from './llm.js';
+import { ConnectionResult, createProvider, detectProviderKind, LLMProvider } from './llm.js';
 import { allRoles } from './roles.js';
 
 import { scanSkills } from '../core/skills.js';
@@ -1431,6 +1431,18 @@ const COMMANDS: CommandDef[] = [
           try {
             const models = await env.llm.listModels();
             if (models.length > 0) {
+              // Bila hook selector ada (TTY), pakai pemilih scrollable yang
+              // sama dengan wizard; tanpa hook → perilaku lama (kotak 20 pertama).
+              // Batal / entri manual → tampilkan kotak lama seperti dulu.
+              if (env.select) {
+                const chosen = await pickModelWithSelector(models, env.llm.model, env.select);
+                if (chosen) {
+                  env.llm.setModel(chosen);
+                  env.updateConfig({ model: chosen });
+                  console.log(`Model diganti: ${chosen}`);
+                  return;
+                }
+              }
               const shown = models.slice(0, 20);
               console.log(
                 renderBox(`Models (${models.length}${models.length > shown.length ? ', 20 pertama' : ''})`, shown),
@@ -1521,39 +1533,33 @@ async function runSetupFlow(env: CommandEnv): Promise<void> {
     return;
   }
   const probe = async (r: SetupResult): Promise<ConnectionResult> => {
-    const rb = r.baseUrl.toLowerCase();
-    const ml = r.model.toLowerCase();
-    let pType: string | undefined = r.provider;
-    if (!pType) {
-      if (isHostnameOrSubdomain(rb, 'anthropic.com') || ml.startsWith('claude-')) {
-        pType = 'anthropic';
-      } else if (isHostnameOrSubdomain(rb, 'googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
-        pType = 'gemini';
-      } else {
-        pType = 'openai-compatible';
-      }
-    }
+    const pType = r.provider ?? detectProviderKind(r.baseUrl, r.model);
     const testProvider = createProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model, provider: pType });
     if (testProvider.testConnection) {
-      return testProvider.testConnection();
+      const res = await testProvider.testConnection();
+      if (res.ok && res.endpoint) {
+        res.message = `${res.message} (${res.endpoint === 'responses' ? 'Responses API' : 'Chat Completions'})`;
+      }
+      return res;
     }
     return { ok: true, message: r.model };
   };
-  const result = await promptSetup({ question: env.ask, readSecret: env.askSecret }, { probe, askProvider: true });
+  const result = await promptSetup(
+    { question: env.ask, readSecret: env.askSecret },
+    {
+      probe,
+      askProvider: true,
+      listModels: async (r) => {
+        const p = createProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model, provider: r.provider });
+        return (await p.listModels?.()) ?? [];
+      },
+      selectModel: env.select,
+    },
+  );
   if (!result) return;
 
-  let providerType: string | undefined = result.provider;
-  if (!providerType) {
-    const rawBase = result.baseUrl.toLowerCase();
-    const modelLower = result.model.toLowerCase();
-    if (isHostnameOrSubdomain(rawBase, 'anthropic.com') || modelLower.startsWith('claude-')) {
-      providerType = 'anthropic';
-    } else if (isHostnameOrSubdomain(rawBase, 'googleapis.com') || (!rawBase && modelLower.startsWith('gemini-'))) {
-      providerType = 'gemini';
-    } else {
-      providerType = 'openai-compatible';
-    }
-  }
+  const providerType: string | undefined =
+    result.provider ?? detectProviderKind(result.baseUrl, result.model);
 
   const patch: Partial<AgentConfig> = {
     apiKey: result.apiKey,

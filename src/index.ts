@@ -2,9 +2,9 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { Agent } from './agent/agent.js';
-import { createProvider } from './agent/llm.js';
+import { createProvider, detectProviderKind } from './agent/llm.js';
 import { Confirmer, guardedExecute, isHighRiskDangerousCommand } from './core/approval.js';
-import { defaultConfigPath, isHostnameOrSubdomain, loadResolvedConfig, redactApiKey, saveConfig } from './core/config.js';
+import { defaultConfigPath, loadResolvedConfig, redactApiKey, saveConfig } from './core/config.js';
 import { Context } from './core/context.js';
 import { SystemLoop } from './core/loop.js';
 import { summarizeLog } from './core/summarizer.js';
@@ -553,21 +553,14 @@ async function main(): Promise<void> {
   // Interactive mode
   if (process.stdin.isTTY && needsSetup(config)) {
     const setup = await runSetupWizard(async (r) => {
-      let pType: string | undefined = r.provider;
-      if (!pType) {
-        const rb = r.baseUrl.toLowerCase();
-        const ml = r.model.toLowerCase();
-        if (isHostnameOrSubdomain(rb, 'anthropic.com') || ml.startsWith('claude-')) {
-          pType = 'anthropic';
-        } else if (isHostnameOrSubdomain(rb, 'googleapis.com') || (!rb && ml.startsWith('gemini-'))) {
-          pType = 'gemini';
-        } else {
-          pType = 'openai-compatible';
-        }
-      }
+      const pType = r.provider ?? detectProviderKind(r.baseUrl, r.model);
       const testProvider = createProvider({ apiKey: r.apiKey, baseUrl: r.baseUrl, model: r.model, provider: pType });
       if (testProvider.testConnection) {
-        return testProvider.testConnection();
+        const res = await testProvider.testConnection();
+        if (res.ok && res.endpoint) {
+          res.message = `${res.message} (${res.endpoint === 'responses' ? 'Responses API' : 'Chat Completions'})`;
+        }
+        return res;
       }
       return { ok: true, message: r.model };
     });

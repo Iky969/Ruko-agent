@@ -1562,6 +1562,72 @@ export class GeminiProvider implements LLMProvider {
   }
 }
 
+/**
+ * Detailed provider-kind detection for the wizard: same routing as
+ * detectProviderKind, plus a confidence level and a human reason so the
+ * wizard can show what it guessed — and how sure it is — before asking.
+ * high: host anthropic.com / googleapis.com / chatgpt.com, path /responses,
+ * or an explicit provider name. medium: claude-/gemini- model prefix, or
+ * localhost/127.0.0.1 (local OpenAI-compatible endpoint). low: no hints at
+ * all → openai-compatible as the neutral default.
+ */
+export interface ProviderDetection {
+  kind: ProviderKind;
+  confidence: 'high' | 'medium' | 'low';
+  reason: string;
+}
+
+export function detectProviderKindDetailed(
+  baseUrl: string,
+  model: string,
+  provider?: string,
+): ProviderDetection {
+  const p = (provider ?? '').trim().toLowerCase();
+  if (p === 'anthropic' || p === 'claude') {
+    return { kind: 'anthropic', confidence: 'high', reason: 'provider anthropic dipilih eksplisit' };
+  }
+  if (p === 'gemini' || p === 'google') {
+    return { kind: 'gemini', confidence: 'high', reason: 'provider gemini dipilih eksplisit' };
+  }
+  if (p === 'responses' || p === 'responses-codex' || p === 'codex' || p === 'openai-responses') {
+    return { kind: 'responses', confidence: 'high', reason: 'provider responses dipilih eksplisit' };
+  }
+  const rawBase = (baseUrl || '').toLowerCase().replace(/^["'`]+|["'`]+$/g, '').trim();
+  const m = (model || '').toLowerCase();
+  if (isHostnameOrSubdomain(rawBase, 'anthropic.com')) {
+    return { kind: 'anthropic', confidence: 'high', reason: 'host anthropic.com' };
+  }
+  if (isHostnameOrSubdomain(rawBase, 'googleapis.com')) {
+    return { kind: 'gemini', confidence: 'high', reason: 'host googleapis.com' };
+  }
+  if (isHostnameOrSubdomain(rawBase, 'chatgpt.com')) {
+    return { kind: 'responses', confidence: 'high', reason: 'host chatgpt.com' };
+  }
+  if (rawBase.replace(/\/+$/, '').endsWith('/responses')) {
+    return { kind: 'responses', confidence: 'high', reason: 'path base URL berakhir /responses' };
+  }
+  if (m.startsWith('claude-')) {
+    return { kind: 'anthropic', confidence: 'medium', reason: "model berawalan 'claude-'" };
+  }
+  if (m.startsWith('gemini-')) {
+    return { kind: 'gemini', confidence: 'medium', reason: "model berawalan 'gemini-'" };
+  }
+  let host = '';
+  try {
+    host = new URL(rawBase).hostname.toLowerCase();
+  } catch {
+    host = '';
+  }
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
+    return { kind: 'openai-compatible', confidence: 'medium', reason: 'endpoint lokal (localhost)' };
+  }
+  return {
+    kind: 'openai-compatible',
+    confidence: 'low',
+    reason: 'tidak ada petunjuk provider — default openai-compatible',
+  };
+}
+
 /** Factory: returns the configured provider (extend here for more backends). */
 export function createProvider(
   config: Partial<AgentConfig> = {},
