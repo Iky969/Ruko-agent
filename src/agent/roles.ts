@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { UiMode } from '../types.js';
+import { UiMode, ThoughtSource } from '../types.js';
 import { formatMemoryForPrompt } from '../core/memory.js';
 import { sanitizePath } from '../core/prompt/sanitizer.js';
 
@@ -249,6 +249,12 @@ export interface PromptLayers {
   memory?: string | null;
   skills?: string | null;
   environment?: string | null;
+  /**
+   * Single thought source for the session. 'native' drops the <thought>
+   * mandate from the prompt (the provider already returns visible reasoning);
+   * 'thought-tag' / undefined keeps the legacy prompt byte-identical.
+   */
+  thoughtSource?: ThoughtSource;
 }
 
 /** Input for {@link formatEnvironmentContext} — pure data, mudah diuji tanpa mock OS. */
@@ -368,9 +374,43 @@ export function modeAddendum(mode: UiMode): string | null {
   return null;
 }
 
+/**
+ * Native-thought variant of the core identity + tool rules: the provider
+ * already returns visible reasoning, so the <thought> mandate is dropped —
+ * otherwise the model writes the same thought twice (native + tag). Only
+ * the mandate sentences are rewritten; everything else stays identical, so
+ * the default / 'thought-tag' prompt is byte-identical to the legacy one.
+ */
+export function coreIdentityForThoughtSource(source: ThoughtSource | undefined): { identity: string; toolRules: string } {
+  if (source !== 'native') return { identity: CORE_IDENTITY, toolRules: TOOL_RULES };
+  const identity = CORE_IDENTITY
+    .replace(
+      '- Before calling any tool or concluding your response, you MUST output a brief reasoning block enclosed in <thought>...</thought> (e.g. <thought>I will inspect PROGRESS.md to find reported bugs</thought>).\n',
+      '- Before calling any tool or concluding your response, reason briefly first — your reasoning is already provided natively by the provider and shown separately, so do NOT write a <thought>...</thought> block.\n',
+    )
+    .replace(
+      '- In your <thought> block, explicitly state your reasoning, planned next steps, and what tool you will use.\n',
+      '- In your reasoning, explicitly state your planned next steps and what tool you will use.\n',
+    )
+    .replace(
+      '- If a tool returns an error or empty result, you MUST explain the root cause and provide a concrete fallback plan in your next <thought> block.\n',
+      '- If a tool returns an error or empty result, you MUST explain the root cause and provide a concrete fallback plan in your next reasoning.\n',
+    )
+    .replace(
+      '- Call a tool only when you must inspect the environment or change something. When you do, reply with your <thought> block followed by ONLY the fenced tool block — no preamble sentence (the CLI already shows what is being run).\n',
+      '- Call a tool only when you must inspect the environment or change something. When you do, reply with ONLY the fenced tool block — no preamble sentence (the CLI already shows what is being run).\n',
+    );
+  const toolRules = TOOL_RULES.replace(
+    '- After receiving the tool result, always output a <thought> reasoning block analyzing the tool output, then either run another tool (e.g. patch_file/edit_file if fixing code) or provide your verified final answer in plain text.\n',
+    '- After receiving the tool result, briefly analyze the tool output in your reasoning, then either run another tool (e.g. patch_file/edit_file if fixing code) or provide your verified final answer in plain text.\n',
+  );
+  return { identity, toolRules };
+}
+
 /** Assembles the final system prompt in fixed, cache-friendly layer order. */
 export function buildSystemPrompt(layers: PromptLayers): string {
-  const parts = [CORE_IDENTITY, TOOL_RULES, layers.role.prompt];
+  const { identity, toolRules } = coreIdentityForThoughtSource(layers.thoughtSource);
+  const parts = [identity, toolRules, layers.role.prompt];
   // (c2) Konteks lingkungan (OS/shell) — stabil per mesin, jadi aman untuk
   // prompt caching dan selalu berada setelah role agar urutan lama tetap utuh.
   if (layers.environment && layers.environment.trim()) parts.push(layers.environment.trim());

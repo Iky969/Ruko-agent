@@ -126,11 +126,23 @@ export interface SelectorOptions {
   title?: string;
   items: SelectorItem[];
   defaultId?: string;
+  /**
+   * Window size for long lists (default 20): only this many rows render at
+   * once and the window follows the selection. The header shows the
+   * position, e.g. `1–20 dari 150`.
+   */
+  pageSize?: number;
+  /** When true, typing filters the list (Backspace deletes, Esc clears the filter first, then cancels). */
+  filterable?: boolean;
 }
 
 interface ActiveSelector extends SelectorOptions {
   selectedIndex: number;
   drawnRows: number;
+  /** First visible row of the current window (into the filtered list). */
+  windowStart: number;
+  /** Current type-to-filter text ('' when filterable is off). */
+  filter: string;
   resolve: (id: string | null) => void;
 }
 
@@ -245,11 +257,48 @@ export class LineEditor {
         ...options,
         selectedIndex: defaultIdx,
         drawnRows: 0,
+        windowStart: 0,
+        filter: '',
         resolve,
       };
       this.attach();
       this.renderSelector();
     });
+  }
+
+  /** Items after the type-to-filter text is applied (all items when off/empty). */
+  private selectorFilteredItems(): SelectorItem[] {
+    if (!this.selector) return [];
+    const filter = this.selector.filter.trim().toLowerCase();
+    if (!this.selector.filterable || !filter) return this.selector.items;
+    return this.selector.items.filter(
+      (it) => it.id.toLowerCase().includes(filter) || it.label.toLowerCase().includes(filter),
+    );
+  }
+
+  /** Page size in effect for the active selector (default 20). */
+  private selectorPageSize(): number {
+    const raw = this.selector?.pageSize ?? 20;
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 20;
+  }
+
+  /** Moves the window so the selected row stays visible (wrap-aware). */
+  private selectorEnsureVisible(): void {
+    if (!this.selector) return;
+    const pageSize = this.selectorPageSize();
+    const total = this.selectorFilteredItems().length;
+    if (total === 0) {
+      this.selector.windowStart = 0;
+      return;
+    }
+    if (this.selector.selectedIndex < this.selector.windowStart) {
+      this.selector.windowStart = this.selector.selectedIndex;
+    } else if (this.selector.selectedIndex >= this.selector.windowStart + pageSize) {
+      this.selector.windowStart = this.selector.selectedIndex - pageSize + 1;
+    }
+    const maxStart = Math.max(0, total - pageSize);
+    if (this.selector.windowStart > maxStart) this.selector.windowStart = maxStart;
+    if (this.selector.windowStart < 0) this.selector.windowStart = 0;
   }
 
   /**
@@ -855,30 +904,59 @@ export class LineEditor {
         const match = data.slice(i).match(CSI_RE);
         if (match) {
           const final = match[2];
-          if (final === 'A') {
+          const items = this.selectorFilteredItems();
+          if (final === 'A' && items.length > 0) {
             this.selector.selectedIndex =
-              (this.selector.selectedIndex - 1 + this.selector.items.length) % this.selector.items.length;
+              (this.selector.selectedIndex - 1 + items.length) % items.length;
+            this.selectorEnsureVisible();
             this.renderSelector();
-          } else if (final === 'B') {
+          } else if (final === 'B' && items.length > 0) {
             this.selector.selectedIndex =
-              (this.selector.selectedIndex + 1) % this.selector.items.length;
+              (this.selector.selectedIndex + 1) % items.length;
+            this.selectorEnsureVisible();
             this.renderSelector();
           }
           i += match[0].length;
           continue;
         }
-        // Lone Escape: cancel selector without side effect
+        // Lone Escape: with an active filter, clear the filter first;
+        // otherwise cancel the selector without side effect.
+        if (this.selector.filterable && this.selector.filter) {
+          this.selector.filter = '';
+          this.selector.selectedIndex = 0;
+          this.selector.windowStart = 0;
+          this.renderSelector();
+          return;
+        }
         this.closeSelector(null);
         return;
       }
       if (ch === '\r' || ch === '\n') {
-        const chosen = this.selector.items[this.selector.selectedIndex]?.id ?? null;
+        const items = this.selectorFilteredItems();
+        const chosen = items[this.selector.selectedIndex]?.id ?? null;
         this.closeSelector(chosen);
         return;
       }
       if (ch === '\u0003') {
         this.closeSelector(null);
         return;
+      }
+      if (this.selector.filterable) {
+        if (ch === '\u007f' || ch === '\b') {
+          if (this.selector.filter) {
+            this.selector.filter = this.selector.filter.slice(0, -1);
+            this.selector.selectedIndex = 0;
+            this.selector.windowStart = 0;
+            this.renderSelector();
+          }
+        } else if (ch >= ' ' && ch <= '~') {
+          this.selector.filter += ch;
+          this.selector.selectedIndex = 0;
+          this.selector.windowStart = 0;
+          this.renderSelector();
+        }
+        i += 1;
+        continue;
       }
       // Any other character ignored (chat input completely blocked while selector is open)
       i += 1;
@@ -898,15 +976,30 @@ export class LineEditor {
 
   private renderSelector(): void {
     if (!this.selector) return;
-    const { title, items, selectedIndex } = this.selector;
+    const { title, selectedIndex } = this.selector;
+    const items = this.selectorFilteredItems();
+    const pageSize = this.selectorPageSize();
+    const windowStart = Math.min(this.selector.windowStart, Math.max(0, items.length - pageSize));
+    const windowEnd = Math.min(items.length, windowStart + pageSize);
     const width = Math.min(Math.max(40, this.termWidth() - 4), 62);
 
     const lines: string[] = [];
-    const headerTitle = title ? ` ${title} ` : ' Pilihan ';
+    let headerTitle = title ? ` ${title} ` : ' Pilihan ';
+    if (items.length > pageSize) {
+      headerTitle += `${windowStart + 1}–${windowEnd} dari ${items.length} `;
+    }
+    if (this.selector.filterable && this.selector.filter) {
+      headerTitle += `filter: "${this.selector.filter}" `;
+    }
     const headerPad = Math.max(0, width - 2 - visibleLength(headerTitle) - 2);
     lines.push(`\x1b[36m┌─\x1b[1;37m${headerTitle}\x1b[0;36m${'─'.repeat(headerPad)}┐\x1b[0m`);
 
-    for (let i = 0; i < items.length; i++) {
+    if (items.length === 0) {
+      const emptyRow = '  (tidak ada pilihan)';
+      const pad = Math.max(0, width - 2 - visibleLength(emptyRow) - 2);
+      lines.push(`\x1b[36m│\x1b[0m \x1b[90m${emptyRow}\x1b[0m${' '.repeat(pad)} \x1b[36m│\x1b[0m`);
+    }
+    for (let i = windowStart; i < windowEnd; i++) {
       const item = items[i];
       const isSel = i === selectedIndex;
       const prefix = isSel ? '\x1b[1;36m● \x1b[1;97m' : '  \x1b[90m';

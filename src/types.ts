@@ -62,11 +62,27 @@ export type BuildPhase = 'explore' | 'mutate';
 /** Reasoning depth level: low < medium < high. */
 export type ReasoningLevel = 'low' | 'medium' | 'high';
 
+/**
+ * Single thought source for a session (thought-render fix 2026-11-23):
+ * 'native' = provider returns visible reasoning text (reasoning_content /
+ * thinking blocks / reasoning summary) — the system prompt must NOT ask for
+ * a <thought> block, so the model never writes the same thought twice.
+ * 'thought-tag' = fallback: Ruko's <thought>...</thought> blocks.
+ * Decided once per session from empirical detection, never from model name.
+ */
+export type ThoughtSource = 'native' | 'thought-tag';
+
 export interface SessionState {
   mode: AgentMode;
   buildPhase?: BuildPhase;
   /** Level reasoning per-sesi in-memory. Default sesi baru: 'medium'. */
   reasoningLevel: ReasoningLevel;
+  /**
+   * Single thought source for this session (see ThoughtSource). Set once
+   * from empirical provider detection at session start (or adaptively from
+   * the first real turn); undefined = unknown yet, fall back to <thought>.
+   */
+  thoughtSource?: ThoughtSource;
   /**
    * Fase B (v1.9.0): profil lingkungan runtime (os/shellFamily/flavor/TTY).
    * Opsional & default undefined — ketersediaan tidak pernah jadi syarat

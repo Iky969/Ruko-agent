@@ -228,6 +228,14 @@ export interface LLMProvider {
   testConnection?(): Promise<ConnectionResult>;
   /** Model ids from the endpoint's /models listing (empty when unsupported). */
   listModels?(): Promise<string[]>;
+  /**
+   * Empirical detection of visible native reasoning text from this provider /
+   * model: `true` = the provider returns visible reasoning, `false` = proven
+   * not to (authoritative metadata only), `null` = unknown. NEVER inferred
+   * from the model or provider name — only from what the backend actually
+   * returns (metadata or a real stream).
+   */
+  detectVisibleReasoning?(): Promise<boolean | null>;
   chat(messages: ContextMessage[], options?: ChatOptions): Promise<string>;
 }
 
@@ -235,6 +243,41 @@ export interface ConnectionResult {
   ok: boolean;
   /** On success: model echoed back / endpoint name; on failure: human reason. */
   message: string;
+  /** Which transport the probe reached (wizard shows it as a label). */
+  endpoint?: 'chat-completions' | 'responses';
+}
+
+/**
+ * Provider kinds — the single source of truth for transport routing
+ * (chosen from URL / explicit provider, never from the model name alone).
+ */
+export type ProviderKind = 'anthropic' | 'gemini' | 'responses' | 'openai-compatible';
+
+/**
+ * Resolves the provider kind from an explicit provider name (aliases win),
+ * then from host / model heuristics. A model name alone never selects the
+ * transport: gpt-5 at api.openai.com/v1 stays openai-compatible, while a
+ * base URL ending in /responses (or chatgpt.com) selects Responses.
+ */
+export function detectProviderKind(baseUrl: string, model: string, provider?: string): ProviderKind {
+  const p = (provider ?? '').trim().toLowerCase();
+  if (p === 'anthropic' || p === 'claude') return 'anthropic';
+  if (p === 'gemini' || p === 'google') return 'gemini';
+  if (p === 'responses' || p === 'responses-codex' || p === 'codex' || p === 'openai-responses') {
+    return 'responses';
+  }
+  if (p === 'openai-compatible' || p === 'openai' || p === 'ollama') return 'openai-compatible';
+  const rawBase = (baseUrl || '').toLowerCase().replace(/^["'`]+|["'`]+$/g, '').trim();
+  const m = (model || '').toLowerCase();
+  if (isHostnameOrSubdomain(rawBase, 'anthropic.com') || m.startsWith('claude-')) return 'anthropic';
+  if (isHostnameOrSubdomain(rawBase, 'googleapis.com') || m.startsWith('gemini-')) return 'gemini';
+  if (
+    isHostnameOrSubdomain(rawBase, 'chatgpt.com') ||
+    rawBase.replace(/\/+$/, '').endsWith('/responses')
+  ) {
+    return 'responses';
+  }
+  return 'openai-compatible';
 }
 
 /**
@@ -427,6 +470,8 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   /** True setelah endpoint menolak `reasoning_effort` (Fase 2: fallback prompt injection). */
   private reasoningParamUnsupported = false;
   private reasoningFallbackLog = new ReasoningFallbackLog();
+  /** Memoized detectVisibleReasoning result, keyed by model. */
+  private visibleReasoningCache: { model: string; result: boolean | null } | null = null;
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     const rawKey = cfg.apiKey ?? process.env.OPENAI_API_KEY ?? '';
@@ -473,6 +518,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   setModel(model: string): void {
     const clean = model.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
     this.currentModel = clean || this.currentModel;
+    this.visibleReasoningCache = null;
   }
 
   setCredentials(apiKey: string, baseUrl: string): void {
@@ -480,6 +526,59 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     const cleanBase = baseUrl.trim().replace(/^["'`]+|["'`]+$/g, '').trim().replace(/\/+$/, '');
     if (cleanKey) this.apiKey = cleanKey;
     if (cleanBase) this.baseUrl = cleanBase;
+    this.visibleReasoningCache = null;
+  }
+
+  /**
+   * Empirical native-reasoning detection for Ollama / OpenAI-compatible
+   * backends, from Ollama `/api/tags` capabilities only — no chat probe
+   * at session start (a probe would burn tokens/latency and can shift
+   * scripted server responses). Model listed + capability `thinking` →
+   * true; listed without it → false; unlisted / tags 404 / fetch fails →
+   * null (unknown — the adaptive latch in agent.ts decides from the first
+   * real turn instead).
+   */
+  async detectVisibleReasoning(): Promise<boolean | null> {
+    if (
+      this.visibleReasoningCache &&
+      this.visibleReasoningCache.model === this.currentModel
+    ) {
+      return this.visibleReasoningCache.result;
+    }
+    let result: boolean | null = null;
+    try {
+      let origin: string;
+      try {
+        origin = new URL(this.baseUrl).origin;
+      } catch {
+        origin = this.baseUrl;
+      }
+      const response = await fetch(`${origin}/api/tags`, {
+        headers: this.authHeaders(),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (response.ok) {
+        const data = (await response.json()) as {
+          models?: Array<{ name?: string; capabilities?: string[] }>;
+        };
+        const norm = (n: string): string => n.split(':')[0].toLowerCase();
+        const wanted = this.currentModel.toLowerCase();
+        const entry = (data.models ?? []).find(
+          (m) =>
+            m.name &&
+            (m.name.toLowerCase() === wanted || norm(m.name) === norm(this.currentModel)),
+        );
+        if (entry) {
+          result = (entry.capabilities ?? []).some(
+            (c) => c.toLowerCase() === 'thinking',
+          );
+        }
+      }
+    } catch {
+      result = null;
+    }
+    this.visibleReasoningCache = { model: this.currentModel, result };
+    return result;
   }
 
   private authHeaders(): Record<string, string> {
@@ -519,7 +618,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
         const body = await response.text();
         throw new Error(`LLM API error ${response.status}: ${body.slice(0, 200)}`);
       }
-      return { ok: true, message: this.currentModel };
+      return { ok: true, message: this.currentModel, endpoint: 'chat-completions' };
     } catch (err) {
       return { ok: false, message: explainProviderError(err) };
     }
@@ -887,6 +986,11 @@ export class AnthropicProvider implements LLMProvider {
     }
   }
 
+  /** Anthropic thinking blocks are always visible reasoning text. */
+  async detectVisibleReasoning(): Promise<boolean | null> {
+    return true;
+  }
+
   private authHeaders(): Record<string, string> {
     return {
       'Content-Type': 'application/json',
@@ -1189,6 +1293,11 @@ export class GeminiProvider implements LLMProvider {
     }
   }
 
+  /** Gemini thought parts are visible reasoning text. */
+  async detectVisibleReasoning(): Promise<boolean | null> {
+    return true;
+  }
+
   private authHeaders(): Record<string, string> {
     return {
       'Content-Type': 'application/json',
@@ -1453,19 +1562,436 @@ export class GeminiProvider implements LLMProvider {
   }
 }
 
+/**
+ * Detailed provider-kind detection for the wizard: same routing as
+ * detectProviderKind, plus a confidence level and a human reason so the
+ * wizard can show what it guessed — and how sure it is — before asking.
+ * high: host anthropic.com / googleapis.com / chatgpt.com, path /responses,
+ * or an explicit provider name. medium: claude-/gemini- model prefix, or
+ * localhost/127.0.0.1 (local OpenAI-compatible endpoint). low: no hints at
+ * all → openai-compatible as the neutral default.
+ */
+export interface ProviderDetection {
+  kind: ProviderKind;
+  confidence: 'high' | 'medium' | 'low';
+  reason: string;
+}
+
+export function detectProviderKindDetailed(
+  baseUrl: string,
+  model: string,
+  provider?: string,
+): ProviderDetection {
+  const p = (provider ?? '').trim().toLowerCase();
+  if (p === 'anthropic' || p === 'claude') {
+    return { kind: 'anthropic', confidence: 'high', reason: 'provider anthropic dipilih eksplisit' };
+  }
+  if (p === 'gemini' || p === 'google') {
+    return { kind: 'gemini', confidence: 'high', reason: 'provider gemini dipilih eksplisit' };
+  }
+  if (p === 'responses' || p === 'responses-codex' || p === 'codex' || p === 'openai-responses') {
+    return { kind: 'responses', confidence: 'high', reason: 'provider responses dipilih eksplisit' };
+  }
+  const rawBase = (baseUrl || '').toLowerCase().replace(/^["'`]+|["'`]+$/g, '').trim();
+  const m = (model || '').toLowerCase();
+  if (isHostnameOrSubdomain(rawBase, 'anthropic.com')) {
+    return { kind: 'anthropic', confidence: 'high', reason: 'host anthropic.com' };
+  }
+  if (isHostnameOrSubdomain(rawBase, 'googleapis.com')) {
+    return { kind: 'gemini', confidence: 'high', reason: 'host googleapis.com' };
+  }
+  if (isHostnameOrSubdomain(rawBase, 'chatgpt.com')) {
+    return { kind: 'responses', confidence: 'high', reason: 'host chatgpt.com' };
+  }
+  if (rawBase.replace(/\/+$/, '').endsWith('/responses')) {
+    return { kind: 'responses', confidence: 'high', reason: 'path base URL berakhir /responses' };
+  }
+  if (m.startsWith('claude-')) {
+    return { kind: 'anthropic', confidence: 'medium', reason: "model berawalan 'claude-'" };
+  }
+  if (m.startsWith('gemini-')) {
+    return { kind: 'gemini', confidence: 'medium', reason: "model berawalan 'gemini-'" };
+  }
+  let host = '';
+  try {
+    host = new URL(rawBase).hostname.toLowerCase();
+  } catch {
+    host = '';
+  }
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
+    return { kind: 'openai-compatible', confidence: 'medium', reason: 'endpoint lokal (localhost)' };
+  }
+  return {
+    kind: 'openai-compatible',
+    confidence: 'low',
+    reason: 'tidak ada petunjuk provider — default openai-compatible',
+  };
+}
+
 /** Factory: returns the configured provider (extend here for more backends). */
 export function createProvider(
   config: Partial<AgentConfig> = {},
   retry: RetryOptions = {},
 ): LLMProvider {
-  const provider = (config.provider || '').toLowerCase();
-  const rawBase = (config.baseUrl || '').toLowerCase().replace(/^["'`]+|["'`]+$/g, '').trim();
-  const model = (config.model || '').toLowerCase();
-  if (provider === 'anthropic' || isHostnameOrSubdomain(rawBase, 'anthropic.com') || model.startsWith('claude-')) {
-    return new AnthropicProvider(config, retry);
+  const kind = detectProviderKind(config.baseUrl ?? '', config.model ?? '', config.provider);
+  switch (kind) {
+    case 'anthropic':
+      return new AnthropicProvider(config, retry);
+    case 'gemini':
+      return new GeminiProvider(config, retry);
+    case 'responses':
+      return new ResponsesApiProvider(config, retry);
+    default:
+      return new OpenAiCompatibleProvider(config, retry);
   }
-  if (provider === 'gemini' || isHostnameOrSubdomain(rawBase, 'googleapis.com') || (!rawBase && model.startsWith('gemini-'))) {
-    return new GeminiProvider(config, retry);
+}
+
+/**
+ * OpenAI Responses API transport (Codex and other Responses-only backends).
+ *
+ * POST {baseUrl}/responses with `reasoning: { effort, summary: "auto" }`
+ * mapped from the session reasoning level. Reasoning summaries stream as
+ * `response.reasoning_summary_text.delta` and render in the thought panel —
+ * never ask for a <thought> block on this transport (native source).
+ * Tool calls stay fence-based (```tool in text, no native function calling);
+ * history messages with role `tool` are mapped to `user` in `input`
+ * (same pattern as AnthropicProvider).
+ *
+ * Auth is API key (Bearer) only. A Codex backend that needs a ChatGPT
+ * account login (OAuth) is a separate follow-up, not built here.
+ */
+export class ResponsesApiProvider implements LLMProvider {
+  readonly name = 'responses';
+  private apiKey: string;
+  private baseUrl: string;
+  private currentModel: string;
+  private readonly retry: RetryOptions;
+  lastFinishReason: string | null = null;
+  lastReasoning: string | null = null;
+  /** True setelah endpoint menolak `reasoning` (fallback: retry tanpa parameter). */
+  private reasoningParamUnsupported = false;
+  private reasoningFallbackLog = new ReasoningFallbackLog();
+
+  constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
+    const rawKey = cfg.apiKey ?? process.env.OPENAI_API_KEY ?? '';
+    this.apiKey = rawKey.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+    const rawBase = cfg.baseUrl || process.env.OPENAI_BASE_URL || '';
+    // Strip a trailing /responses so the endpoint is never doubled.
+    this.baseUrl = rawBase
+      .trim()
+      .replace(/^["'`]+|["'`]+$/g, '')
+      .trim()
+      .replace(/\/responses\/?$/i, '')
+      .replace(/\/+$/, '');
+    const rawModel = cfg.model || process.env.AGENT_MODEL || process.env.OPENAI_MODEL || '';
+    this.currentModel = rawModel.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+    this.retry = retry;
   }
-  return new OpenAiCompatibleProvider(config, retry);
+
+  get isConfigured(): boolean {
+    return this.apiKey.length > 0 && this.baseUrl.length > 0 && this.currentModel.length > 0;
+  }
+
+  get model(): string {
+    return this.currentModel;
+  }
+
+  setModel(model: string): void {
+    const clean = model.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+    this.currentModel = clean || this.currentModel;
+  }
+
+  setCredentials(apiKey: string, baseUrl: string): void {
+    const cleanKey = apiKey.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+    const cleanBase = baseUrl
+      .trim()
+      .replace(/^["'`]+|["'`]+$/g, '')
+      .trim()
+      .replace(/\/responses\/?$/i, '')
+      .replace(/\/+$/, '');
+    if (cleanKey) this.apiKey = cleanKey;
+    if (cleanBase) this.baseUrl = cleanBase;
+  }
+
+  private authHeaders(): Record<string, string> {
+    return {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${this.apiKey}`,
+    };
+  }
+
+  /** Reasoning summaries are native on this transport — always visible. */
+  async detectVisibleReasoning(): Promise<boolean | null> {
+    return true;
+  }
+
+  private async requestWithRetry(url: string, init: RequestInit): Promise<Response> {
+    const retries = this.retry.retries ?? 2;
+    const base = this.retry.baseDelayMs ?? 1000;
+    const max = this.retry.maxDelayMs ?? 15_000;
+    const sleep =
+      this.retry.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    for (let attempt = 0; ; attempt += 1) {
+      if (init.signal?.aborted) {
+        throw init.signal.reason || new Error('Aborted');
+      }
+      const response = await fetch(url, init);
+      if (response.ok || attempt >= retries || !RETRYABLE_STATUSES.has(response.status)) {
+        return response;
+      }
+      const retryAfter = parseRetryAfterMs(response.headers.get('retry-after'));
+      await sleep(retryAfter ?? backoffDelay(attempt + 1, base, max));
+    }
+  }
+
+  async testConnection(): Promise<ConnectionResult> {
+    if (!this.isConfigured) {
+      const missing = missingConfigFields({
+        apiKey: this.apiKey,
+        baseUrl: this.baseUrl,
+        model: this.currentModel,
+      });
+      return { ok: false, message: `Belum lengkap: ${missing.join(', ')} — jalankan /login.` };
+    }
+    try {
+      const response = await this.requestWithRetry(`${this.baseUrl}/responses`, {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({
+          model: this.currentModel,
+          input: [{ role: 'user', content: 'ping' }],
+          max_output_tokens: 16,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Responses API error ${response.status}: ${body.slice(0, 200)}`);
+      }
+      return { ok: true, message: this.currentModel, endpoint: 'responses' };
+    } catch (err) {
+      return { ok: false, message: explainProviderError(err) };
+    }
+  }
+
+  /** Responses-only backends (Codex) have no /models — return [] instead of throwing. */
+  async listModels(): Promise<string[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/models`, {
+        headers: this.authHeaders(),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) return [];
+      const data = (await response.json()) as { data?: Array<{ id?: string; name?: string }> };
+      return (data.data ?? [])
+        .map((m) => m.id ?? m.name ?? '')
+        .filter((id) => id.length > 0)
+        .sort();
+    } catch {
+      return [];
+    }
+  }
+
+  /** History → Responses `input`: role `tool` maps to `user` (Anthropic pattern). */
+  private formatInput(messages: ContextMessage[]): Array<{ role: string; content: string }> {
+    return messages.map((m) => ({
+      role: m.role === 'tool' || m.role === 'tool_call' ? 'user' : m.role,
+      content: m.content,
+    }));
+  }
+
+  async chat(messages: ContextMessage[], options?: ChatOptions): Promise<string> {
+    if (!this.isConfigured) {
+      const missing = missingConfigFields({
+        apiKey: this.apiKey,
+        baseUrl: this.baseUrl,
+        model: this.currentModel,
+      });
+      throw new Error(
+        `Konfigurasi belum lengkap (${missing.join(', ')}) — jalankan /login atau set OPENAI_API_KEY / OPENAI_BASE_URL / AGENT_MODEL.`,
+      );
+    }
+
+    this.lastFinishReason = null;
+    const reasoningLevel = options?.reasoning ?? null;
+    const useNativeReasoning = Boolean(reasoningLevel) && !this.reasoningParamUnsupported;
+
+    const buildBody = (withNative: boolean, omitTemperature = false): string => {
+      const body: Record<string, unknown> = {
+        model: options?.model ?? this.currentModel,
+        input: this.formatInput(messages),
+        max_output_tokens: options?.maxTokens ?? 2048,
+        stream: true,
+      };
+      if (!omitTemperature && options?.temperature !== undefined) {
+        body.temperature = options.temperature;
+      }
+      if (withNative && reasoningLevel) {
+        body.reasoning = {
+          effort: toOpenAiReasoningEffort(reasoningLevel),
+          summary: 'auto',
+        };
+      }
+      return JSON.stringify(body);
+    };
+
+    let response = await this.requestWithRetry(`${this.baseUrl}/responses`, {
+      method: 'POST',
+      headers: this.authHeaders(),
+      body: buildBody(useNativeReasoning),
+      signal: options?.signal,
+    });
+
+    // Endpoint menolak `reasoning` / `temperature` (400): retry sekali
+    // tanpa parameter tersebut, lalu log sekali di level debug.
+    if (!response.ok && response.status === 400) {
+      const errBody = await response.text();
+      if (/reasoning|temperature/i.test(errBody)) {
+        if (/reasoning/i.test(errBody)) {
+          this.reasoningParamUnsupported = true;
+          this.reasoningFallbackLog.note('reasoning');
+        }
+        response = await this.requestWithRetry(`${this.baseUrl}/responses`, {
+          method: 'POST',
+          headers: this.authHeaders(),
+          body: buildBody(false, true),
+          signal: options?.signal,
+        });
+      } else {
+        throw new Error(`Responses API error ${response.status}: ${errBody.slice(0, 500)}`);
+      }
+    }
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Responses API error ${response.status}: ${body.slice(0, 500)}`);
+    }
+
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!contentType.includes('text/event-stream') || !response.body) {
+      // Non-streaming JSON: array `output` — reasoning summary → onThought,
+      // message output_text → full text.
+      const data = (await response.json()) as {
+        status?: string;
+        output?: Array<{
+          type?: string;
+          summary?: Array<{ text?: string }>;
+          content?: Array<{ type?: string; text?: string }>;
+        }>;
+        error?: { message?: string };
+      };
+      if (data.error?.message) throw new Error(`Responses API error: ${data.error.message}`);
+      if (data.status === 'failed') throw new Error('Responses API error: response failed');
+      this.lastFinishReason = data.status === 'incomplete' ? 'length' : 'stop';
+      let full = '';
+      let reasoningBuffer = '';
+      for (const item of data.output ?? []) {
+        if (item.type === 'reasoning') {
+          for (const part of item.summary ?? []) {
+            if (part.text) {
+              reasoningBuffer += part.text;
+              options?.onThought?.(part.text);
+            }
+          }
+        } else if (item.type === 'message') {
+          for (const part of item.content ?? []) {
+            if (part.type === 'output_text' && part.text) {
+              full += part.text;
+              options?.onToken?.(part.text);
+            }
+          }
+        }
+      }
+      this.lastReasoning = reasoningBuffer || null;
+      return full;
+    }
+
+    let full = '';
+    let reasoningBuffer = '';
+    let buffer = '';
+    const decoder = new TextDecoder();
+    // `.done` events are only a fallback for parts that never arrived as
+    // deltas — tracked per item_id + output index so text never renders 2x.
+    const seenDeltaParts = new Set<string>();
+
+    const processLine = (line: string): void => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) return;
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === '[DONE]') return;
+      let parsed: {
+        type?: string;
+        delta?: string;
+        text?: string;
+        item_id?: string;
+        output_index?: number;
+        response?: { status?: string; incomplete_details?: { reason?: string } };
+        error?: { message?: string };
+      };
+      try {
+        parsed = JSON.parse(payload) as typeof parsed;
+      } catch {
+        return;
+      }
+      const partKey = `${parsed.item_id ?? ''}:${parsed.output_index ?? ''}`;
+      switch (parsed.type) {
+        case 'response.reasoning_summary_text.delta':
+          if (parsed.delta) {
+            seenDeltaParts.add(`${partKey}:reasoning`);
+            reasoningBuffer += parsed.delta;
+            options?.onThought?.(parsed.delta);
+          }
+          break;
+        case 'response.reasoning_summary_text.done':
+          if (parsed.text && !seenDeltaParts.has(`${partKey}:reasoning`)) {
+            reasoningBuffer += parsed.text;
+            options?.onThought?.(parsed.text);
+          }
+          break;
+        case 'response.output_text.delta':
+          if (parsed.delta) {
+            seenDeltaParts.add(`${partKey}:text`);
+            full += parsed.delta;
+            options?.onToken?.(parsed.delta);
+          }
+          break;
+        case 'response.output_text.done':
+          if (parsed.text && !seenDeltaParts.has(`${partKey}:text`)) {
+            full += parsed.text;
+            options?.onToken?.(parsed.text);
+          }
+          break;
+        case 'response.completed':
+          this.lastFinishReason = 'stop';
+          break;
+        case 'response.incomplete':
+          this.lastFinishReason =
+            parsed.response?.incomplete_details?.reason === 'max_output_tokens' ? 'length' : 'stop';
+          break;
+        case 'response.failed':
+        case 'error':
+          throw new Error(
+            `Responses API error: ${parsed.error?.message ?? 'response failed'}`,
+          );
+        default:
+          break;
+      }
+    };
+
+    for await (const raw of response.body as AsyncIterable<Uint8Array>) {
+      buffer += decoder.decode(raw, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+      for (const line of lines) processLine(line);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      for (const line of buffer.split(/\r?\n/)) processLine(line);
+    }
+    this.lastReasoning = reasoningBuffer || null;
+    if (!this.lastFinishReason) {
+      this.lastFinishReason = 'stop';
+    }
+    return full;
+  }
 }
