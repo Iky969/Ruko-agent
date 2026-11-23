@@ -45,6 +45,8 @@ export interface SubagentDeps {
   hostState?: HostState | null;
   /** v2.0.0: Scope inheritance - parent's ScopeAmendmentManager instance */
   scopeAmendmentManager?: ScopeAmendmentManager | null;
+  /** v2.2.0 (temuan audit #4): Tier 0 verifier warisan parent. */
+  tier0Verifier?: ((changedFiles: string[]) => Promise<import('../core/verification/tieredGate.js').TieredGateResult>) | null;
 }
 
 /**
@@ -111,6 +113,10 @@ export async function runSubagent(
   }
   if (deps.scopeAmendmentManager) {
     subAgent.setScopeAmendmentManager(deps.scopeAmendmentManager);
+  }
+  // Tier 0 inheritance: subagent turn ikut terverifikasi gate yang sama.
+  if (deps.tier0Verifier) {
+    subAgent.setTier0Verifier(deps.tier0Verifier);
   }
   // Feedback §4: the subagent's running tools show up in the PARENT's tray,
   // so delegation is visible live instead of silently occupying the terminal.

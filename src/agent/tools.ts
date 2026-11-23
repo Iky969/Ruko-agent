@@ -408,6 +408,11 @@ export interface ToolDeps {
   hostState?: HostState | null;
   /** v2.0.0: ScopeAmendmentManager instance for evaluating mutation scope */
   scopeAmendmentManager?: ScopeAmendmentManager | null;
+  /**
+   * Verifier Tier 0 (temuan audit v2.2.0 #4) — diwariskan dari Agent ke
+   * subagent lewat `delegate` supaya turn subagent ikut terverifikasi.
+   */
+  tier0Verifier?: ((changedFiles: string[]) => Promise<import('../core/verification/tieredGate.js').TieredGateResult>) | null;
 }
 
 /** Tools refused while plan mode is active (read_file stays available). */
@@ -2410,11 +2415,15 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
       if (!name) {
         return JSON.stringify({ error: 'load_skill: missing "name" field' });
       }
-      deps.onLog?.(green(`🟢 Skill(${name})`));
       const skill = readSkill(name, ws);
       if (!skill) {
+        // Log kegagalan juga — sebelumnya hanya sukses yang tercatat.
+        deps.onLog?.(yellow(`⚠ Skill(${name}) tidak ditemukan di .ruko/skills/`));
         return JSON.stringify({ error: `load_skill: skill "${name}" tidak ditemukan di .ruko/skills/` });
       }
+      // Log pembacaan skill: nama + jumlah karakter instruksi yang dibaca,
+      // supaya pemakaian skill bisa diverifikasi dari log terminal.
+      deps.onLog?.(green(`🟢 Skill(${name}) dibaca — ${skill.instructions.length} karakter instruksi`));
       return JSON.stringify(
         {
           ok: true,
@@ -2600,6 +2609,7 @@ async function runToolCallRaw(call: ToolCall, deps: ToolDeps): Promise<string> {
             activityTray: deps.activityTray,
             hostState: deps.hostState,
             scopeAmendmentManager: deps.scopeAmendmentManager,
+            tier0Verifier: deps.tier0Verifier,
           },
           {
             planMode: deps.planMode,

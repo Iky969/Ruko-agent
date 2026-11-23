@@ -20,9 +20,17 @@
  * ZERO dependency — hanya `node:*`.
  */
 
-import { spawn, execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { killProcessTree } from '../treeKill.js';
+
+// ESM tidak punya `require` global — resolve fallback #4/#5 memakai
+// createRequire agar `require.resolve` tetap bekerja (temuan audit v2.2.0 #1:
+// `require.resolve` mentah di sini melempar ReferenceError yang ditelan
+// catch {} kosong, sehingga fallback tidak pernah jalan).
+const require = createRequire(import.meta.url);
 
 const IS_WIN = process.platform === 'win32';
 
@@ -96,26 +104,18 @@ export function buildIsolatedEnv(): NodeJS.ProcessEnv {
   return cleanEnv;
 }
 
-export function killProcessTree(pid: number): void {
-  if (IS_WIN) {
-    try {
-      execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
-    } catch {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch {}
-    }
-  } else {
-    try {
-      // Menghentikan seluruh process group jika detached
-      process.kill(-pid, 'SIGKILL');
-    } catch {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch {}
-    }
-  }
-}
+/**
+ * Pembunuhan pohon proses terpusat — didelegasikan ke `src/core/treeKill.ts`
+ * (temuan audit v2.2.0 #3). Implementasi lokal sebelumnya diduplikasi di sini
+ * tanpa guard `isKillablePid` dan memakai interpolasi shell
+ * (`execSync("taskkill /PID ${pid} /T /F")`); kini seluruh pemanggil memakai
+ * satu implementasi yang sama: guard PID + argv array tanpa shell.
+ *
+ * `spawnIsolated` men-spawn dengan `detached: true` di POSIX (pemimpin
+ * process group) sehingga `processGroup` default `true` sudah benar, dan
+ * `force: true` mempertahankan perilaku lama (SIGKILL / taskkill /F).
+ */
+export { killProcessTree } from '../treeKill.js';
 
 export function spawnIsolated(
   bin: string,
@@ -149,7 +149,7 @@ export function spawnIsolated(
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
-        if (child.pid) killProcessTree(child.pid);
+        if (child.pid) void killProcessTree(child.pid, { force: true, child });
         reject(new Error(`RESOURCE_TIMEOUT: Proses melampaui batas waktu ${finalLimits.timeoutMs}ms`));
       }
     }, finalLimits.timeoutMs);
@@ -163,7 +163,7 @@ export function spawnIsolated(
           child.stdout?.destroy();
           child.stderr?.destroy();
         } catch {}
-        if (child.pid) killProcessTree(child.pid);
+        if (child.pid) void killProcessTree(child.pid, { force: true, child });
         reject(new Error('RESOURCE_OVERFLOW: Output proses melebihi batas'));
         return;
       }

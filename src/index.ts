@@ -587,6 +587,11 @@ async function main(): Promise<void> {
     activePipeline = pipeline;
     agent.setHostState(pipeline.hostState);
     agent.setScopeAmendmentManager(pipeline.scopeManager);
+    // Temuan audit v2.2.0 #4: TieredGate kini hidup di jalur agent —
+    // pipeline.verifyTier0 dipanggil Agent sekali di akhir tiap turn yang
+    // memutasi berkas (fail-closed; skip bila bukan proyek TS).
+    const boundPipeline = pipeline;
+    agent.setTier0Verifier((files) => boundPipeline.verifyTier0(files));
   } catch (err) {
     console.error(red(`\n⛔ KEGAGALAN BOOTSTRAP KEAMANAN: ${(err as Error).message}`));
     console.error(yellow('Sesi dihentikan demi menjaga integritas host (fail-closed).\n'));

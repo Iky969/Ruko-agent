@@ -8,6 +8,7 @@ import {
   activityLabelForTool,
   describeToolCallForLog,
   extractThoughts,
+  green,
   inferStepDescription,
   LineGate,
   RevealFilter,
@@ -38,7 +39,8 @@ import {
 } from './tools.js';
 import { getEnvProfile } from '../core/env.js';
 import { readMemorySafe } from '../core/memory.js';
-import { formatSkillsForPrompt, initDefaultSkills, loadSkillsContext, scanSkills } from '../core/skills.js';
+import { formatSkillsForPrompt, initDefaultSkills, loadSkillsContext, scanSkills, defaultSkillsDir, type SkillDef } from '../core/skills.js';
+import type { TieredGateResult } from '../core/verification/tieredGate.js';
 import { detectPlanOptionSelection } from '../core/plan.js';
 import { saveHostState, type HostState } from '../core/state/hostState.js';
 import type { ScopeAmendmentManager } from '../core/approval/scopeAmendment.js';
@@ -323,6 +325,29 @@ export class Agent {
     return this.scopeAmendmentManager;
   }
 
+  /**
+   * Verifier Tier 0 (temuan audit v2.2.0 #4) — diikat dari SecurityPipeline
+   * (`pipeline.verifyTier0`) di index.ts; `null` bila pipeline tidak ada
+   * (mis. test tanpa bootstrap) → verifikasi dilewati diam-diam.
+   * Diwariskan ke subagent lewat ToolDeps agar turn subagent juga
+   * terverifikasi.
+   */
+  private tier0Verifier: ((changedFiles: string[]) => Promise<TieredGateResult>) | null = null;
+
+  setTier0Verifier(verifier: ((changedFiles: string[]) => Promise<TieredGateResult>) | null): void {
+    this.tier0Verifier = verifier;
+  }
+
+  getTier0Verifier(): ((changedFiles: string[]) => Promise<TieredGateResult>) | null {
+    return this.tier0Verifier;
+  }
+
+  /** Berkas yang dimutasi pada turn yang sedang berjalan (untuk Tier 0). */
+  private turnChangedFiles = new Set<string>();
+
+  /** Tanda tangan daftar skill yang terakhir kali di-log (anti-spam). */
+  private loggedSkillsSignature: string | null = null;
+
   /** Persist the host mode and its scope before allowing the next tool call. */
   async setPlanMode(on: boolean, options: { userAuthorized?: boolean } = {}): Promise<void> {
     if (this.hostState) {
@@ -471,6 +496,96 @@ export class Agent {
   }
 
   /**
+   * Log skill yang dibaca — sekali per daftar skill (permintaan Beverly:
+   * sebelumnya tidak ada jejak apakah agent membaca skill terlebih dahulu).
+   * `systemPrompt()` dirakit ulang tiap giliran, jadi log di-gate oleh tanda
+   * tangan (nama skill + jumlah karakter yang disuntik); baris baru hanya
+   * muncul bila daftarnya berubah. Format:
+   *   🟢 Skills aktif (3): anti-slop (lokal), anti-hallucination (lokal), x (global) — 1234 karakter instruksi disuntik ke system prompt
+   */
+  private logActiveSkillsOnce(ws: string, skills: SkillDef[], injectedChars: number): void {
+    const localDir = defaultSkillsDir(ws);
+    const signature = `${skills.map((s) => s.name).join(',')}|${injectedChars}`;
+    if (signature === this.loggedSkillsSignature) return;
+    this.loggedSkillsSignature = signature;
+    if (skills.length === 0) {
+      console.log('🟢 Skills aktif (0): tidak ada skill — system prompt tanpa instruksi skill');
+      return;
+    }
+    const parts = skills.map((s) => {
+      const origin = s.filePath && s.filePath.startsWith(localDir) ? 'lokal' : 'global';
+      return `${s.name} (${origin})`;
+    });
+    console.log(
+      `🟢 Skills aktif (${skills.length}): ${parts.join(', ')} — ${injectedChars} karakter instruksi disuntik ke system prompt`,
+    );
+  }
+
+  /**
+   * Verifikasi Tier 0 di akhir turn (temuan audit v2.2.0 #4): bila turn ini
+   * memutasi berkas dan verifier terikat, jalankan gate sekali. Hasil
+   * `skipped` tidak mengubah jawaban (gate tidak berlaku). Bila gate
+   * GAGAL, satu baris terminal dicetak dan catatan fail-closed ditempel ke
+   * jawaban — sehingga user DAN model (lewat history turn berikutnya)
+   * sama-sama melihat bahwa turn ini belum terverifikasi. Verifier sendiri
+   * tidak pernah melempar (pipeline mengembalikan TIER0_GATE_ERROR);
+   * kalaupun ada yang lolos, turn tetap jalan — gate ini verifikasi,
+   * bukan pencegah.
+   */
+  private async verifyTurnTier0(answer: string): Promise<string> {
+    if (this.turnChangedFiles.size === 0 || !this.tier0Verifier) return answer;
+    const changedFiles = [...this.turnChangedFiles];
+    let result: TieredGateResult;
+    try {
+      result = await this.tier0Verifier(changedFiles);
+    } catch {
+      result = { allowed: false, reason: 'TIER0_GATE_ERROR' };
+    }
+    if (result.skipped) return answer;
+    if (result.allowed) {
+      console.log(green(`✓ Verifikasi Tier 0 lolos (${changedFiles.length} berkas diubah)`));
+      return answer;
+    }
+    console.log(
+      yellow(
+        `⛔ Verifikasi Tier 0 GAGAL: ${result.reason} (${changedFiles.length} berkas diubah) — perubahan TIDAK terverifikasi, periksa sebelum melanjutkan.`,
+      ),
+    );
+    return (
+      `${answer}\n\n[Verifikasi Tier 0 GAGAL: ${result.reason} — perubahan pada ${changedFiles.length} berkas di turn ini belum lolos typecheck/review. Perbaiki dulu sebelum melanjutkan.]`
+    );
+  }
+
+  /** Berkas yang diubah oleh satu tool call mutasi (untuk Tier 0). */
+  private static changedFilesOfCall(call: ToolCall): string[] {
+    const pick = (...values: unknown[]): string | null => {
+      for (const v of values) {
+        if (typeof v === 'string' && v.trim()) return v.trim();
+      }
+      return null;
+    };
+    switch (call.tool) {
+      case 'write_file':
+      case 'edit_file':
+      case 'patch_file':
+      case 'delete_file': {
+        const f = pick(call.path, call.file);
+        return f ? [f] : [];
+      }
+      case 'move_file': {
+        const from = pick(call.source, call.from, call.path);
+        const to = pick(call.target, call.to, call.destination);
+        return [from, to].filter((x): x is string => x !== null);
+      }
+      case 'revert_file': {
+        const f = pick(call.path, call.file, call.target);
+        return f ? [f] : [];
+      }
+      default:
+        return [];
+    }
+  }
+  /**
    * Layered system prompt: identity + tools + role + environment (OS/shell) +
    * AGENT.md + mode (§4) + memory + skills.
    *
@@ -485,6 +600,7 @@ export class Agent {
     const skills = scanSkills(ws, { includeGlobal: true });
     const availableSkillsXml = formatSkillsForPrompt(skills);
     const skillsInstructions = loadSkillsContext(skills);
+    this.logActiveSkillsOnce(ws, skills, skillsInstructions.length);
     const combinedSkills = [availableSkillsXml, skillsInstructions].filter(Boolean).join('\n\n');
     const envProfile = getEnvProfile();
 
@@ -513,6 +629,7 @@ export class Agent {
   async handleInstruction(instruction: string, signal?: AbortSignal): Promise<string> {
     const startTime = Date.now();
     this.callCounts.clear();
+    this.turnChangedFiles.clear();
     this.lastCallSignature = null;
     this.consecutiveRepeatCount = 0;
     this.lastUsage = null;
@@ -533,9 +650,13 @@ export class Agent {
     }
 
     try {
-      return await (this.llmProvider.isConfigured
+      const answer = await (this.llmProvider.isConfigured
         ? this.runWithLlm(instruction, signal)
         : this.runManual(instruction));
+      // Verifikasi Tier 0 di akhir turn (temuan audit v2.2.0 #4) — hanya
+      // berjalan bila turn ini memutasi berkas; tanpa verifier terikat,
+      // jawaban dikembalikan apa adanya.
+      return await this.verifyTurnTier0(answer);
     } finally {
       const elapsed = Date.now() - startTime;
       this.sessionUsage.activeWorkingMs += elapsed;
@@ -966,6 +1087,7 @@ export class Agent {
         for (const call of calls) {
           if (MUTATING_TOOLS.has(call.tool)) {
             executedMutatingTools.add(call.tool);
+            for (const f of Agent.changedFilesOfCall(call)) this.turnChangedFiles.add(f);
           }
         }
 
@@ -1171,6 +1293,7 @@ export class Agent {
               activityTray: this.activityTray,
               hostState: this.hostState ?? undefined,
               scopeAmendmentManager: this.scopeAmendmentManager ?? undefined,
+              tier0Verifier: this.tier0Verifier ?? undefined,
             });
           } finally {
             const toolElapsedMs = Date.now() - toolStart;

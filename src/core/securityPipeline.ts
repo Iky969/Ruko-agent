@@ -18,6 +18,8 @@ import { FileLock } from './state/fileLock.js';
 import { HostState, loadHostState } from './state/hostState.js';
 import { ScopeAmendmentManager, type HostStateMutator } from './approval/scopeAmendment.js';
 import { evaluateDispatcherGate, DispatcherGateDecision } from './dispatcher/dispatcherGate.js';
+import { TieredGate, hasLockfileChange, type TieredGateResult } from './verification/tieredGate.js';
+import { resolveTscJsPath } from './executor/resourceGovernor.js';
 
 export interface SecurityPipelineOptions {
   sessionId?: string;
@@ -41,6 +43,33 @@ export interface SecurityPipeline {
     args?: Record<string, any>,
     isInteractive?: boolean,
   ) => Promise<DispatcherGateDecision>;
+  /**
+   * Verifikasi Tier 0 (temuan audit v2.2.0 #4): menjalankan TieredGate
+   * terhadap berkas yang diubah agent pada satu turn — lockfile check +
+   * typecheck `tsc --noEmit` fail-closed (TC-GOV-03/TC-GOV-04).
+   *
+   * Gate ini TIDAK dipanggil per tool call (tsc bisa makan 45 detik);
+   * Agent memanggilnya sekali di akhir turn yang memutasi berkas.
+   *
+   * Skip (allowed: true, skipped: true) bila tidak ada yang relevan
+   * diverifikasi: tidak ada perubahan lockfile, tidak ada perubahan kode
+   * TS/JS, dan tidak ada compiler TypeScript yang terdeteksi. Skip BUKAN
+   * lolos typecheck — alasan skip selalu tercatat di `reason`.
+   */
+  verifyTier0: (changedFiles: string[]) => Promise<TieredGateResult>;
+}
+
+/** Ekstensi berkas yang hasil typecheck-nya dipengaruhi perubahannya. */
+const TIER0_CODE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.cjs'];
+
+/** `true` bila perubahan ini layak menjalankan Tier 0 (kode TS/JS / tsconfig). */
+export function isTier0RelevantChange(changedFiles: string[]): boolean {
+  return changedFiles.some((f) => {
+    const base = f.split(/[\\/]/).pop() ?? f;
+    if (base === 'tsconfig.json' || /^tsconfig\..*\.json$/.test(base)) return true;
+    const lower = f.toLowerCase();
+    return TIER0_CODE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+  });
 }
 
 /** Direktori state host: ~/.ruko/sessions (dapat dioverride untuk test). */
@@ -126,6 +155,29 @@ export async function bootstrapSecurityPipeline(
           isInteractive: isInteractive ?? (options.isTTY ?? process.stdin.isTTY),
           workspaceRoot: wsRoot,
         });
+      },
+      // Tier 0 — temuan audit v2.2.0 #4 (TieredGate sebelumnya hanya hidup
+      // di test). Fail-closed: segala error saat evaluasi = tidak diizinkan.
+      verifyTier0: async (changedFiles) => {
+        try {
+          // Perubahan lockfile selalu dievaluasi (gate menolaknya sebelum
+          // menyentuh tsc) — tidak peduli ada/tidaknya compiler.
+          if (hasLockfileChange(changedFiles)) {
+            return await new TieredGate(changedFiles, wsRoot).evaluate();
+          }
+          // Bukan perubahan kode TS/JS → tidak ada yang diverifikasi.
+          if (!isTier0RelevantChange(changedFiles)) {
+            return { allowed: true, reason: 'SKIPPED_NO_TS_CHANGES', skipped: true };
+          }
+          // Tidak ada compiler yang terdeteksi → gate tidak berlaku di
+          // workspace ini (bukan proyek TypeScript); bukan kegagalan.
+          if (!resolveTscJsPath(wsRoot)) {
+            return { allowed: true, reason: 'SKIPPED_NO_TYPESCRIPT', skipped: true };
+          }
+          return await new TieredGate(changedFiles, wsRoot).evaluate();
+        } catch {
+          return { allowed: false, reason: 'TIER0_GATE_ERROR' };
+        }
       },
     };
 

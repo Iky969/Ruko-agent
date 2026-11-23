@@ -23,6 +23,22 @@ import { runCompilerGate } from '../executor/resourceGovernor.js';
 export interface TieredGateResult {
   allowed: boolean;
   reason: string;
+  /**
+   * `true` bila gate TIDAK berlaku untuk perubahan ini (mis. workspace bukan
+   * proyek TypeScript) sehingga `allowed: true` bukan berarti "lolos
+   * typecheck" — melainkan "tidak ada yang perlu diverifikasi". Pemanggil
+   * (securityPipeline) yang memutuskan skip; TieredGate sendiri tidak
+   * pernah mengembalikan `skipped`.
+   */
+  skipped?: boolean;
+}
+
+/** Nama lockfile yang perubahannya wajib review manual (TC-GOV-03). */
+const LOCKFILE_NAMES = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb'];
+
+/** `true` bila salah satu berkas yang diubah adalah lockfile. */
+export function hasLockfileChange(changedFiles: string[]): boolean {
+  return changedFiles.some((f) => LOCKFILE_NAMES.some((name) => f.includes(name)));
 }
 
 export class TieredGate {
@@ -41,14 +57,7 @@ export class TieredGate {
   }
 
   async evaluate(): Promise<TieredGateResult> {
-    const hasLockfileChange = this.changedFiles.some(
-      (f) =>
-        f.includes('package-lock.json') ||
-        f.includes('pnpm-lock.yaml') ||
-        f.includes('yarn.lock') ||
-        f.includes('bun.lockb'),
-    );
-    if (hasLockfileChange) {
+    if (hasLockfileChange(this.changedFiles)) {
       return {
         allowed: false,
         reason: 'LOCKFILE_MODIFICATION_REQUIRES_MANUAL_REVIEW',
