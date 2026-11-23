@@ -1865,7 +1865,18 @@ export class ReasoningPanel {
       this.printedLines += 1;
     }
     if (partial.trim()) {
-      this.writeLive(`    ${gray(partial)}`);
+      // Thought-render fix: the live partial line is clamped to ONE terminal
+      // line (tail + '…' prefix, mirroring ThinkingTicker). The old code
+      // rewrote the raw partial with '\r\u001b[2K', which only erases one
+      // terminal row — a long partial wrapping over several rows left stale
+      // copies of the same paragraph on screen (seen 14x in 80-col emulation).
+      const cols = this.options.width?.() ?? terminalWidth();
+      const cleaned = partial.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+      const maxSnippet = Math.max(10, cols - 1 - 4 - 1);
+      const snippet =
+        cleaned.length > maxSnippet ? `…${cleaned.slice(-maxSnippet).trimStart()}` : cleaned;
+      const clamped = truncateVisible(`    ${gray(snippet)}`, Math.max(10, cols - 2));
+      this.writeLive(clamped);
       this.partialShown = true;
       this.lastPartialShown = partial;
       this.renderedOnce = true;

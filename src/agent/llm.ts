@@ -228,6 +228,14 @@ export interface LLMProvider {
   testConnection?(): Promise<ConnectionResult>;
   /** Model ids from the endpoint's /models listing (empty when unsupported). */
   listModels?(): Promise<string[]>;
+  /**
+   * Empirical detection of visible native reasoning text from this provider /
+   * model: `true` = the provider returns visible reasoning, `false` = proven
+   * not to (authoritative metadata only), `null` = unknown. NEVER inferred
+   * from the model or provider name — only from what the backend actually
+   * returns (metadata or a real stream).
+   */
+  detectVisibleReasoning?(): Promise<boolean | null>;
   chat(messages: ContextMessage[], options?: ChatOptions): Promise<string>;
 }
 
@@ -427,6 +435,8 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   /** True setelah endpoint menolak `reasoning_effort` (Fase 2: fallback prompt injection). */
   private reasoningParamUnsupported = false;
   private reasoningFallbackLog = new ReasoningFallbackLog();
+  /** Memoized detectVisibleReasoning result, keyed by model. */
+  private visibleReasoningCache: { model: string; result: boolean | null } | null = null;
 
   constructor(cfg: Partial<AgentConfig> = {}, retry: RetryOptions = {}) {
     const rawKey = cfg.apiKey ?? process.env.OPENAI_API_KEY ?? '';
@@ -473,6 +483,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   setModel(model: string): void {
     const clean = model.trim().replace(/^["'`]+|["'`]+$/g, '').trim();
     this.currentModel = clean || this.currentModel;
+    this.visibleReasoningCache = null;
   }
 
   setCredentials(apiKey: string, baseUrl: string): void {
@@ -480,6 +491,59 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     const cleanBase = baseUrl.trim().replace(/^["'`]+|["'`]+$/g, '').trim().replace(/\/+$/, '');
     if (cleanKey) this.apiKey = cleanKey;
     if (cleanBase) this.baseUrl = cleanBase;
+    this.visibleReasoningCache = null;
+  }
+
+  /**
+   * Empirical native-reasoning detection for Ollama / OpenAI-compatible
+   * backends, from Ollama `/api/tags` capabilities only — no chat probe
+   * at session start (a probe would burn tokens/latency and can shift
+   * scripted server responses). Model listed + capability `thinking` →
+   * true; listed without it → false; unlisted / tags 404 / fetch fails →
+   * null (unknown — the adaptive latch in agent.ts decides from the first
+   * real turn instead).
+   */
+  async detectVisibleReasoning(): Promise<boolean | null> {
+    if (
+      this.visibleReasoningCache &&
+      this.visibleReasoningCache.model === this.currentModel
+    ) {
+      return this.visibleReasoningCache.result;
+    }
+    let result: boolean | null = null;
+    try {
+      let origin: string;
+      try {
+        origin = new URL(this.baseUrl).origin;
+      } catch {
+        origin = this.baseUrl;
+      }
+      const response = await fetch(`${origin}/api/tags`, {
+        headers: this.authHeaders(),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (response.ok) {
+        const data = (await response.json()) as {
+          models?: Array<{ name?: string; capabilities?: string[] }>;
+        };
+        const norm = (n: string): string => n.split(':')[0].toLowerCase();
+        const wanted = this.currentModel.toLowerCase();
+        const entry = (data.models ?? []).find(
+          (m) =>
+            m.name &&
+            (m.name.toLowerCase() === wanted || norm(m.name) === norm(this.currentModel)),
+        );
+        if (entry) {
+          result = (entry.capabilities ?? []).some(
+            (c) => c.toLowerCase() === 'thinking',
+          );
+        }
+      }
+    } catch {
+      result = null;
+    }
+    this.visibleReasoningCache = { model: this.currentModel, result };
+    return result;
   }
 
   private authHeaders(): Record<string, string> {
@@ -887,6 +951,11 @@ export class AnthropicProvider implements LLMProvider {
     }
   }
 
+  /** Anthropic thinking blocks are always visible reasoning text. */
+  async detectVisibleReasoning(): Promise<boolean | null> {
+    return true;
+  }
+
   private authHeaders(): Record<string, string> {
     return {
       'Content-Type': 'application/json',
@@ -1187,6 +1256,11 @@ export class GeminiProvider implements LLMProvider {
     if (baseUrl !== undefined) {
       this.baseUrl = sanitizeGeminiBaseUrl(baseUrl);
     }
+  }
+
+  /** Gemini thought parts are visible reasoning text. */
+  async detectVisibleReasoning(): Promise<boolean | null> {
+    return true;
   }
 
   private authHeaders(): Record<string, string> {

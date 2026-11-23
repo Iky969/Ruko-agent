@@ -77,6 +77,20 @@ test('Episode counting: 4 thought berturut-turut tanpa tool call = 1 episode, TI
 test('Circuit breaker: Jeda minimum (500ms) diterapkan sebelum giliran berikutnya saat turn thought-only', async () => {
   const origDelay = process.env.RUKO_THOUGHT_LOOP_DELAY_MS;
   delete process.env.RUKO_THOUGHT_LOOP_DELAY_MS; // Memastikan menggunakan jeda default 500ms
+  // Invariant, bukan wall-clock: di runner Windows yang lambat sekalipun,
+  // total elapsed bisa meleset — yang dijamin adalah (a) setiap jeda yang
+  // dijadwalkan agent berada di [400,600]ms, dan (b) jeda antar chat-call
+  // tidak pernah di bawah 300ms. Patch setTimeout untuk mencatat delay.
+  const origSetTimeout = globalThis.setTimeout;
+  const scheduledDelays: number[] = [];
+  (globalThis as unknown as { setTimeout: typeof setTimeout }).setTimeout = (((
+    cb: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ) => {
+    if (typeof ms === 'number') scheduledDelays.push(ms);
+    return origSetTimeout(cb, ms, ...args);
+  }) as unknown) as typeof setTimeout;
   try {
     const thoughtOnly = '<thought>menghitung algoritma tanpa eksekusi tool...</thought>';
     const provider = new MockSequenceProvider([
@@ -84,27 +98,41 @@ test('Circuit breaker: Jeda minimum (500ms) diterapkan sebelum giliran berikutny
       thoughtOnly,
       thoughtOnly,
       thoughtOnly,
+      thoughtOnly,
     ]);
+    const chatCallTimes: number[] = [];
+    const origChat = provider.chat.bind(provider);
+    provider.chat = (async (messages: ContextMessage[], options?: ChatOptions) => {
+      chatCallTimes.push(Date.now());
+      return origChat(messages, options);
+    }) as typeof provider.chat;
 
-    // 4 giliran = 1 episode: breaker tidak menendang, run berakhir di
-    // batas iterasi setelah 4 jeda (4 x 500ms = 2000ms minimum).
-    const config = { ...DEFAULT_CONFIG, maxToolIterations: 4 };
+    // 5 giliran = 1 episode: breaker tidak menendang, run berakhir di
+    // batas iterasi setelah 4+ jeda thought-only.
+    const config = { ...DEFAULT_CONFIG, maxToolIterations: 5 };
     const ctx = new Context(config);
     const agent = new Agent(ctx, provider, config);
 
-    const startTime = Date.now();
     const result = await agent.handleInstruction('proses data berat');
-    const elapsedMs = Date.now() - startTime;
 
     assert.ok(
       result.includes('reached max tool iterations'),
       'Satu episode berakhir di batas iterasi, bukan breaker',
     );
+    const thoughtDelays = scheduledDelays.filter((d) => d >= 400 && d <= 600);
     assert.ok(
-      elapsedMs >= 1800,
-      `Harus ada jeda minimum 500ms per turn thought-only (elapsed: ${elapsedMs}ms)`,
+      thoughtDelays.length >= 4,
+      `Harus ada >=4 jeda thought-only di [400,600]ms (ditemukan ${thoughtDelays.length} dari ${scheduledDelays.length} delay terjadwal: ${scheduledDelays.join(',')})`,
     );
+    for (let i = 1; i < chatCallTimes.length; i += 1) {
+      const gap = chatCallTimes[i] - chatCallTimes[i - 1];
+      assert.ok(
+        gap >= 300,
+        `Jeda antar chat-call ke-${i} harus >=300ms (aktual: ${gap}ms)`,
+      );
+    }
   } finally {
+    (globalThis as unknown as { setTimeout: typeof setTimeout }).setTimeout = origSetTimeout;
     if (origDelay !== undefined) {
       process.env.RUKO_THOUGHT_LOOP_DELAY_MS = origDelay;
     } else {
